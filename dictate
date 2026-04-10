@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+ROOT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+BIN="$ROOT_DIR/target/release/dictate"
+
+# Sensible local defaults for Parakeet python worker.
+if [[ -z "${ISPY_PYTHON_BIN:-}" && -x "$ROOT_DIR/.venv/bin/python" ]]; then
+  export ISPY_PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+fi
+if [[ -z "${ISPY_PARAKEET_SCRIPT:-}" && -f "$ROOT_DIR/scripts/parakeet_transcribe.py" ]]; then
+  export ISPY_PARAKEET_SCRIPT="$ROOT_DIR/scripts/parakeet_transcribe.py"
+fi
+
+if [[ ! -x "$BIN" ]]; then
+  echo "[ispy] Building Rust binary (first run)..." >&2
+  (cd "$ROOT_DIR" && cargo build --release >/dev/null)
+fi
+
+exec "$BIN" "$@"
