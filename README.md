@@ -5,7 +5,7 @@ Minimal local dictation CLI for macOS.
 Workflow:
 
 1. `dictate start`
-2. Take screenshots normally (`Cmd+Shift+4`, etc.)
+2. Take screenshots with `dictate shot` (recommended) or normal `Cmd+Shift+4`
 3. `dictate stop`
 
 On `stop`, ispy:
@@ -108,7 +108,22 @@ dictate start
 
 Flags:
 - `--screenshot-dir <path>` override screenshot source dir
-- `--audio-device :0` ffmpeg avfoundation selector (default `:0`)
+- `--audio-device <selector>` ffmpeg avfoundation selector (default `auto`, prefers built-in Mac mic and avoids iPhone/Continuity)
+
+You can also set a fixed selector:
+
+```bash
+export ISPY_AUDIO_DEVICE=":1"
+```
+
+### Shot (capture directly into active session)
+
+```bash
+dictate shot
+```
+
+Uses macOS `screencapture -i` and writes directly to the active session's `screenshots/` folder.
+This avoids delayed Desktop screenshot writes and floating thumbnail timing issues.
 
 ### Stop
 
@@ -214,6 +229,7 @@ dictate --json status
 
 Map hotkeys to:
 - `dictate start`
+- `dictate shot`
 - `dictate stop`
 
 Use Raycast, Alfred, Hammerspoon, Keyboard Maestro, etc.

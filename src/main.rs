@@ -2,6 +2,7 @@ use chrono::{DateTime, Datelike, Local, NaiveDateTime, SecondsFormat, Timelike, 
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
@@ -41,6 +42,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Start(StartArgs),
+    Shot,
     Stop(StopArgs),
     Status,
     Last(LastArgs),
@@ -55,7 +57,7 @@ struct StartArgs {
     #[arg(long)]
     screenshot_dir: Option<PathBuf>,
 
-    #[arg(long, default_value = ":0")]
+    #[arg(long, default_value = "auto")]
     audio_device: String,
 }
 
@@ -255,6 +257,113 @@ fn command_exists(cmd: &str) -> bool {
     env::var_os("PATH")
         .map(|paths| env::split_paths(&paths).any(|p| p.join(cmd).exists()))
         .unwrap_or(false)
+}
+
+fn parse_avfoundation_audio_devices(raw: &str) -> Vec<(String, String)> {
+    let mut devices = Vec::new();
+    let mut in_audio_section = false;
+
+    for line in raw.lines() {
+        let l = line.trim();
+        if l.contains("AVFoundation audio devices") {
+            in_audio_section = true;
+            continue;
+        }
+        if l.contains("AVFoundation video devices") {
+            in_audio_section = false;
+            continue;
+        }
+        if !in_audio_section {
+            continue;
+        }
+
+        let Some(open) = l.rfind('[') else {
+            continue;
+        };
+        let rest = &l[open + 1..];
+        let Some(close_rel) = rest.find(']') else {
+            continue;
+        };
+
+        let idx = rest[..close_rel].trim();
+        if idx.is_empty() || !idx.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+
+        let name = rest[close_rel + 1..].trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        devices.push((idx.to_string(), name.to_string()));
+    }
+
+    devices
+}
+
+fn list_avfoundation_audio_devices() -> Vec<(String, String)> {
+    if !command_exists("ffmpeg") {
+        return Vec::new();
+    }
+
+    let out = match Command::new("ffmpeg")
+        .args(["-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+
+    let merged = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    parse_avfoundation_audio_devices(&merged)
+}
+
+fn contains_any(name_lc: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|t| name_lc.contains(t))
+}
+
+fn resolve_audio_device(requested: &str, cli: &Cli) -> String {
+    if !requested.eq_ignore_ascii_case("auto") {
+        return requested.to_string();
+    }
+
+    let devices = list_avfoundation_audio_devices();
+    if devices.is_empty() {
+        print_verbose(
+            cli,
+            "Could not auto-detect macOS audio devices; falling back to :0",
+        );
+        return ":0".to_string();
+    }
+
+    let avoid = ["iphone", "continuity"];
+    let built_in = ["macbook", "built-in", "internal"];
+
+    let preferred = devices
+        .iter()
+        .find(|(_, name)| {
+            let lc = name.to_ascii_lowercase();
+            contains_any(&lc, &built_in) && !contains_any(&lc, &avoid)
+        })
+        .or_else(|| {
+            devices.iter().find(|(_, name)| {
+                let lc = name.to_ascii_lowercase();
+                !contains_any(&lc, &avoid)
+            })
+        })
+        .unwrap_or(&devices[0]);
+
+    let resolved = format!(":{}", preferred.0);
+    print_verbose(
+        cli,
+        format!("Auto-selected audio device {} ({})", resolved, preferred.1),
+    );
+    resolved
 }
 
 fn detect_screenshot_dir(explicit: Option<&Path>, cli: &Cli) -> Result<PathBuf, AppError> {
@@ -511,6 +620,14 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     let started_epoch = unix_now();
     let started_iso = now_iso();
 
+    let requested_audio_device = if args.audio_device.eq_ignore_ascii_case("auto") {
+        env::var("ISPY_AUDIO_DEVICE").unwrap_or_else(|_| args.audio_device.clone())
+    } else {
+        args.audio_device.clone()
+    };
+
+    let resolved_audio_device = resolve_audio_device(&requested_audio_device, cli);
+
     if cli.dry_run {
         print_out(
             cli,
@@ -519,11 +636,12 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         print_out(
             cli,
             format!(
-                "[dry-run] Planned session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}",
+                "[dry-run] Planned session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}",
                 session_id,
                 session_dir.display(),
                 audio_path.display(),
-                screenshot_dir.display()
+                screenshot_dir.display(),
+                resolved_audio_device,
             ),
         );
         emit_json(
@@ -535,6 +653,7 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
                 "session_dir": session_dir,
                 "audio_path": audio_path,
                 "screenshot_source_dir": screenshot_dir,
+                "audio_device": resolved_audio_device,
                 "ffmpeg_pid": Value::Null,
                 "dry_run": true,
                 "state_saved": false
@@ -567,7 +686,7 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         ));
     }
 
-    let record_cmd = build_record_cmd(&audio_path, &args.audio_device);
+    let record_cmd = build_record_cmd(&audio_path, &resolved_audio_device);
     let ffmpeg_pid = spawn_recorder(&record_cmd, &ffmpeg_log_path, cli)?;
 
     let state = SessionState {
@@ -581,7 +700,7 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         started_at_iso: started_iso,
         started_at_epoch: started_epoch,
         screenshot_source_dir: screenshot_dir.display().to_string(),
-        audio_device: args.audio_device.clone(),
+        audio_device: resolved_audio_device.clone(),
     };
 
     save_active_state(&state)?;
@@ -589,11 +708,12 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     print_out(
         cli,
         format!(
-            "Started session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}",
+            "Started session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}",
             session_id,
             session_dir.display(),
             audio_path.display(),
-            screenshot_dir.display()
+            screenshot_dir.display(),
+            resolved_audio_device,
         ),
     );
 
@@ -606,9 +726,120 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "session_dir": session_dir,
             "audio_path": audio_path,
             "screenshot_source_dir": screenshot_dir,
+            "audio_device": resolved_audio_device,
             "ffmpeg_pid": ffmpeg_pid,
             "dry_run": false,
             "state_saved": true
+        }),
+    );
+
+    Ok(0)
+}
+
+fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
+    ensure_dirs()?;
+    let state = load_active_state()?;
+
+    let screenshots_dir = PathBuf::from(&state.screenshots_dir);
+    let events_path = PathBuf::from(&state.events_path);
+
+    fs::create_dir_all(&screenshots_dir).map_err(|e| {
+        app_error(
+            1,
+            format!("Failed to create {}: {e}", screenshots_dir.display()),
+        )
+    })?;
+
+    let events = read_jsonl_values(&events_path);
+    let existing_shots = shots_from_events(&events);
+    let shot_id = max_shot_id(&existing_shots) + 1;
+
+    let dest_name = format!("shot-{shot_id:03}.png");
+    let dest_rel = format!("screenshots/{dest_name}");
+    let dest_abs = screenshots_dir.join(&dest_name);
+
+    if cli.dry_run {
+        print_out(
+            cli,
+            format!(
+                "[dry-run] Would capture screenshot to {}",
+                dest_abs.display()
+            ),
+        );
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "shot",
+                "session_id": state.session_id,
+                "id": shot_id,
+                "dest": dest_abs,
+                "dry_run": true,
+            }),
+        );
+        return Ok(0);
+    }
+
+    let status = Command::new("screencapture")
+        .args(["-i", "-x"])
+        .arg(&dest_abs)
+        .status()
+        .map_err(|e| app_error(1, format!("Failed to run screencapture: {e}")))?;
+
+    if !status.success() {
+        if status.code() == Some(1) {
+            return Err(app_error(9, "Screenshot canceled."));
+        }
+        return Err(app_error(
+            1,
+            format!("screencapture failed with status: {status}"),
+        ));
+    }
+
+    if !dest_abs.exists() {
+        return Err(app_error(
+            1,
+            format!("Screenshot did not produce file: {}", dest_abs.display()),
+        ));
+    }
+
+    let mtime = file_mtime_epoch(&dest_abs).unwrap_or_else(unix_now);
+    let audio_sec = (mtime - state.started_at_epoch).max(0.0);
+
+    append_jsonl(
+        &events_path,
+        &json!({
+            "ts": now_iso(),
+            "type": "screenshot_taken",
+            "id": shot_id,
+            "dest": dest_rel,
+            "dest_abs": dest_abs,
+            "audioSec": round3(audio_sec),
+            "mtime_epoch": round3(mtime),
+            "method": "direct_screencapture",
+        }),
+    )?;
+
+    print_out(
+        cli,
+        format!(
+            "Captured screenshot {}\npath: {}",
+            shot_id,
+            dest_abs.display()
+        ),
+    );
+
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": "shot",
+            "session_id": state.session_id,
+            "id": shot_id,
+            "dest": dest_abs,
+            "dest_rel": dest_rel,
+            "audioSec": round3(audio_sec),
+            "dry_run": false,
         }),
     );
 
@@ -708,13 +939,14 @@ fn move_session_screenshots(
     started_epoch: f64,
     ended_epoch: f64,
     events_path: &Path,
+    start_index: usize,
     cli: &Cli,
 ) -> Result<Vec<ShotMeta>, AppError> {
     let mut out = Vec::new();
     let shots = find_session_screenshots(source_dir, started_epoch, ended_epoch);
 
     for (index, (source, mtime)) in shots.into_iter().enumerate() {
-        let shot_id = index + 1;
+        let shot_id = start_index + index + 1;
         let ext = source
             .extension()
             .and_then(|e| e.to_str())
@@ -1400,21 +1632,49 @@ fn build_html_note(
     )
 }
 
-fn load_shots_for_session(session_dir: &Path, events: &[Value]) -> Vec<ShotMeta> {
-    let mut shots = events
-        .iter()
-        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("screenshot_moved"))
-        .filter_map(|e| {
-            let id = e.get("id")?.as_u64()? as usize;
-            let dest = e.get("dest")?.as_str()?.to_string();
-            let audio_sec = e.get("audioSec").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            Some(ShotMeta {
+fn shots_from_events(events: &[Value]) -> Vec<ShotMeta> {
+    let mut by_id: BTreeMap<usize, ShotMeta> = BTreeMap::new();
+
+    for event in events {
+        let etype = event
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if etype != "screenshot_moved" && etype != "screenshot_taken" {
+            continue;
+        }
+
+        let Some(id) = event.get("id").and_then(|v| v.as_u64()).map(|v| v as usize) else {
+            continue;
+        };
+        let Some(dest) = event.get("dest").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let audio_sec = event
+            .get("audioSec")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        by_id.insert(
+            id,
+            ShotMeta {
                 shot_id: id,
-                dest_rel_path: dest,
+                dest_rel_path: dest.to_string(),
                 audio_sec,
-            })
-        })
-        .collect::<Vec<_>>();
+            },
+        );
+    }
+
+    by_id.into_values().collect()
+}
+
+fn max_shot_id(shots: &[ShotMeta]) -> usize {
+    shots.iter().map(|s| s.shot_id).max().unwrap_or(0)
+}
+
+fn load_shots_for_session(session_dir: &Path, events: &[Value]) -> Vec<ShotMeta> {
+    let mut shots = shots_from_events(events);
 
     if shots.is_empty() {
         let screenshots_dir = session_dir.join("screenshots");
@@ -1548,14 +1808,20 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         ));
     }
 
-    let shots = move_session_screenshots(
+    let prior_events = read_jsonl_values(&events_path);
+    let mut shots = load_shots_for_session(&session_dir, &prior_events);
+    let moved_shots = move_session_screenshots(
         &source_dir,
         &screenshots_dir,
         state.started_at_epoch,
         ended_epoch,
         &events_path,
+        max_shot_id(&shots),
         cli,
     )?;
+    let moved_count = moved_shots.len();
+    shots.extend(moved_shots);
+    shots.sort_by_key(|s| s.shot_id);
 
     let (transcript_raw, transcription_meta) = run_transcription(&state, &session_dir, args, cli);
     let audio_duration = get_audio_duration_sec(Path::new(&state.audio_path));
@@ -1614,6 +1880,7 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "type": "session_stopped",
                 "session_id": state.session_id,
                 "screenshots": shots.len(),
+                "screenshots_moved": moved_count,
                 "audio_duration_sec": audio_duration,
                 "note": note_path,
                 "html": html_path,
@@ -1639,9 +1906,10 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     print_out(
         cli,
         format!(
-            "Stopped session {}\nsession_dir: {}\nscreenshots_moved: {}\nnote: {}\nhtml: {}",
+            "Stopped session {}\nsession_dir: {}\nscreenshots_moved: {}\nscreenshots_total: {}\nnote: {}\nhtml: {}",
             state.session_id,
             session_dir.display(),
+            moved_count,
             shots.len(),
             note_path.display(),
             html_path.display()
@@ -1670,7 +1938,8 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "session_dir": session_dir,
             "note_path": note_path,
             "html_path": html_path,
-            "screenshots_moved": shots.len(),
+            "screenshots_moved": moved_count,
+            "screenshots_total": shots.len(),
             "transcription": transcription_meta,
             "dry_run": cli.dry_run,
         }),
@@ -2296,6 +2565,7 @@ fn cmd_last(cli: &Cli, args: &LastArgs) -> Result<i32, AppError> {
 fn run(cli: &Cli) -> Result<i32, AppError> {
     match &cli.command {
         Commands::Start(args) => cmd_start(cli, args),
+        Commands::Shot => cmd_shot(cli),
         Commands::Stop(args) => cmd_stop(cli, args),
         Commands::Status => cmd_status(cli),
         Commands::Last(args) => cmd_last(cli, args),
