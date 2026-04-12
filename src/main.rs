@@ -192,6 +192,14 @@ fn parakeet_server_pid_file() -> PathBuf {
     root_dir().join("parakeet-server.pid")
 }
 
+fn web_server_log_file() -> PathBuf {
+    root_dir().join("web-server.log")
+}
+
+fn web_server_pid_file() -> PathBuf {
+    root_dir().join("web-server.pid")
+}
+
 fn ensure_dirs() -> Result<(), AppError> {
     fs::create_dir_all(root_dir())
         .and_then(|_| fs::create_dir_all(sessions_dir()))
@@ -614,7 +622,7 @@ fn spawn_recorder(
         .spawn()
         .map_err(|e| app_error(6, format!("Failed to start ffmpeg recorder: {e}")))?;
 
-    let started = wait_for_process_start(&mut child, Duration::from_millis(1500))?;
+    let started = wait_for_process_start(&mut child, Duration::from_millis(300))?;
     if !started {
         let tail = read_tail(ffmpeg_log_path, 1200);
         return Err(app_error(
@@ -1281,6 +1289,197 @@ fn ensure_parakeet_server(
     );
 }
 
+fn web_server_enabled() -> bool {
+    env::var("ISPY_WEB_SERVER")
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn web_server_base_url() -> String {
+    env::var("ISPY_WEB_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8766".to_string())
+}
+
+fn web_server_idle_timeout_sec() -> u64 {
+    env::var("ISPY_WEB_SERVER_IDLE_TIMEOUT_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1800)
+}
+
+fn default_web_server_script() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(cwd) = env::current_dir() {
+        candidates.push(cwd.join("scripts/ispy_web_server.py"));
+    }
+
+    if let Ok(exe) = env::current_exe() {
+        let mut parent = exe.parent().map(|p| p.to_path_buf());
+        for _ in 0..5 {
+            if let Some(p) = parent.clone() {
+                candidates.push(p.join("scripts/ispy_web_server.py"));
+                parent = p.parent().map(|x| x.to_path_buf());
+            }
+        }
+    }
+
+    candidates.into_iter().find(|p| p.exists())
+}
+
+fn web_server_health_url(base: &str) -> String {
+    format!("{}/health", base.trim_end_matches('/'))
+}
+
+fn web_server_touch_url(base: &str) -> String {
+    format!("{}/touch", base.trim_end_matches('/'))
+}
+
+fn check_web_server_health(base_url: &str) -> bool {
+    if !command_exists("curl") {
+        return false;
+    }
+
+    let out = Command::new("curl")
+        .args(["-sS", "--max-time", "0.5", "--fail"])
+        .arg(web_server_health_url(base_url))
+        .output();
+
+    match out {
+        Ok(o) if o.status.success() => {
+            let body = String::from_utf8_lossy(&o.stdout).to_string();
+            body.contains("\"ok\": true") || body.contains("\"ok\":true")
+        }
+        _ => false,
+    }
+}
+
+fn touch_web_server(base_url: &str) -> bool {
+    if !command_exists("curl") {
+        return false;
+    }
+
+    let out = Command::new("curl")
+        .args(["-sS", "--max-time", "0.5", "--fail", "-X", "POST"])
+        .arg(web_server_touch_url(base_url))
+        .output();
+
+    match out {
+        Ok(o) if o.status.success() => true,
+        _ => false,
+    }
+}
+
+fn spawn_web_server(python_bin: &str, script_path: &Path, cli: &Cli) -> Result<(), AppError> {
+    let pid_file = web_server_pid_file();
+    if let Some(pid) = read_pid_file(&pid_file) {
+        if process_is_alive(pid) {
+            print_verbose(
+                cli,
+                format!("Web server process already running (pid={})", pid),
+            );
+            return Ok(());
+        }
+    }
+
+    let base_url = web_server_base_url();
+    let host_port = base_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let mut parts = host_port.split(':');
+    let host = parts.next().unwrap_or("127.0.0.1");
+    let port = parts.next().unwrap_or("8766");
+
+    let log_path = web_server_log_file();
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| app_error(1, format!("Failed to open {}: {e}", log_path.display())))?;
+    let log_file_err = log_file.try_clone().map_err(|e| {
+        app_error(
+            1,
+            format!("Failed to clone web server log file handle: {e}"),
+        )
+    })?;
+
+    print_verbose(
+        cli,
+        format!(
+            "Starting web server at {} (idle timeout {}s)",
+            base_url,
+            web_server_idle_timeout_sec()
+        ),
+    );
+
+    let child = Command::new(python_bin)
+        .arg(script_path)
+        .arg("--root")
+        .arg(root_dir())
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port)
+        .arg("--idle-timeout-sec")
+        .arg(web_server_idle_timeout_sec().to_string())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_err))
+        .spawn()
+        .map_err(|e| app_error(1, format!("Failed to start web server: {e}")))?;
+
+    write_pid_file(&pid_file, child.id() as i32);
+    Ok(())
+}
+
+fn ensure_web_server(cli: &Cli, wait_ready: bool) -> bool {
+    if !web_server_enabled() {
+        return false;
+    }
+
+    let base_url = web_server_base_url();
+    if check_web_server_health(&base_url) {
+        return true;
+    }
+
+    let python_bin = env::var("ISPY_PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
+    let Some(script_path) = env::var("ISPY_WEB_SERVER_SCRIPT")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(default_web_server_script)
+    else {
+        print_verbose(
+            cli,
+            "No web server script found; skipping auto web server startup.",
+        );
+        return false;
+    };
+
+    if spawn_web_server(&python_bin, &script_path, cli).is_err() {
+        return false;
+    }
+
+    if !wait_ready {
+        return false;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if check_web_server_health(&base_url) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    false
+}
+
 fn transcribe_via_parakeet_server(
     base_url: &str,
     audio_path: &Path,
@@ -1779,10 +1978,6 @@ fn html_escape(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn file_url(path: &Path) -> String {
-    format!("file://{}", path.display())
-}
-
 fn build_html_note(
     session_id: &str,
     started_iso: &str,
@@ -1808,15 +2003,15 @@ fn build_html_note(
     for shot in shots {
         let abs = session_dir.join(&shot.dest_rel_path);
         let abs_str = abs.display().to_string();
-        let url = file_url(&abs);
+        let rel_url = shot.dest_rel_path.clone();
         path_lines.push_str(&format!("Screenshot {}: {}\n", shot.shot_id, abs_str));
         gallery.push_str(&format!(
             r#"<figure class="card"><div class="card-head"><figcaption>Screenshot {}</figcaption><button class="btn small copy-image" data-url="{}" data-path="{}">Copy image</button></div><a href="{}" target="_blank" rel="noreferrer"><img src="{}" alt="Screenshot {}" loading="lazy" /></a><div class="path">{}</div></figure>"#,
             shot.shot_id,
-            html_escape(&url),
+            html_escape(&rel_url),
             html_escape(&abs_str),
-            html_escape(&url),
-            html_escape(&url),
+            html_escape(&rel_url),
+            html_escape(&rel_url),
             shot.shot_id,
             html_escape(&abs_str)
         ));
@@ -2126,6 +2321,7 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
 
     let mut stop_recorder_ms = 0.0;
     let mut write_ms = 0.0;
+    let mut web_server_ms = 0.0;
 
     if !cli.dry_run {
         append_jsonl(
@@ -2142,7 +2338,7 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         let t_stop_recorder = Instant::now();
         if let Some(pid) = state.ffmpeg_pid {
             stop_recorder(pid, cli)?;
-            thread::sleep(Duration::from_millis(400));
+            thread::sleep(Duration::from_millis(120));
         }
         stop_recorder_ms = t_stop_recorder.elapsed().as_secs_f64() * 1000.0;
     }
@@ -2262,6 +2458,10 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         clear_active_state()?;
 
         write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
+
+        let t_web = Instant::now();
+        let _ = ensure_web_server(cli, false);
+        web_server_ms = t_web.elapsed().as_secs_f64() * 1000.0;
     }
 
     let stop_total_ms = perf_total.elapsed().as_secs_f64() * 1000.0;
@@ -2275,7 +2475,8 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "move_screenshots_ms": round3(move_screenshots_ms),
             "transcribe_ms": round3(transcribe_ms),
             "render_ms": round3(render_ms),
-            "write_ms": round3(write_ms)
+            "write_ms": round3(write_ms),
+            "web_server_ms": round3(web_server_ms)
         },
         "transcription_method": transcription_meta.get("method").and_then(|v| v.as_str()),
         "transcription_status": transcription_meta.get("status").and_then(|v| v.as_str())
@@ -2325,7 +2526,8 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "move_screenshots_ms": round3(move_screenshots_ms),
                 "transcribe_ms": round3(transcribe_ms),
                 "render_ms": round3(render_ms),
-                "write_ms": round3(write_ms)
+                "write_ms": round3(write_ms),
+                "web_server_ms": round3(web_server_ms)
             },
             "transcription": transcription_meta,
             "dry_run": cli.dry_run,
@@ -2864,14 +3066,34 @@ fn cmd_html(cli: &Cli, args: &HtmlArgs) -> Result<i32, AppError> {
     // Always regenerate so HTML reflects latest template/features.
     let html_path = generate_html_for_session(&session_dir)?;
 
-    // Print path first so it is easy to capture in scripts.
+    let session_id = session_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Print filesystem path first so it is easy to capture in scripts.
     println!("{}", html_path.display());
+
+    let base_url = web_server_base_url();
+    let server_ready = ensure_web_server(cli, true);
+    let mut opened_target = html_path.display().to_string();
+
+    if server_ready {
+        let _ = touch_web_server(&base_url); // reset idle timeout clock
+        opened_target = format!(
+            "{}/sessions/{}/note.html",
+            base_url.trim_end_matches('/'),
+            session_id
+        );
+    }
+
     if !cli.quiet {
-        println!("Opening {}", html_path.display());
+        println!("Opening {}", opened_target);
     }
 
     let status = Command::new("open")
-        .arg(OsString::from(&html_path))
+        .arg(OsString::from(&opened_target))
         .status()
         .map_err(|e| app_error(1, format!("Failed to run 'open': {e}")))?;
     if !status.success() {
@@ -2888,6 +3110,9 @@ fn cmd_html(cli: &Cli, args: &HtmlArgs) -> Result<i32, AppError> {
             "session_dir": session_dir,
             "html_path": html_path,
             "opened": true,
+            "opened_target": opened_target,
+            "web_server_ready": server_ready,
+            "web_server_url": if server_ready { Value::String(base_url) } else { Value::Null },
         }),
     );
 

@@ -16,6 +16,7 @@ On `stop`, ispy:
 - runs local transcription (Parakeet via Python script / warm local server)
 - writes `note.md` with `[Screenshot N]` markers + footnotes
 - writes `note.html` with metadata, transcript, and image preview gallery
+- auto-starts local web server (idle-timeout) for richer HTML behavior
 
 ---
 
@@ -38,7 +39,8 @@ Performance/observability logs:
 
 ```text
 /tmp/ispy/perf.jsonl                # structured start/stop phase timings
-/tmp/ispy/parakeet-server.log       # warm server logs
+/tmp/ispy/parakeet-server.log       # warm Parakeet server logs
+/tmp/ispy/web-server.log            # local HTML web server logs
 /tmp/ispy/toggle-hotkey.log         # hotkey toggle/copy/paste lifecycle
 ```
 
@@ -54,7 +56,9 @@ chmod +x dictate
 `dictate` is a wrapper script that builds/runs the Rust binary.
 If `ISPY_PYTHON_BIN` is not set and `~/Code/ispy/.venv/bin/python` exists, the wrapper auto-uses that venv.
 
-Performance note: `dictate start` now warms a local Parakeet server in the background (when enabled), so later `dictate stop` calls are faster.
+Performance note:
+- `dictate start` warms a local Parakeet server in the background (when enabled), so later `dictate stop` calls are faster.
+- `dictate stop` auto-starts a local HTML web server with idle-timeout for richer session pages.
 
 Optional PATH link:
 
@@ -107,6 +111,11 @@ export ISPY_PARAKEET_MODEL="nvidia/parakeet-tdt-0.6b-v2"
 # optional perf + warm server controls
 export ISPY_PARAKEET_SERVER=1
 export ISPY_PARAKEET_SERVER_URL="http://127.0.0.1:8765"
+
+# optional local HTML server controls
+export ISPY_WEB_SERVER=1
+export ISPY_WEB_SERVER_URL="http://127.0.0.1:8766"
+export ISPY_WEB_SERVER_IDLE_TIMEOUT_SEC=1800
 ```
 
 ---
@@ -211,9 +220,12 @@ dictate html 2      # 2nd most recent
 ```
 
 Behavior:
-- prints HTML path to stdout
-- prints `Opening <path>`
-- runs `open <path>`
+- regenerates HTML file
+- ensures local web server is running
+- resets web server idle timer (`/touch`)
+- prints HTML filesystem path to stdout
+- prints `Opening <target>`
+- opens served URL (falls back to file path if server unavailable)
 - HTML page includes:
   - `Copy markdown` button
   - `Copy transcript` button
@@ -235,6 +247,27 @@ dictate --dry-run start
 dictate --dry-run stop
 dictate --json status
 ```
+
+---
+
+## Latency instrumentation
+
+Every start/stop writes structured timings to:
+
+```bash
+cat /tmp/ispy/perf.jsonl
+```
+
+Tail live while testing hotkeys:
+
+```bash
+tail -f /tmp/ispy/perf.jsonl
+```
+
+Focus on these fields:
+- start: `phases.spawn_recorder_ms`
+- stop: `phases.transcribe_ms` (usually the biggest)
+- stop: `phases.web_server_ms` (local HTML server startup/health)
 
 ---
 
