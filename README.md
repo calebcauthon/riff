@@ -13,7 +13,7 @@ On `stop`, ispy:
 - finds screenshots created during the session in your normal screenshot folder
 - copies them to session tmp storage (`/tmp/ispy/sessions/<session-id>/screenshots`)
 - deletes the originals from your normal screenshot folder
-- runs local transcription (Parakeet via Python script)
+- runs local transcription (Parakeet via Python script / warm local server)
 - writes `note.md` with `[Screenshot N]` markers + footnotes
 - writes `note.html` with metadata, transcript, and image preview gallery
 
@@ -34,6 +34,14 @@ On `stop`, ispy:
     ...
 ```
 
+Performance/observability logs:
+
+```text
+/tmp/ispy/perf.jsonl                # structured start/stop phase timings
+/tmp/ispy/parakeet-server.log       # warm server logs
+/tmp/ispy/toggle-hotkey.log         # hotkey toggle/copy/paste lifecycle
+```
+
 ---
 
 ## Install
@@ -45,6 +53,8 @@ chmod +x dictate
 
 `dictate` is a wrapper script that builds/runs the Rust binary.
 If `ISPY_PYTHON_BIN` is not set and `~/Code/ispy/.venv/bin/python` exists, the wrapper auto-uses that venv.
+
+Performance note: `dictate start` now warms a local Parakeet server in the background (when enabled), so later `dictate stop` calls are faster.
 
 Optional PATH link:
 
@@ -94,6 +104,9 @@ Set env vars (add to `~/.zshrc` if desired):
 export ISPY_PYTHON_BIN="$HOME/Code/ispy/.venv/bin/python"
 export ISPY_PARAKEET_SCRIPT="$HOME/Code/ispy/scripts/parakeet_transcribe.py"
 export ISPY_PARAKEET_MODEL="nvidia/parakeet-tdt-0.6b-v2"
+# optional perf + warm server controls
+export ISPY_PARAKEET_SERVER=1
+export ISPY_PARAKEET_SERVER_URL="http://127.0.0.1:8765"
 ```
 
 ---

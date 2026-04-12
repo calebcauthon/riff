@@ -12,7 +12,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SUPPORTED_IMAGE_EXTS: &[&str] =
     &["png", "jpg", "jpeg", "webp", "tif", "tiff", "heic", "heif"];
@@ -176,6 +176,22 @@ fn last_session_file() -> PathBuf {
     root_dir().join("last_session.json")
 }
 
+fn perf_log_file() -> PathBuf {
+    root_dir().join("perf.jsonl")
+}
+
+fn audio_device_cache_file() -> PathBuf {
+    root_dir().join("audio_device_cache.txt")
+}
+
+fn parakeet_server_log_file() -> PathBuf {
+    root_dir().join("parakeet-server.log")
+}
+
+fn parakeet_server_pid_file() -> PathBuf {
+    root_dir().join("parakeet-server.pid")
+}
+
 fn ensure_dirs() -> Result<(), AppError> {
     fs::create_dir_all(root_dir())
         .and_then(|_| fs::create_dir_all(sessions_dir()))
@@ -248,6 +264,12 @@ fn append_jsonl(path: &Path, payload: &Value) -> Result<(), AppError> {
     line.push('\n');
     f.write_all(line.as_bytes())
         .map_err(|e| app_error(1, format!("Failed to append {}: {e}", path.display())))
+}
+
+fn append_perf_event(payload: Value) {
+    if let Err(e) = append_jsonl(&perf_log_file(), &payload) {
+        eprintln!("[perf] failed to append perf log: {}", e);
+    }
 }
 
 fn command_exists(cmd: &str) -> bool {
@@ -332,6 +354,15 @@ fn resolve_audio_device(requested: &str, cli: &Cli) -> String {
         return requested.to_string();
     }
 
+    let cache_file = audio_device_cache_file();
+    if let Ok(cached) = fs::read_to_string(&cache_file) {
+        let cached = cached.trim();
+        if cached.starts_with(':') && cached.len() > 1 {
+            print_verbose(cli, format!("Using cached audio device {}", cached));
+            return cached.to_string();
+        }
+    }
+
     let devices = list_avfoundation_audio_devices();
     if devices.is_empty() {
         print_verbose(
@@ -359,6 +390,7 @@ fn resolve_audio_device(requested: &str, cli: &Cli) -> String {
         .unwrap_or(&devices[0]);
 
     let resolved = format!(":{}", preferred.0);
+    let _ = fs::write(&cache_file, format!("{}\n", resolved));
     print_verbose(
         cli,
         format!("Auto-selected audio device {} ({})", resolved, preferred.1),
@@ -451,6 +483,18 @@ fn send_signal(pid: i32, signal: i32) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+fn read_pid_file(path: &Path) -> Option<i32> {
+    let raw = fs::read_to_string(path).ok()?;
+    raw.trim().parse::<i32>().ok()
+}
+
+fn write_pid_file(path: &Path, pid: i32) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, format!("{}\n", pid));
 }
 
 fn load_active_state() -> Result<SessionState, AppError> {
@@ -589,6 +633,7 @@ fn spawn_recorder(
 
 fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
+    let perf_total = Instant::now();
 
     let active_path = active_state_file();
     if active_path.exists() {
@@ -609,7 +654,9 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             .map_err(|e| app_error(1, format!("Failed to remove stale state: {e}")))?;
     }
 
+    let t_screenshot_dir = Instant::now();
     let screenshot_dir = detect_screenshot_dir(args.screenshot_dir.as_deref(), cli)?;
+    let screenshot_dir_ms = t_screenshot_dir.elapsed().as_secs_f64() * 1000.0;
 
     let session_id = session_stamp();
     let session_dir = sessions_dir().join(&session_id);
@@ -626,7 +673,9 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         args.audio_device.clone()
     };
 
+    let t_audio_device = Instant::now();
     let resolved_audio_device = resolve_audio_device(&requested_audio_device, cli);
+    let audio_device_ms = t_audio_device.elapsed().as_secs_f64() * 1000.0;
 
     if cli.dry_run {
         print_out(
@@ -687,7 +736,9 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     }
 
     let record_cmd = build_record_cmd(&audio_path, &resolved_audio_device);
+    let t_spawn_recorder = Instant::now();
     let ffmpeg_pid = spawn_recorder(&record_cmd, &ffmpeg_log_path, cli)?;
+    let spawn_recorder_ms = t_spawn_recorder.elapsed().as_secs_f64() * 1000.0;
 
     let state = SessionState {
         session_id: session_id.clone(),
@@ -705,15 +756,43 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
 
     save_active_state(&state)?;
 
+    let mut prewarm_ms = 0.0;
+    // Warm the Parakeet server in the background so stop is faster.
+    if parakeet_server_enabled() {
+        let t_prewarm = Instant::now();
+        if let Some(script_path) = default_parakeet_script() {
+            let python_bin = env::var("ISPY_PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
+            let model = env::var("ISPY_PARAKEET_MODEL")
+                .unwrap_or_else(|_| "nvidia/parakeet-tdt-0.6b-v2".to_string());
+            ensure_parakeet_server(&python_bin, &script_path, &model, cli, false);
+        }
+        prewarm_ms = t_prewarm.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    let start_total_ms = perf_total.elapsed().as_secs_f64() * 1000.0;
+    append_perf_event(json!({
+        "ts": now_iso(),
+        "action": "start",
+        "session_id": session_id,
+        "total_ms": round3(start_total_ms),
+        "phases": {
+            "detect_screenshot_dir_ms": round3(screenshot_dir_ms),
+            "resolve_audio_device_ms": round3(audio_device_ms),
+            "spawn_recorder_ms": round3(spawn_recorder_ms),
+            "parakeet_prewarm_ms": round3(prewarm_ms)
+        }
+    }));
+
     print_out(
         cli,
         format!(
-            "Started session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}",
+            "Started session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}\nstartup_ms: {}",
             session_id,
             session_dir.display(),
             audio_path.display(),
             screenshot_dir.display(),
             resolved_audio_device,
+            round3(start_total_ms),
         ),
     );
 
@@ -728,6 +807,7 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "screenshot_source_dir": screenshot_dir,
             "audio_device": resolved_audio_device,
             "ffmpeg_pid": ffmpeg_pid,
+            "startup_ms": round3(start_total_ms),
             "dry_run": false,
             "state_saved": true
         }),
@@ -1058,6 +1138,246 @@ fn default_parakeet_script() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+fn parakeet_server_enabled() -> bool {
+    env::var("ISPY_PARAKEET_SERVER")
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn parakeet_server_base_url() -> String {
+    env::var("ISPY_PARAKEET_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8765".to_string())
+}
+
+fn parakeet_server_health_url(base: &str) -> String {
+    format!("{}/health", base.trim_end_matches('/'))
+}
+
+fn parakeet_server_transcribe_url(base: &str) -> String {
+    format!("{}/transcribe", base.trim_end_matches('/'))
+}
+
+fn check_parakeet_server_health(base_url: &str) -> bool {
+    if !command_exists("curl") {
+        return false;
+    }
+
+    let out = Command::new("curl")
+        .args(["-sS", "--max-time", "0.5", "--fail"])
+        .arg(parakeet_server_health_url(base_url))
+        .output();
+
+    match out {
+        Ok(o) if o.status.success() => {
+            let body = String::from_utf8_lossy(&o.stdout).to_string();
+            body.contains("\"ok\": true") || body.contains("\"ok\":true")
+        }
+        _ => false,
+    }
+}
+
+fn spawn_parakeet_server(
+    python_bin: &str,
+    script_path: &Path,
+    model: &str,
+    cli: &Cli,
+) -> Result<(), AppError> {
+    let pid_file = parakeet_server_pid_file();
+    if let Some(pid) = read_pid_file(&pid_file) {
+        if process_is_alive(pid) {
+            print_verbose(
+                cli,
+                format!("Parakeet server process already running (pid={})", pid),
+            );
+            return Ok(());
+        }
+    }
+
+    let base_url = parakeet_server_base_url();
+    let host_port = base_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let mut parts = host_port.split(':');
+    let host = parts.next().unwrap_or("127.0.0.1");
+    let port = parts.next().unwrap_or("8765");
+
+    let log_path = parakeet_server_log_file();
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| app_error(1, format!("Failed to open {}: {e}", log_path.display())))?;
+    let log_file_err = log_file
+        .try_clone()
+        .map_err(|e| app_error(1, format!("Failed to clone server log file handle: {e}")))?;
+
+    print_verbose(
+        cli,
+        format!(
+            "Starting Parakeet server at {} using model {}",
+            base_url, model
+        ),
+    );
+
+    let child = Command::new(python_bin)
+        .arg(script_path)
+        .arg("--serve")
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port)
+        .arg("--model")
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_err))
+        .spawn()
+        .map_err(|e| app_error(1, format!("Failed to start Parakeet server: {e}")))?;
+
+    write_pid_file(&pid_file, child.id() as i32);
+    Ok(())
+}
+
+fn ensure_parakeet_server(
+    python_bin: &str,
+    script_path: &Path,
+    model: &str,
+    cli: &Cli,
+    wait_ready: bool,
+) {
+    if !parakeet_server_enabled() {
+        return;
+    }
+
+    let base_url = parakeet_server_base_url();
+    if check_parakeet_server_health(&base_url) {
+        return;
+    }
+
+    let _ = spawn_parakeet_server(python_bin, script_path, model, cli);
+    if !wait_ready {
+        return;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if check_parakeet_server_health(&base_url) {
+            print_verbose(cli, format!("Parakeet server ready at {}", base_url));
+            return;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    print_verbose(
+        cli,
+        format!(
+            "Parakeet server not ready yet at {} (will fallback)",
+            base_url
+        ),
+    );
+}
+
+fn transcribe_via_parakeet_server(
+    base_url: &str,
+    audio_path: &Path,
+    out_txt: &Path,
+    model: &str,
+) -> Result<(String, Value), Value> {
+    if !command_exists("curl") {
+        return Err(json!({
+            "status": "error",
+            "method": "parakeet_server",
+            "reason": "curl not found"
+        }));
+    }
+
+    let payload = json!({
+        "audio": audio_path,
+        "out_txt": out_txt,
+        "model": model,
+        "batch_size": 1
+    })
+    .to_string();
+
+    let out = Command::new("curl")
+        .args([
+            "-sS",
+            "--fail",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "--data",
+            &payload,
+        ])
+        .arg(parakeet_server_transcribe_url(base_url))
+        .output();
+
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            return Err(json!({
+                "status": "error",
+                "method": "parakeet_server",
+                "reason": format!("curl failed: {e}")
+            }))
+        }
+    };
+
+    if !out.status.success() {
+        return Err(json!({
+            "status": "error",
+            "method": "parakeet_server",
+            "stderr": String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            "stdout": String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            "returncode": out.status.code(),
+        }));
+    }
+
+    let body = String::from_utf8_lossy(&out.stdout).to_string();
+    let parsed: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(json!({
+                "status": "error",
+                "method": "parakeet_server",
+                "reason": format!("invalid JSON response: {e}"),
+                "body": body,
+            }))
+        }
+    };
+
+    if parsed.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(json!({
+            "status": "error",
+            "method": "parakeet_server",
+            "response": parsed,
+        }));
+    }
+
+    let txt = parsed
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    Ok((
+        txt,
+        json!({
+            "status": "ok",
+            "method": "parakeet_server",
+            "server": base_url,
+            "model": model,
+            "elapsed_sec": parsed.get("elapsed_sec").and_then(|v| v.as_f64()),
+        }),
+    ))
+}
+
 fn run_transcription(
     state: &SessionState,
     session_dir: &Path,
@@ -1165,6 +1485,30 @@ fn run_transcription(
         .or_else(|| env::var("ISPY_PARAKEET_MODEL").ok())
         .unwrap_or_else(|| "nvidia/parakeet-tdt-0.6b-v2".to_string());
 
+    if parakeet_server_enabled() {
+        let base_url = parakeet_server_base_url();
+        ensure_parakeet_server(&python_bin, &script_path, &model, cli, true);
+        if check_parakeet_server_health(&base_url) {
+            match transcribe_via_parakeet_server(&base_url, &audio_path, &out_txt, &model) {
+                Ok((txt, meta)) => {
+                    if !txt.is_empty() {
+                        let _ = fs::write(&out_txt, format!("{}\n", txt));
+                    }
+                    return (txt, meta);
+                }
+                Err(meta) => {
+                    print_verbose(
+                        cli,
+                        format!(
+                            "Parakeet server transcription failed, falling back to one-shot process: {}",
+                            meta
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     let cmd_for_log = format!(
         "{} {} --audio {} --out-txt {} --model {}",
         shell_escape(&python_bin),
@@ -1176,7 +1520,7 @@ fn run_transcription(
 
     print_verbose(
         cli,
-        format!("Running Parakeet transcription: {cmd_for_log}"),
+        format!("Running Parakeet transcription (one-shot): {cmd_for_log}"),
     );
 
     let output = Command::new(&python_bin)
@@ -1770,6 +2114,7 @@ fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, AppError> {
 
 fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
+    let perf_total = Instant::now();
     let state = load_active_state()?;
 
     let session_dir = PathBuf::from(&state.session_dir);
@@ -1778,6 +2123,9 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
 
     let ended_epoch = unix_now();
     let ended_iso = now_iso();
+
+    let mut stop_recorder_ms = 0.0;
+    let mut write_ms = 0.0;
 
     if !cli.dry_run {
         append_jsonl(
@@ -1791,10 +2139,12 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     }
 
     if !cli.dry_run {
+        let t_stop_recorder = Instant::now();
         if let Some(pid) = state.ffmpeg_pid {
             stop_recorder(pid, cli)?;
             thread::sleep(Duration::from_millis(400));
         }
+        stop_recorder_ms = t_stop_recorder.elapsed().as_secs_f64() * 1000.0;
     }
 
     let source_dir = PathBuf::from(&state.screenshot_source_dir);
@@ -1808,6 +2158,7 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         ));
     }
 
+    let t_move_screens = Instant::now();
     let prior_events = read_jsonl_values(&events_path);
     let mut shots = load_shots_for_session(&session_dir, &prior_events);
     let moved_shots = move_session_screenshots(
@@ -1822,11 +2173,16 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let moved_count = moved_shots.len();
     shots.extend(moved_shots);
     shots.sort_by_key(|s| s.shot_id);
+    let move_screenshots_ms = t_move_screens.elapsed().as_secs_f64() * 1000.0;
 
+    let t_transcribe = Instant::now();
     let (transcript_raw, transcription_meta) = run_transcription(&state, &session_dir, args, cli);
-    let audio_duration = get_audio_duration_sec(Path::new(&state.audio_path));
-    let transcript_annotated = inject_screenshot_markers(&transcript_raw, &shots, audio_duration);
+    let transcribe_ms = t_transcribe.elapsed().as_secs_f64() * 1000.0;
 
+    let audio_duration = get_audio_duration_sec(Path::new(&state.audio_path));
+
+    let t_render = Instant::now();
+    let transcript_annotated = inject_screenshot_markers(&transcript_raw, &shots, audio_duration);
     let note_md = build_note(
         &state,
         &ended_iso,
@@ -1848,6 +2204,7 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         &session_dir,
     );
     let html_path = session_dir.join("note.html");
+    let render_ms = t_render.elapsed().as_secs_f64() * 1000.0;
 
     if cli.dry_run {
         print_out(
@@ -1859,6 +2216,8 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             format!("[dry-run] Would write html: {}", html_path.display()),
         );
     } else {
+        let t_write = Instant::now();
+
         fs::write(&note_path, format!("{}\n", note_md)).map_err(|e| {
             app_error(
                 1,
@@ -1901,18 +2260,38 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         )?;
 
         clear_active_state()?;
+
+        write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
     }
+
+    let stop_total_ms = perf_total.elapsed().as_secs_f64() * 1000.0;
+    append_perf_event(json!({
+        "ts": now_iso(),
+        "action": "stop",
+        "session_id": state.session_id,
+        "total_ms": round3(stop_total_ms),
+        "phases": {
+            "stop_recorder_ms": round3(stop_recorder_ms),
+            "move_screenshots_ms": round3(move_screenshots_ms),
+            "transcribe_ms": round3(transcribe_ms),
+            "render_ms": round3(render_ms),
+            "write_ms": round3(write_ms)
+        },
+        "transcription_method": transcription_meta.get("method").and_then(|v| v.as_str()),
+        "transcription_status": transcription_meta.get("status").and_then(|v| v.as_str())
+    }));
 
     print_out(
         cli,
         format!(
-            "Stopped session {}\nsession_dir: {}\nscreenshots_moved: {}\nscreenshots_total: {}\nnote: {}\nhtml: {}",
+            "Stopped session {}\nsession_dir: {}\nscreenshots_moved: {}\nscreenshots_total: {}\nnote: {}\nhtml: {}\nstop_ms: {}",
             state.session_id,
             session_dir.display(),
             moved_count,
             shots.len(),
             note_path.display(),
-            html_path.display()
+            html_path.display(),
+            round3(stop_total_ms),
         ),
     );
 
@@ -1940,6 +2319,14 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "html_path": html_path,
             "screenshots_moved": moved_count,
             "screenshots_total": shots.len(),
+            "stop_ms": round3(stop_total_ms),
+            "phases": {
+                "stop_recorder_ms": round3(stop_recorder_ms),
+                "move_screenshots_ms": round3(move_screenshots_ms),
+                "transcribe_ms": round3(transcribe_ms),
+                "render_ms": round3(render_ms),
+                "write_ms": round3(write_ms)
+            },
             "transcription": transcription_meta,
             "dry_run": cli.dry_run,
         }),
