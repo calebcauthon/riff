@@ -227,12 +227,17 @@ dictate --json status
 
 ## Hotkeys
 
-Map hotkeys to:
-- `dictate start`
-- `dictate shot`
-- `dictate stop`
+Current skhd setup on this machine:
+- `alt + /` (keycode `alt - 0x2C`) → toggle start/stop via `scripts/toggle_dictate_and_paste.sh`
+- `cmd + alt + d` → fallback toggle
+- `cmd + s` → hard fallback toggle
+- `cmd + alt + 9` → `dictate shot`
 
-Use Raycast, Alfred, Hammerspoon, Keyboard Maestro, etc.
+Toggle behavior:
+- if inactive: starts dictation
+- if active: stops dictation, copies transcript to clipboard, and pastes into focused app
+
+Use Raycast, Alfred, Hammerspoon, Keyboard Maestro, etc. if you prefer a different launcher.
 
 ---
 
