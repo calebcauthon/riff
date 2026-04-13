@@ -15,11 +15,12 @@ use crate::transcription::{
     run_transcription,
 };
 use crate::{
-    append_jsonl, append_perf_event, build_record_cmd, clear_active_state, command_exists,
-    detect_screenshot_dir, emit_json, file_mtime_epoch, get_audio_duration_sec, load_active_state,
-    move_session_screenshots, now_iso, play_event_sound, print_out, print_verbose,
-    process_is_alive, read_json, recorder_error_looks_like_invalid_audio_device,
-    resolve_audio_device, resolve_audio_device_uncached, round3, save_active_state, session_stamp,
+    append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
+    clear_active_state, command_exists, detect_screenshot_dir, emit_json, file_mtime_epoch,
+    get_audio_duration_sec, load_active_state, move_session_screenshots, now_iso, play_event_sound,
+    print_out, print_verbose, process_is_alive, read_json,
+    recorder_error_looks_like_invalid_audio_device, resolve_audio_device,
+    resolve_audio_device_uncached, round3, save_active_state, session_stamp,
     spawn_clipboard_watcher, spawn_recorder, stop_clipboard_watcher, stop_recorder, unix_now,
     write_json,
 };
@@ -341,6 +342,18 @@ pub(crate) fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
 
     let mtime = file_mtime_epoch(&dest_abs).unwrap_or_else(unix_now);
     let audio_sec = (mtime - state.started_at_epoch).max(0.0);
+    let (app_payload, app_capture_error) = match capture_frontmost_app_meta(cli) {
+        Ok(meta) => (
+            json!({
+                "name": meta.name,
+                "bundle_id": meta.bundle_id,
+                "pid": meta.pid,
+                "window_title": meta.window_title,
+            }),
+            Value::Null,
+        ),
+        Err(reason) => (Value::Null, Value::String(reason)),
+    };
 
     append_jsonl(
         &events_path,
@@ -353,6 +366,8 @@ pub(crate) fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
             "audioSec": round3(audio_sec),
             "mtime_epoch": round3(mtime),
             "method": "direct_screencapture",
+            "app": app_payload,
+            "app_capture_error": app_capture_error,
         }),
     )?;
 
@@ -375,6 +390,8 @@ pub(crate) fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
             "dest": dest_abs,
             "dest_rel": dest_rel,
             "audioSec": round3(audio_sec),
+            "app": app_payload,
+            "app_capture_error": app_capture_error,
             "dry_run": false,
         }),
     );

@@ -22,6 +22,11 @@ pub struct ShotMeta {
     pub shot_id: usize,
     pub dest_rel_path: String,
     pub audio_sec: f64,
+    pub app_name: Option<String>,
+    pub app_bundle_id: Option<String>,
+    pub app_pid: Option<i32>,
+    pub window_title: Option<String>,
+    pub app_capture_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -326,6 +326,91 @@ fn play_event_sound(kind: &str, cli: &Cli) {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FrontmostAppMeta {
+    pub name: String,
+    pub bundle_id: Option<String>,
+    pub pid: Option<i32>,
+    pub window_title: Option<String>,
+}
+
+fn parse_optional_field(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "-" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub(crate) fn capture_frontmost_app_meta(cli: &Cli) -> Result<FrontmostAppMeta, String> {
+    if !cfg!(target_os = "macos") || !command_exists("osascript") {
+        return Err("osascript_unavailable".to_string());
+    }
+
+    let script = r#"
+set appName to ""
+set bundleID to ""
+set pidValue to ""
+set winTitle to ""
+tell application "System Events"
+  set frontApp to first application process whose frontmost is true
+  set appName to name of frontApp
+  try
+    set bundleID to bundle identifier of frontApp
+  end try
+  try
+    set pidValue to (unix id of frontApp) as string
+  end try
+  try
+    set winTitle to name of front window of frontApp
+  end try
+end tell
+return appName & tab & bundleID & tab & pidValue & tab & winTitle
+"#;
+
+    let out = match Command::new("osascript").args(["-e", script]).output() {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            let msg = format!("osascript_failed_status_{:?}", o.status.code());
+            if cli.verbose && !cli.quiet {
+                eprintln!("[verbose] could not capture frontmost app metadata ({msg})");
+            }
+            return Err(msg);
+        }
+        Err(e) => {
+            let msg = format!("osascript_exec_error_{e}");
+            if cli.verbose && !cli.quiet {
+                eprintln!("[verbose] could not run osascript for app metadata: {msg}");
+            }
+            return Err(msg);
+        }
+    };
+
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if line.is_empty() {
+        return Err("empty_osascript_output".to_string());
+    }
+
+    let mut parts = line.splitn(4, '\t');
+    let app_name = parts.next().unwrap_or("").trim().to_string();
+    if app_name.is_empty() {
+        return Err("missing_frontmost_app_name".to_string());
+    }
+
+    let bundle_id = parse_optional_field(parts.next().unwrap_or(""));
+    let pid =
+        parse_optional_field(parts.next().unwrap_or("")).and_then(|raw| raw.parse::<i32>().ok());
+    let window_title = parse_optional_field(parts.next().unwrap_or(""));
+
+    Ok(FrontmostAppMeta {
+        name: app_name,
+        bundle_id,
+        pid,
+        window_title,
+    })
+}
+
 pub(crate) fn command_exists(cmd: &str) -> bool {
     if cmd.contains('/') {
         return Path::new(cmd).exists();
@@ -886,6 +971,11 @@ fn move_session_screenshots(
             shot_id,
             dest_rel_path: dest_rel,
             audio_sec,
+            app_name: None,
+            app_bundle_id: None,
+            app_pid: None,
+            window_title: None,
+            app_capture_error: None,
         });
     }
 

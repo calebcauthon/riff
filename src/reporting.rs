@@ -143,6 +143,32 @@ fn clip_preview(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn shot_context_text(shot: &ShotMeta) -> Option<String> {
+    let mut parts = Vec::<String>::new();
+    if let Some(name) = shot.app_name.as_ref() {
+        parts.push(format!("App: {}", name));
+    }
+    if let Some(bundle) = shot.app_bundle_id.as_ref() {
+        parts.push(format!("Bundle: {}", bundle));
+    }
+    if let Some(pid) = shot.app_pid {
+        parts.push(format!("PID: {}", pid));
+    }
+    if let Some(window_title) = shot.window_title.as_ref() {
+        parts.push(format!("Window: {}", window_title));
+    }
+    if parts.is_empty() {
+        if let Some(reason) = shot.app_capture_error.as_ref() {
+            parts.push(format!("App metadata unavailable: {}", reason));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
 pub(crate) fn build_note(
     state: &SessionState,
     ended_iso: &str,
@@ -187,10 +213,14 @@ pub(crate) fn build_note(
         let session_dir = Path::new(&state.session_dir);
         for shot in shots {
             let abs_path = session_dir.join(&shot.dest_rel_path);
+            let ctx = shot_context_text(shot)
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default();
             lines.push(format!(
-                "Screenshot {}: {}",
+                "Screenshot {}: {}{}",
                 shot.shot_id,
-                abs_path.display()
+                abs_path.display(),
+                ctx
             ));
         }
         lines.push(String::new());
@@ -218,11 +248,15 @@ pub(crate) fn build_note(
         lines.push("## Screenshot Footnotes".to_string());
         lines.push(String::new());
         for shot in shots {
+            let ctx = shot_context_text(shot)
+                .map(|s| format!(" - {}", s))
+                .unwrap_or_default();
             lines.push(format!(
-                "[Screenshot {}]: {} (t={})",
+                "[Screenshot {}]: {} (t={}){}",
                 shot.shot_id,
                 shot.dest_rel_path,
-                format_hms(shot.audio_sec)
+                format_hms(shot.audio_sec),
+                ctx
             ));
         }
         lines.push(String::new());
@@ -292,8 +326,13 @@ pub(crate) fn build_html_note(
         let abs = session_dir.join(&shot.dest_rel_path);
         let abs_str = abs.display().to_string();
         let rel_url = shot.dest_rel_path.clone();
+        let ctx_text = shot_context_text(shot);
+        let context_html = ctx_text
+            .as_ref()
+            .map(|s| format!(r#"<div class="ctx">{}</div>"#, html_escape(s)))
+            .unwrap_or_default();
         gallery.push_str(&format!(
-            r#"<figure class="card"><div class="card-head"><figcaption>Screenshot {}</figcaption><div class="card-actions"><button class="btn small annotate-image" data-url="{}" data-path="{}">Annotate</button><button class="btn small copy-image" data-url="{}" data-path="{}">Copy image</button></div></div><a href="{}" target="_blank" rel="noreferrer"><img src="{}" alt="Screenshot {}" loading="lazy" /></a><div class="path">{}</div></figure>"#,
+            r#"<figure class="card"><div class="card-head"><figcaption>Screenshot {}</figcaption><div class="card-actions"><button class="btn small annotate-image" data-url="{}" data-path="{}">Annotate</button><button class="btn small copy-image" data-url="{}" data-path="{}">Copy image</button></div></div><a href="{}" target="_blank" rel="noreferrer"><img src="{}" alt="Screenshot {}" loading="lazy" /></a><div class="path">{}</div>{}</figure>"#,
             shot.shot_id,
             html_escape(&rel_url),
             html_escape(&abs_str),
@@ -302,7 +341,8 @@ pub(crate) fn build_html_note(
             html_escape(&rel_url),
             html_escape(&rel_url),
             shot.shot_id,
-            html_escape(&abs_str)
+            html_escape(&abs_str),
+            context_html
         ));
     }
 
@@ -371,6 +411,7 @@ pub(crate) fn build_html_note(
     .annotator-loading.hidden {{ display: none; }}
     .annotator-host {{ width: 100%; height: min(76vh, 900px); }}
     .annotator-help {{ margin-top: 8px; font-size: 12px; color: #64748b; }}
+    .ctx {{ color: #374151; margin-top: 6px; font-size: 12px; line-height: 1.5; }}
   </style>
 </head>
 <body>
@@ -1137,12 +1178,63 @@ pub(crate) fn shots_from_events(events: &[Value]) -> Vec<ShotMeta> {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
 
+        let app_name = event
+            .get("app")
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let app_bundle_id = event
+            .get("app")
+            .and_then(|v| v.get("bundle_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let app_pid = event
+            .get("app")
+            .and_then(|v| v.get("pid"))
+            .and_then(|v| v.as_i64())
+            .and_then(|v| i32::try_from(v).ok());
+        let window_title = event
+            .get("app")
+            .and_then(|v| v.get("window_title"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let app_capture_error = event
+            .get("app_capture_error")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if let Some(existing) = by_id.get_mut(&id) {
+            existing.dest_rel_path = dest.to_string();
+            existing.audio_sec = audio_sec;
+            if app_name.is_some() {
+                existing.app_name = app_name;
+            }
+            if app_bundle_id.is_some() {
+                existing.app_bundle_id = app_bundle_id;
+            }
+            if app_pid.is_some() {
+                existing.app_pid = app_pid;
+            }
+            if window_title.is_some() {
+                existing.window_title = window_title;
+            }
+            if app_capture_error.is_some() {
+                existing.app_capture_error = app_capture_error;
+            }
+            continue;
+        }
+
         by_id.insert(
             id,
             ShotMeta {
                 shot_id: id,
                 dest_rel_path: dest.to_string(),
                 audio_sec,
+                app_name,
+                app_bundle_id,
+                app_pid,
+                window_title,
+                app_capture_error,
             },
         );
     }
@@ -1224,6 +1316,11 @@ pub(crate) fn load_shots_for_session(session_dir: &Path, events: &[Value]) -> Ve
                         p.file_name().and_then(|n| n.to_str()).unwrap_or_default()
                     ),
                     audio_sec: 0.0,
+                    app_name: None,
+                    app_bundle_id: None,
+                    app_pid: None,
+                    window_title: None,
+                    app_capture_error: None,
                 })
                 .collect();
         }

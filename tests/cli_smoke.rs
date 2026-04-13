@@ -69,6 +69,15 @@ mkdir -p "$(dirname "$out")"
 exit 0
 "#,
     );
+
+    write_executable(
+        &dir.join("osascript"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'TestApp\tcom.example.TestApp\t4242\tExample Window\n'
+exit 0
+"#,
+    );
 }
 
 fn install_fake_open(dir: &Path) {
@@ -381,6 +390,14 @@ fn end_to_end_start_shot_stop_produces_transcript_and_note() {
     assert!(
         note_md.contains("[Screenshot 1]"),
         "note.md missing screenshot marker: {note_md}"
+    );
+    assert!(
+        note_md.contains("App: TestApp"),
+        "note.md missing screenshot app metadata: {note_md}"
+    );
+    assert!(
+        note_md.contains("Window: Example Window"),
+        "note.md missing screenshot window metadata: {note_md}"
     );
 
     cmd_with_root(td.path())
