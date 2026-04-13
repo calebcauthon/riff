@@ -47,6 +47,8 @@ pub enum Commands {
     Status,
     #[command(hide = true, name = "watch-clipboard")]
     WatchClipboard(WatchClipboardArgs),
+    /// Kill background helper servers (web + parakeet)
+    KillServer,
 }
 
 #[derive(Args, Debug)]

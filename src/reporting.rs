@@ -269,8 +269,10 @@ pub(crate) fn build_html_note(
         let abs_str = abs.display().to_string();
         let rel_url = shot.dest_rel_path.clone();
         gallery.push_str(&format!(
-            r#"<figure class="card"><div class="card-head"><figcaption>Screenshot {}</figcaption><button class="btn small copy-image" data-url="{}" data-path="{}">Copy image</button></div><a href="{}" target="_blank" rel="noreferrer"><img src="{}" alt="Screenshot {}" loading="lazy" /></a><div class="path">{}</div></figure>"#,
+            r#"<figure class="card"><div class="card-head"><figcaption>Screenshot {}</figcaption><div class="card-actions"><button class="btn small annotate-image" data-url="{}" data-path="{}">Annotate</button><button class="btn small copy-image" data-url="{}" data-path="{}">Copy image</button></div></div><a href="{}" target="_blank" rel="noreferrer"><img src="{}" alt="Screenshot {}" loading="lazy" /></a><div class="path">{}</div></figure>"#,
             shot.shot_id,
+            html_escape(&rel_url),
+            html_escape(&abs_str),
             html_escape(&rel_url),
             html_escape(&abs_str),
             html_escape(&rel_url),
@@ -301,12 +303,13 @@ pub(crate) fn build_html_note(
     };
 
     format!(
-        r#"<!doctype html>
+        r##"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Dictation {session_id}</title>
+  <link rel="stylesheet" href="https://esm.sh/@excalidraw/excalidraw@0.18.0/dist/dev/index.css" />
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #f5f7fb; color: #111827; }}
     .wrap {{ max-width: 1000px; margin: 0 auto; padding: 24px; }}
@@ -329,9 +332,19 @@ pub(crate) fn build_html_note(
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }}
     .card {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px; margin: 0; }}
     .card-head {{ display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }}
+    .card-actions {{ display: flex; align-items: center; gap: 6px; }}
     .card img {{ width: 100%; height: auto; border-radius: 8px; display: block; }}
     .card figcaption {{ font-weight: 600; margin: 0; }}
     .path {{ color: #6b7280; margin-top: 8px; font-size: 12px; word-break: break-all; }}
+    .annotator-modal {{ position: fixed; inset: 0; background: rgba(15, 23, 42, 0.72); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 9999; }}
+    .annotator-modal.open {{ display: flex; }}
+    .annotator-panel {{ width: min(1200px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: #fff; border-radius: 12px; border: 1px solid #e5e7eb; padding: 12px; }}
+    .annotator-toolbar {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }}
+    .annotator-stage {{ position: relative; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background: #f8fafc; min-height: 420px; }}
+    .annotator-loading {{ position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #475569; font-size: 14px; z-index: 2; pointer-events: none; }}
+    .annotator-loading.hidden {{ display: none; }}
+    .annotator-host {{ width: 100%; height: min(76vh, 900px); }}
+    .annotator-help {{ margin-top: 8px; font-size: 12px; color: #64748b; }}
   </style>
 </head>
 <body>
@@ -372,6 +385,21 @@ pub(crate) fn build_html_note(
       <h2>Clipboard</h2>
       {clipboard_html}
     </section>
+  </div>
+  <div id="annotatorModal" class="annotator-modal" aria-hidden="true">
+    <div class="annotator-panel">
+      <div class="annotator-toolbar">
+        <button id="annotatorCloseBtn" class="btn small">Close</button>
+        <button id="annotatorSaveBtn" class="btn small">Save scene</button>
+        <button id="annotatorDownloadBtn" class="btn small">Download annotated PNG</button>
+        <span id="annotatorStatus" class="status"></span>
+      </div>
+      <div class="annotator-stage">
+        <div id="annotatorLoading" class="annotator-loading">Loading Excalidraw…</div>
+        <div id="annotatorHost" class="annotator-host"></div>
+      </div>
+      <div class="annotator-help">Excalidraw tip: the screenshot is preloaded as an image element you can draw on top of.</div>
+    </div>
   </div>
 
   <textarea id="markdownContent" style="display:none;">{markdown_html}</textarea>
@@ -460,10 +488,417 @@ pub(crate) fn build_html_note(
         }}
       }});
     }});
+
+    const annotatorModal = document.getElementById('annotatorModal');
+    const annotatorStatus = document.getElementById('annotatorStatus');
+    const annotatorLoading = document.getElementById('annotatorLoading');
+    let currentAnnotatorPath = '';
+
+    function setAnnotatorStatus(message) {{
+      if (!annotatorStatus) return;
+      annotatorStatus.textContent = message;
+      window.setTimeout(() => {{
+        if (annotatorStatus.textContent === message) annotatorStatus.textContent = '';
+      }}, 2200);
+    }}
+
+    function openAnnotator(url, path) {{
+      if (!annotatorModal) return;
+      currentAnnotatorPath = path || url;
+      annotatorModal.classList.add('open');
+      annotatorModal.setAttribute('aria-hidden', 'false');
+      annotatorLoading?.classList.remove('hidden');
+      if (typeof window.__ispyOpenExcalidraw === 'function') {{
+        window.__ispyOpenExcalidraw(url, currentAnnotatorPath);
+      }}
+    }}
+
+    function closeAnnotator() {{
+      if (!annotatorModal) return;
+      annotatorModal.classList.remove('open');
+      annotatorModal.setAttribute('aria-hidden', 'true');
+      currentAnnotatorPath = '';
+    }}
+
+    document.getElementById('annotatorCloseBtn')?.addEventListener('click', closeAnnotator);
+    annotatorModal?.addEventListener('click', (evt) => {{
+      if (evt.target === annotatorModal) closeAnnotator();
+    }});
+    window.addEventListener('keydown', (evt) => {{
+      if (evt.key === 'Escape' && annotatorModal?.classList.contains('open')) closeAnnotator();
+    }});
+
+    document.querySelectorAll('.annotate-image').forEach((btn) => {{
+      btn.addEventListener('click', () => {{
+        const url = btn.dataset.url || '';
+        const path = btn.dataset.path || url;
+        if (!url) {{
+          setAnnotatorStatus('Missing image URL');
+          return;
+        }}
+        openAnnotator(url, path);
+      }});
+    }});
+
+    document.getElementById('annotatorSaveBtn')?.addEventListener('click', async () => {{
+      if (typeof window.__ispySaveExcalidraw !== 'function') {{
+        setAnnotatorStatus('Excalidraw not ready');
+        return;
+      }}
+      try {{
+        await window.__ispySaveExcalidraw();
+        setAnnotatorStatus('Scene saved');
+      }} catch (_err) {{
+        setAnnotatorStatus('Could not save scene');
+      }}
+    }});
+
+    document.getElementById('annotatorDownloadBtn')?.addEventListener('click', async () => {{
+      if (typeof window.__ispyDownloadExcalidrawPng !== 'function') {{
+        setAnnotatorStatus('Excalidraw not ready');
+        return;
+      }}
+      try {{
+        await window.__ispyDownloadExcalidrawPng();
+        setAnnotatorStatus('Annotated PNG downloaded');
+      }} catch (_err) {{
+        setAnnotatorStatus('Could not export PNG');
+      }}
+    }});
+  </script>
+  <script type="importmap">
+    {{
+      "imports": {{
+        "react": "https://esm.sh/react@19.0.0",
+        "react/jsx-runtime": "https://esm.sh/react@19.0.0/jsx-runtime",
+        "react-dom": "https://esm.sh/react-dom@19.0.0",
+        "react-dom/client": "https://esm.sh/react-dom@19.0.0/client"
+      }}
+    }}
+  </script>
+  <script type="module">
+    window.EXCALIDRAW_ASSET_PATH = 'https://esm.sh/@excalidraw/excalidraw@0.18.0/dist/dev/';
+    const host = document.getElementById('annotatorHost');
+    const annotatorLoading = document.getElementById('annotatorLoading');
+    const sceneStoragePrefix = 'ispy-excalidraw-scene-';
+    let reactRoot = null;
+    let excalidrawAPI = null;
+    let excalidrawPkg = null;
+    let currentContext = {{ url: '', path: '' }};
+    let loaderPromise = null;
+
+    function setLoading(loading, message) {{
+      if (!annotatorLoading) return;
+      if (message) annotatorLoading.textContent = message;
+      if (loading) {{
+        annotatorLoading.classList.remove('hidden');
+      }} else {{
+        annotatorLoading.classList.add('hidden');
+      }}
+    }}
+
+    function sceneKey(path) {{
+      return `${{sceneStoragePrefix}}${{path}}`;
+    }}
+
+    function sanitizeAppState(input) {{
+      const src = (input && typeof input === 'object') ? input : {{}};
+      const allowed = {{
+        viewBackgroundColor: src.viewBackgroundColor || '#ffffff',
+        theme: src.theme || 'light',
+        currentItemStrokeColor: src.currentItemStrokeColor || '#ef4444',
+        currentItemBackgroundColor: src.currentItemBackgroundColor || 'transparent',
+        currentItemStrokeWidth: Number(src.currentItemStrokeWidth || 2),
+        currentItemRoughness: Number(src.currentItemRoughness || 0),
+        currentItemOpacity: Number(src.currentItemOpacity || 100),
+        currentItemFontFamily: Number(src.currentItemFontFamily || 1),
+        currentItemFontSize: Number(src.currentItemFontSize || 20),
+      }};
+      if (src.zoom && typeof src.zoom === 'object' && typeof src.zoom.value === 'number') {{
+        allowed.zoom = {{ value: src.zoom.value }};
+      }}
+      if (typeof src.scrollX === 'number') allowed.scrollX = src.scrollX;
+      if (typeof src.scrollY === 'number') allowed.scrollY = src.scrollY;
+      return allowed;
+    }}
+
+    function refreshScreenshotPreview(targetPath, targetUrl) {{
+      const stamp = Date.now();
+      document.querySelectorAll('.annotate-image').forEach((btn) => {{
+        if ((btn.dataset.path || '') !== targetPath) return;
+        const baseUrl = btn.dataset.url || targetUrl;
+        const cacheBusted = `${{baseUrl}}?v=${{stamp}}`;
+        btn.dataset.url = baseUrl;
+        const card = btn.closest('.card');
+        if (!card) return;
+        card.querySelectorAll('button[data-path]').forEach((cardBtn) => {{
+          cardBtn.dataset.url = baseUrl;
+        }});
+        const img = card.querySelector('img');
+        const link = card.querySelector('a');
+        if (img) img.src = cacheBusted;
+        if (link) link.href = cacheBusted;
+      }});
+    }}
+
+    function saveImageEndpoints() {{
+      const endpoints = [];
+      if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {{
+        endpoints.push(`${{window.location.origin}}/save-image`);
+      }}
+      endpoints.push('http://127.0.0.1:8766/save-image');
+      endpoints.push('http://localhost:8766/save-image');
+      return [...new Set(endpoints)];
+    }}
+
+    function randomId(prefix) {{
+      return `${{prefix}}-${{Math.random().toString(36).slice(2, 10)}}`;
+    }}
+
+    async function loadModule() {{
+      if (loaderPromise) return loaderPromise;
+      loaderPromise = (async () => {{
+        const ReactModule = await import('https://esm.sh/react@19.0.0');
+        const ReactDOMClient = await import('https://esm.sh/react-dom@19.0.0/client');
+        const ExcalidrawModule = await import('https://esm.sh/@excalidraw/excalidraw@0.18.0/dist/dev/index.js?external=react,react-dom');
+        return {{
+          React: ReactModule.default,
+          createRoot: ReactDOMClient.createRoot,
+          pkg: ExcalidrawModule,
+        }};
+      }})();
+      return loaderPromise;
+    }}
+
+    async function blobToDataUrl(blob) {{
+      return await new Promise((resolve, reject) => {{
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      }});
+    }}
+
+    async function preloadImageData(url) {{
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('Failed to fetch screenshot');
+      const blob = await response.blob();
+      const dataUrl = await blobToDataUrl(blob);
+      const dimensions = await new Promise((resolve, reject) => {{
+        const img = new Image();
+        img.onload = () => resolve({{ width: img.naturalWidth || 1280, height: img.naturalHeight || 720 }});
+        img.onerror = reject;
+        img.src = dataUrl;
+      }});
+      return {{
+        dataUrl,
+        mimeType: blob.type || 'image/png',
+        width: dimensions.width,
+        height: dimensions.height,
+      }};
+    }}
+
+    function createImageElement(fileId, width, height) {{
+      const now = Date.now();
+      return {{
+        id: randomId('img'),
+        type: 'image',
+        x: 0,
+        y: 0,
+        width,
+        height,
+        angle: 0,
+        strokeColor: 'transparent',
+        backgroundColor: 'transparent',
+        fillStyle: 'solid',
+        strokeWidth: 1,
+        strokeStyle: 'solid',
+        roughness: 0,
+        opacity: 100,
+        groupIds: [],
+        frameId: null,
+        roundness: null,
+        seed: Math.floor(Math.random() * 2_000_000_000),
+        version: 1,
+        versionNonce: Math.floor(Math.random() * 2_000_000_000),
+        isDeleted: false,
+        boundElements: null,
+        updated: now,
+        link: null,
+        locked: true,
+        fileId,
+        scale: [1, 1],
+        crop: null,
+        status: 'saved',
+      }};
+    }}
+
+    async function buildInitialData(url, path) {{
+      const savedRaw = localStorage.getItem(sceneKey(path));
+      if (savedRaw) {{
+        try {{
+          const saved = JSON.parse(savedRaw);
+          const savedAppState = sanitizeAppState(saved?.appState);
+          const savedPayload = {{
+            elements: Array.isArray(saved?.elements) ? saved.elements : [],
+            appState: savedAppState,
+            files: (saved && typeof saved.files === 'object' && saved.files) ? saved.files : {{}},
+          }};
+          // Rewrite old payloads so subsequent opens don't hit bad historical state.
+          localStorage.setItem(sceneKey(path), JSON.stringify(savedPayload));
+          return {{
+            elements: savedPayload.elements,
+            appState: savedAppState,
+            files: savedPayload.files,
+            scrollToContent: true,
+          }};
+        }} catch (_err) {{}}
+      }}
+
+      const image = await preloadImageData(url);
+      const fileId = randomId('file');
+      const files = {{
+        [fileId]: {{
+          id: fileId,
+          mimeType: image.mimeType,
+          dataURL: image.dataUrl,
+          created: Date.now(),
+          lastRetrieved: Date.now(),
+        }},
+      }};
+      const elements = [createImageElement(fileId, image.width, image.height)];
+      return {{
+        elements,
+        files,
+        appState: sanitizeAppState({{}}),
+        scrollToContent: true,
+      }};
+    }}
+
+    async function renderAnnotator(url, path) {{
+      if (!host) return;
+      const resolvedUrl = new URL(url, window.location.href).toString();
+      currentContext = {{ url, path, resolvedUrl }};
+      setLoading(true, 'Loading Excalidraw…');
+
+      const loaded = await loadModule();
+      const React = loaded.React;
+      const h = React.createElement;
+      const pkg = loaded.pkg;
+      excalidrawPkg = pkg;
+      if (!reactRoot) {{
+        reactRoot = loaded.createRoot(host);
+      }}
+
+      const initialData = await buildInitialData(url, path);
+      reactRoot.render(
+        h(
+          'div',
+          {{ style: {{ height: '100%' }} }},
+          h(pkg.Excalidraw, {{
+            key: path,
+            initialData,
+            excalidrawAPI: (api) => {{
+              excalidrawAPI = api;
+              setLoading(false);
+            }},
+            UIOptions: {{
+              canvasActions: {{
+                saveToActiveFile: false,
+              }},
+            }},
+          }})
+        )
+      );
+    }}
+
+    window.__ispyOpenExcalidraw = async (url, path) => {{
+      try {{
+        await renderAnnotator(url, path);
+      }} catch (err) {{
+        setLoading(true, 'Could not load Excalidraw CDN bundle');
+        console.error(err);
+      }}
+    }};
+
+    window.__ispySaveExcalidraw = async () => {{
+      if (!excalidrawAPI || !currentContext.path) throw new Error('Excalidraw not ready');
+      const persistedAppState = sanitizeAppState(excalidrawAPI.getAppState());
+      const payload = {{
+        elements: excalidrawAPI.getSceneElementsIncludingDeleted(),
+        appState: persistedAppState,
+        files: excalidrawAPI.getFiles(),
+        savedAt: new Date().toISOString(),
+      }};
+      localStorage.setItem(sceneKey(currentContext.path), JSON.stringify(payload));
+
+      const blob = await excalidrawPkg.exportToBlob({{
+        elements: excalidrawAPI.getSceneElements(),
+        appState: {{
+          ...excalidrawAPI.getAppState(),
+          exportBackground: true,
+          exportWithDarkMode: false,
+        }},
+        files: excalidrawAPI.getFiles(),
+        mimeType: 'image/png',
+      }});
+      const dataUrl = await blobToDataUrl(blob);
+      let lastError = '';
+      let saved = false;
+      for (const endpoint of saveImageEndpoints()) {{
+        try {{
+          const response = await fetch(endpoint, {{
+            method: 'POST',
+            headers: {{
+              'Content-Type': 'application/json',
+            }},
+            body: JSON.stringify({{
+              url: currentContext.resolvedUrl || currentContext.url,
+              absPath: currentContext.path,
+              dataUrl,
+            }}),
+          }});
+          if (!response.ok) {{
+            const body = await response.text();
+            lastError = `${{endpoint}} -> ${{response.status}} ${{body}}`;
+            continue;
+          }}
+          saved = true;
+          break;
+        }} catch (err) {{
+          lastError = `${{endpoint}} -> ${{err}}`;
+        }}
+      }}
+      if (!saved) {{
+        throw new Error(`save-image failed across endpoints: ${{lastError || 'unknown'}}`);
+      }}
+      refreshScreenshotPreview(currentContext.path, currentContext.url);
+    }};
+
+    window.__ispyDownloadExcalidrawPng = async () => {{
+      if (!excalidrawAPI || !excalidrawPkg) throw new Error('Excalidraw not ready');
+      const blob = await excalidrawPkg.exportToBlob({{
+        elements: excalidrawAPI.getSceneElements(),
+        appState: {{
+          ...excalidrawAPI.getAppState(),
+          exportBackground: true,
+          exportWithDarkMode: false,
+        }},
+        files: excalidrawAPI.getFiles(),
+        mimeType: 'image/png',
+      }});
+      const downloadName = (currentContext.path.split('/').pop() || 'annotated').replace(/[^a-zA-Z0-9._-]/g, '_');
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `annotated-${{downloadName.replace(/\\.[a-zA-Z0-9]+$/, '')}}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }};
   </script>
 </body>
 </html>
-"#,
+"##,
         session_id = html_escape(session_id),
         started_iso = html_escape(started_iso),
         ended_iso = html_escape(ended_iso),

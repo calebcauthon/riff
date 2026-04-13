@@ -113,23 +113,40 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     let must_have = [
-        "start   Start dictation session",
-        "shot    Capture screenshot into active session",
-        "stop    Stop dictation and transcribe",
-        "list    List recent sessions",
-        "show    Show note markdown for a session id",
-        "copy    Print transcript for a recent session index",
-        "html    Open HTML report for a session id",
-        "sounds  Pick start/stop sounds and beep timing",
-        "status  Show active session status",
+        ("start", "Start dictation session"),
+        ("shot", "Capture screenshot into active session"),
+        ("stop", "Stop dictation and transcribe"),
+        ("list", "List recent sessions"),
+        ("show", "Show note markdown for a session id"),
+        ("copy", "Print transcript for a recent session index"),
+        ("html", "Open HTML report for a recent session"),
+        ("sounds", "Pick start/stop sounds and beep timing"),
+        ("status", "Show active session status"),
+        ("kill-server", "Kill background helper servers (web + parakeet)"),
     ];
 
-    for line in must_have {
-        assert!(stdout.contains(line), "missing help line: {line}\n{stdout}");
+    for (name, desc) in must_have {
+        assert!(
+            stdout.contains(&format!("  {name}")),
+            "missing command in help: {name}\n{stdout}"
+        );
+        assert!(
+            stdout.contains(desc),
+            "missing help description: {name} -> {desc}\n{stdout}"
+        );
     }
 
     let order = [
-        "start", "shot", "stop", "list", "show", "copy", "html", "sounds", "status",
+        "start",
+        "shot",
+        "stop",
+        "list",
+        "show",
+        "copy",
+        "html",
+        "sounds",
+        "status",
+        "kill-server",
     ];
     let mut last = 0usize;
     for name in order {

@@ -26,7 +26,10 @@ use crate::history::{
     cmd_copy, cmd_list, cmd_show, resolve_recent_session_dir, resolve_session_dir_by_id,
 };
 use crate::models::{SessionState, ShotMeta};
-use crate::paths::{active_state_file, audio_device_cache_file, ensure_dirs, perf_log_file};
+use crate::paths::{
+    active_state_file, audio_device_cache_file, ensure_dirs, parakeet_server_pid_file,
+    perf_log_file, web_server_pid_file,
+};
 use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
 use crate::session_commands::{cmd_shot, cmd_start, cmd_stop};
 use crate::transcription::{
@@ -1064,6 +1067,114 @@ fn cmd_html(cli: &Cli, args: &HtmlArgs) -> Result<i32, AppError> {
     Ok(0)
 }
 
+fn kill_server_from_pid_file(
+    cli: &Cli,
+    label: &str,
+    pid_file: &Path,
+    report: &mut Vec<Value>,
+) -> Result<(), AppError> {
+    let pid = read_pid_file(pid_file);
+    if pid.is_none() {
+        report.push(json!({
+            "server": label,
+            "pid_file": pid_file,
+            "status": "no_pid_file_or_invalid"
+        }));
+        return Ok(());
+    }
+
+    let pid = pid.unwrap_or_default();
+    let mut status = "stale_pid";
+    let mut killed = false;
+    let mut signal = "none";
+    let mut error_msg: Option<String> = None;
+
+    if process_is_alive(pid) {
+        status = "running";
+        if cli.dry_run {
+            signal = "SIGTERM(dry_run)";
+        } else {
+            signal = "SIGTERM";
+            if let Err(e) = send_signal(pid, libc::SIGTERM) {
+                status = "signal_failed";
+                error_msg = Some(format!("SIGTERM failed: {e}"));
+            }
+
+            if status != "signal_failed" {
+                let deadline = SystemTime::now() + Duration::from_secs(2);
+                while SystemTime::now() < deadline {
+                    if !process_is_alive(pid) {
+                        killed = true;
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+
+                if !killed && process_is_alive(pid) {
+                    signal = "SIGKILL";
+                    if let Err(e) = send_signal(pid, libc::SIGKILL) {
+                        status = "signal_failed";
+                        error_msg = Some(format!("SIGKILL failed: {e}"));
+                    } else {
+                        killed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if !cli.dry_run && pid_file.exists() {
+        let _ = fs::remove_file(pid_file);
+    }
+
+    report.push(json!({
+        "server": label,
+        "pid": pid,
+        "pid_file": pid_file,
+        "status": status,
+        "signal": signal,
+        "killed": killed,
+        "error": error_msg,
+    }));
+    Ok(())
+}
+
+fn cmd_kill_server(cli: &Cli) -> Result<i32, AppError> {
+    ensure_dirs()?;
+
+    let mut report = Vec::new();
+    kill_server_from_pid_file(cli, "web", &web_server_pid_file(), &mut report)?;
+    kill_server_from_pid_file(cli, "parakeet", &parakeet_server_pid_file(), &mut report)?;
+
+    if !cli.quiet {
+        for item in &report {
+            let server = item.get("server").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let pid = item
+                .get("pid")
+                .and_then(|v| v.as_i64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let signal = item.get("signal").and_then(|v| v.as_str()).unwrap_or("none");
+            println!(
+                "kill-server {}: status={} pid={} signal={}",
+                server, status, pid, signal
+            );
+        }
+    }
+
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": "kill-server",
+            "servers": report,
+        }),
+    );
+
+    Ok(0)
+}
+
 fn run(cli: &Cli) -> Result<i32, AppError> {
     match &cli.command {
         Commands::Start(args) => cmd_start(cli, args),
@@ -1076,6 +1187,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Show(args) => cmd_show(cli, args),
         Commands::Html(args) => cmd_html(cli, args),
         Commands::WatchClipboard(args) => cmd_watch_clipboard(cli, args),
+        Commands::KillServer => cmd_kill_server(cli),
     }
 }
 
