@@ -445,17 +445,19 @@ fn contains_any(name_lc: &str, terms: &[&str]) -> bool {
     terms.iter().any(|t| name_lc.contains(t))
 }
 
-fn resolve_audio_device(requested: &str, cli: &Cli) -> String {
+fn resolve_audio_device_with_cache(requested: &str, cli: &Cli, use_cache: bool) -> String {
     if !requested.eq_ignore_ascii_case("auto") {
         return requested.to_string();
     }
 
     let cache_file = audio_device_cache_file();
-    if let Ok(cached) = fs::read_to_string(&cache_file) {
-        let cached = cached.trim();
-        if cached.starts_with(':') && cached.len() > 1 {
-            print_verbose(cli, format!("Using cached audio device {}", cached));
-            return cached.to_string();
+    if use_cache {
+        if let Ok(cached) = fs::read_to_string(&cache_file) {
+            let cached = cached.trim();
+            if cached.starts_with(':') && cached.len() > 1 {
+                print_verbose(cli, format!("Using cached audio device {}", cached));
+                return cached.to_string();
+            }
         }
     }
 
@@ -492,6 +494,21 @@ fn resolve_audio_device(requested: &str, cli: &Cli) -> String {
         format!("Auto-selected audio device {} ({})", resolved, preferred.1),
     );
     resolved
+}
+
+fn resolve_audio_device(requested: &str, cli: &Cli) -> String {
+    resolve_audio_device_with_cache(requested, cli, true)
+}
+
+fn resolve_audio_device_uncached(cli: &Cli) -> String {
+    resolve_audio_device_with_cache("auto", cli, false)
+}
+
+fn recorder_error_looks_like_invalid_audio_device(err: &AppError) -> bool {
+    let m = err.message.to_ascii_lowercase();
+    m.contains("invalid audio device index")
+        || m.contains("error opening input file")
+        || m.contains("avfoundation indev") && m.contains("input/output error")
 }
 
 fn detect_screenshot_dir(explicit: Option<&Path>, cli: &Cli) -> Result<PathBuf, AppError> {
@@ -770,7 +787,7 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     };
 
     let t_audio_device = Instant::now();
-    let resolved_audio_device = resolve_audio_device(&requested_audio_device, cli);
+    let mut resolved_audio_device = resolve_audio_device(&requested_audio_device, cli);
     let audio_device_ms = t_audio_device.elapsed().as_secs_f64() * 1000.0;
 
     if cli.dry_run {
@@ -831,9 +848,47 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         ));
     }
 
-    let record_cmd = build_record_cmd(&audio_path, &resolved_audio_device);
     let t_spawn_recorder = Instant::now();
-    let ffmpeg_pid = spawn_recorder(&record_cmd, &ffmpeg_log_path, cli)?;
+    let mut audio_device_retry = false;
+
+    let ffmpeg_pid = {
+        let record_cmd = build_record_cmd(&audio_path, &resolved_audio_device);
+        match spawn_recorder(&record_cmd, &ffmpeg_log_path, cli) {
+            Ok(pid) => pid,
+            Err(first_err)
+                if args.audio_device.eq_ignore_ascii_case("auto")
+                    && recorder_error_looks_like_invalid_audio_device(&first_err) =>
+            {
+                print_verbose(
+                    cli,
+                    "Detected invalid audio device from cached/env selection; retrying with fresh auto-detect.",
+                );
+                let _ = fs::remove_file(audio_device_cache_file());
+
+                let retry_device = resolve_audio_device_uncached(cli);
+                let retry_cmd = build_record_cmd(&audio_path, &retry_device);
+
+                match spawn_recorder(&retry_cmd, &ffmpeg_log_path, cli) {
+                    Ok(pid) => {
+                        resolved_audio_device = retry_device;
+                        audio_device_retry = true;
+                        pid
+                    }
+                    Err(second_err) => {
+                        return Err(app_error(
+                            second_err.code,
+                            format!(
+                                "Recorder failed with initial device selection and retry.\ninitial_error: {}\nretry_error: {}",
+                                first_err.message, second_err.message
+                            ),
+                        ));
+                    }
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    };
+
     let spawn_recorder_ms = t_spawn_recorder.elapsed().as_secs_f64() * 1000.0;
 
     let state = SessionState {
@@ -876,7 +931,8 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "resolve_audio_device_ms": round3(audio_device_ms),
             "spawn_recorder_ms": round3(spawn_recorder_ms),
             "parakeet_prewarm_ms": round3(prewarm_ms)
-        }
+        },
+        "audio_device_retry": audio_device_retry
     }));
 
     play_event_sound("start", cli);
@@ -884,12 +940,13 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     print_out(
         cli,
         format!(
-            "Started session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}\nstartup_ms: {}",
+            "Started session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}\naudio_device_retry: {}\nstartup_ms: {}",
             session_id,
             session_dir.display(),
             audio_path.display(),
             screenshot_dir.display(),
             resolved_audio_device,
+            audio_device_retry,
             round3(start_total_ms),
         ),
     );
@@ -904,6 +961,7 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "audio_path": audio_path,
             "screenshot_source_dir": screenshot_dir,
             "audio_device": resolved_audio_device,
+            "audio_device_retry": audio_device_retry,
             "ffmpeg_pid": ffmpeg_pid,
             "startup_ms": round3(start_total_ms),
             "dry_run": false,
