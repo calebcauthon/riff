@@ -9,14 +9,17 @@ use crate::reporting::{
     build_html_note, build_note, inject_screenshot_markers, load_shots_for_session, max_shot_id,
     shots_from_events,
 };
+use crate::transcription::{
+    default_parakeet_script, ensure_parakeet_server, ensure_web_server, parakeet_server_enabled,
+    run_transcription,
+};
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, clear_active_state, command_exists,
-    default_parakeet_script, detect_screenshot_dir, emit_json, ensure_parakeet_server,
-    ensure_web_server, file_mtime_epoch, get_audio_duration_sec, load_active_state,
-    move_session_screenshots, now_iso, parakeet_server_enabled, play_event_sound, print_out,
-    print_verbose, process_is_alive, read_json, recorder_error_looks_like_invalid_audio_device,
-    resolve_audio_device, resolve_audio_device_uncached, round3, run_transcription,
-    save_active_state, session_stamp, spawn_recorder, stop_recorder, unix_now, write_json,
+    detect_screenshot_dir, emit_json, file_mtime_epoch, get_audio_duration_sec, load_active_state,
+    move_session_screenshots, now_iso, play_event_sound, print_out, print_verbose,
+    process_is_alive, read_json, recorder_error_looks_like_invalid_audio_device,
+    resolve_audio_device, resolve_audio_device_uncached, round3, save_active_state, session_stamp,
+    spawn_recorder, stop_recorder, unix_now, write_json,
 };
 use serde_json::{json, Value};
 use std::env;
