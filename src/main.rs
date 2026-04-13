@@ -334,6 +334,16 @@ pub(crate) struct FrontmostAppMeta {
     pub window_title: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ProcessStats {
+    pub cpu_percent: f64,
+    pub mem_percent: f64,
+    pub rss_kb: u64,
+    pub elapsed: Option<String>,
+    pub state: Option<String>,
+    pub command: Option<String>,
+}
+
 fn parse_optional_field(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed == "-" {
@@ -341,6 +351,75 @@ fn parse_optional_field(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+pub(crate) fn capture_process_stats(pid: i32, cli: &Cli) -> Result<ProcessStats, String> {
+    if !command_exists("ps") {
+        return Err("ps_unavailable".to_string());
+    }
+
+    let out = match Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .args([
+            "-o", "%cpu=", "-o", "%mem=", "-o", "rss=", "-o", "etime=", "-o", "state=", "-o",
+            "command=",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            let msg = format!("ps_failed_status_{:?}", o.status.code());
+            if cli.verbose && !cli.quiet {
+                eprintln!("[verbose] could not capture process stats ({msg})");
+            }
+            return Err(msg);
+        }
+        Err(e) => {
+            let msg = format!("ps_exec_error_{e}");
+            if cli.verbose && !cli.quiet {
+                eprintln!("[verbose] could not run ps for process stats: {msg}");
+            }
+            return Err(msg);
+        }
+    };
+
+    let line = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "ps_empty_output".to_string())?;
+
+    let cols = line.split_whitespace().collect::<Vec<_>>();
+    if cols.len() < 6 {
+        return Err("ps_unexpected_output".to_string());
+    }
+
+    let cpu_percent = cols[0]
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "ps_parse_cpu_failed".to_string())?;
+    let mem_percent = cols[1]
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "ps_parse_mem_failed".to_string())?;
+    let rss_kb = cols[2]
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| "ps_parse_rss_failed".to_string())?;
+    let elapsed = parse_optional_field(cols[3]);
+    let state = parse_optional_field(cols[4]);
+    let command = parse_optional_field(&cols[5..].join(" "));
+
+    Ok(ProcessStats {
+        cpu_percent,
+        mem_percent,
+        rss_kb,
+        elapsed,
+        state,
+        command,
+    })
 }
 
 pub(crate) fn capture_frontmost_app_meta(cli: &Cli) -> Result<FrontmostAppMeta, String> {
@@ -976,6 +1055,13 @@ fn move_session_screenshots(
             app_pid: None,
             window_title: None,
             app_capture_error: None,
+            proc_cpu_percent: None,
+            proc_mem_percent: None,
+            proc_rss_kb: None,
+            proc_elapsed: None,
+            proc_state: None,
+            proc_command: None,
+            proc_capture_error: None,
         });
     }
 

@@ -78,6 +78,15 @@ printf 'TestApp\tcom.example.TestApp\t4242\tExample Window\n'
 exit 0
 "#,
     );
+
+    write_executable(
+        &dir.join("ps"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '12.3 4.5 67890 01:23 R /Applications/TestApp.app/Contents/MacOS/TestApp --demo\n'
+exit 0
+"#,
+    );
 }
 
 fn install_fake_open(dir: &Path) {
@@ -388,7 +397,7 @@ fn end_to_end_start_shot_stop_produces_transcript_and_note() {
         "note.md missing transcript text: {note_md}"
     );
     assert!(
-        note_md.contains("[Screenshot 1]"),
+        note_md.contains("[TestApp Screenshot 1]"),
         "note.md missing screenshot marker: {note_md}"
     );
     assert!(
@@ -399,11 +408,27 @@ fn end_to_end_start_shot_stop_produces_transcript_and_note() {
         note_md.contains("Window: Example Window"),
         "note.md missing screenshot window metadata: {note_md}"
     );
+    assert!(
+        note_md.contains("## Screenshot Metadata"),
+        "note.md missing screenshot metadata section: {note_md}"
+    );
+    assert!(
+        note_md.contains("[Screenshot 1]"),
+        "note.md missing per-screenshot metadata header: {note_md}"
+    );
+    assert!(
+        note_md.contains("cpu=12.3%"),
+        "note.md missing screenshot cpu metric: {note_md}"
+    );
+    assert!(
+        note_md.contains("mem=4.5%"),
+        "note.md missing screenshot memory metric: {note_md}"
+    );
 
     cmd_with_root(td.path())
         .args(["show", &session_id])
         .assert()
         .success()
         .stdout(predicates::str::contains("hello from integration test"))
-        .stdout(predicates::str::contains("[Screenshot 1]"));
+        .stdout(predicates::str::contains("[TestApp Screenshot 1]"));
 }

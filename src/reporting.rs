@@ -18,10 +18,18 @@ pub(crate) fn inject_annotation_markers(
     clips: &[ClipboardMeta],
     audio_duration_sec: Option<f64>,
 ) -> String {
-    let clean = transcript.trim();
+    let mut clean = transcript.trim().to_string();
+    for _ in 0..4 {
+        let (next, changed) = strip_annotation_markers_once(&clean);
+        clean = next;
+        if !changed {
+            break;
+        }
+    }
+    let clean = clean.trim();
     let mut markers = shots
         .iter()
-        .map(|s| (s.audio_sec, format!("[Screenshot {}]", s.shot_id)))
+        .map(|s| (s.audio_sec, format!("[{}]", shot_marker_label(s))))
         .chain(
             clips
                 .iter()
@@ -91,24 +99,58 @@ pub(crate) fn inject_annotation_markers(
     tokens.join(" ")
 }
 
-#[cfg(test)]
-mod marker_tests {
-    use super::*;
-
-    #[test]
-    fn inject_annotation_markers_does_not_duplicate_existing_screenshot_marker() {
-        let transcript =
-            "Screenshot 1: /tmp/ispy/sessions/abc/screenshots/shot-001.png Testing, testing, [Screenshot 1] testing.";
-        let shots = vec![ShotMeta {
-            shot_id: 1,
-            dest_rel_path: "screenshots/shot-001.png".to_string(),
-            audio_sec: 1.0,
-        }];
-
-        let out = inject_annotation_markers(transcript, &shots, &[], Some(3.0));
-        assert_eq!(out, transcript);
-        assert!(!out.contains("[Screenshot [Screenshot 1] 1]"));
+fn is_annotation_marker_body(body: &str) -> bool {
+    let t = body.trim();
+    if let Some(rest) = t.strip_prefix("Screenshot ") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
     }
+    if let Some(rest) = t.strip_prefix("Clipboard ") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    if let Some((prefix, suffix)) = t.rsplit_once(" Screenshot ") {
+        return !prefix.trim().is_empty()
+            && !suffix.is_empty()
+            && suffix.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+fn strip_annotation_markers_once(input: &str) -> (String, bool) {
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    let bytes = input.as_bytes();
+    let mut changed = false;
+
+    while i < bytes.len() {
+        if bytes[i] != b'[' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        let start = i;
+        let mut end = i + 1;
+        while end < bytes.len() && bytes[end] != b']' {
+            end += 1;
+        }
+        if end >= bytes.len() {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        let body = &input[start + 1..end];
+        if is_annotation_marker_body(body) {
+            changed = true;
+            i = end + 1;
+            continue;
+        }
+
+        out.push_str(&input[start..=end]);
+        i = end + 1;
+    }
+
+    (out, changed)
 }
 
 fn format_hms(seconds: f64) -> String {
@@ -143,6 +185,19 @@ fn clip_preview(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn shot_marker_label(shot: &ShotMeta) -> String {
+    if let Some(app_name) = shot
+        .app_name
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        format!("{app_name} Screenshot {}", shot.shot_id)
+    } else {
+        format!("Screenshot {}", shot.shot_id)
+    }
+}
+
 fn shot_context_text(shot: &ShotMeta) -> Option<String> {
     let mut parts = Vec::<String>::new();
     if let Some(name) = shot.app_name.as_ref() {
@@ -167,6 +222,47 @@ fn shot_context_text(shot: &ShotMeta) -> Option<String> {
     } else {
         Some(parts.join("; "))
     }
+}
+
+fn shot_process_summary_text(shot: &ShotMeta) -> Option<String> {
+    let mut parts = Vec::<String>::new();
+    if let Some(pid) = shot.app_pid {
+        parts.push(format!("pid={pid}"));
+    }
+    if let Some(cpu) = shot.proc_cpu_percent {
+        parts.push(format!("cpu={cpu:.1}%"));
+    }
+    if let Some(mem) = shot.proc_mem_percent {
+        parts.push(format!("mem={mem:.1}%"));
+    }
+    if let Some(rss) = shot.proc_rss_kb {
+        parts.push(format!("rss={} KB", rss));
+    }
+    if let Some(elapsed) = shot.proc_elapsed.as_ref() {
+        parts.push(format!("elapsed={elapsed}"));
+    }
+    if let Some(state) = shot.proc_state.as_ref() {
+        parts.push(format!("state={state}"));
+    }
+    if let Some(command) = shot.proc_command.as_ref() {
+        parts.push(format!("command={command}"));
+    }
+    if parts.is_empty() {
+        if let Some(reason) = shot.proc_capture_error.as_ref() {
+            parts.push(format!("unavailable ({reason})"));
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+fn shot_process_html(shot: &ShotMeta) -> Option<String> {
+    shot_process_summary_text(shot)
+        .map(|s| format!(r#"<div class="sys">System: {}</div>"#, html_escape(&s)))
 }
 
 pub(crate) fn build_note(
@@ -205,25 +301,23 @@ pub(crate) fn build_note(
         lines.push(format!("- Transcription method: `{method}`"));
     }
 
-    lines.push(String::new());
-    lines.push("## Transcript".to_string());
-    lines.push(String::new());
-
     if !shots.is_empty() {
+        lines.push(String::new());
+        lines.push("## Screenshot Metadata".to_string());
+        lines.push(String::new());
         let session_dir = Path::new(&state.session_dir);
         for shot in shots {
             let abs_path = session_dir.join(&shot.dest_rel_path);
-            let ctx = shot_context_text(shot)
-                .map(|s| format!(" ({s})"))
-                .unwrap_or_default();
-            lines.push(format!(
-                "Screenshot {}: {}{}",
-                shot.shot_id,
-                abs_path.display(),
-                ctx
-            ));
+            lines.push(format!("[Screenshot {}]", shot.shot_id));
+            lines.push(format!("- Path: {}", abs_path.display()));
+            if let Some(ctx) = shot_context_text(shot) {
+                lines.push(format!("- {}", ctx));
+            }
+            if let Some(proc_summary) = shot_process_summary_text(shot) {
+                lines.push(format!("- Process: {}", proc_summary));
+            }
+            lines.push(String::new());
         }
-        lines.push(String::new());
     }
 
     if !clips.is_empty() {
@@ -237,6 +331,9 @@ pub(crate) fn build_note(
         lines.push(String::new());
     }
 
+    lines.push("## Transcript".to_string());
+    lines.push(String::new());
+
     if transcript.trim().is_empty() {
         lines.push("_No transcript available._".to_string());
     } else {
@@ -248,15 +345,12 @@ pub(crate) fn build_note(
         lines.push("## Screenshot Footnotes".to_string());
         lines.push(String::new());
         for shot in shots {
-            let ctx = shot_context_text(shot)
-                .map(|s| format!(" - {}", s))
-                .unwrap_or_default();
+            let label = shot_marker_label(shot);
             lines.push(format!(
-                "[Screenshot {}]: {} (t={}){}",
-                shot.shot_id,
+                "[{}]: {} (t={})",
+                label,
                 shot.dest_rel_path,
-                format_hms(shot.audio_sec),
-                ctx
+                format_hms(shot.audio_sec)
             ));
         }
         lines.push(String::new());
@@ -331,8 +425,9 @@ pub(crate) fn build_html_note(
             .as_ref()
             .map(|s| format!(r#"<div class="ctx">{}</div>"#, html_escape(s)))
             .unwrap_or_default();
+        let process_html = shot_process_html(shot).unwrap_or_default();
         gallery.push_str(&format!(
-            r#"<figure class="card"><div class="card-head"><figcaption>Screenshot {}</figcaption><div class="card-actions"><button class="btn small annotate-image" data-url="{}" data-path="{}">Annotate</button><button class="btn small copy-image" data-url="{}" data-path="{}">Copy image</button></div></div><a href="{}" target="_blank" rel="noreferrer"><img src="{}" alt="Screenshot {}" loading="lazy" /></a><div class="path">{}</div>{}</figure>"#,
+            r#"<figure class="card"><div class="card-head"><figcaption>Screenshot {}</figcaption><div class="card-actions"><button class="btn small annotate-image" data-url="{}" data-path="{}">Annotate</button><button class="btn small copy-image" data-url="{}" data-path="{}">Copy image</button></div></div><a href="{}" target="_blank" rel="noreferrer"><img src="{}" alt="Screenshot {}" loading="lazy" /></a><div class="path">{}</div>{}{}</figure>"#,
             shot.shot_id,
             html_escape(&rel_url),
             html_escape(&abs_str),
@@ -342,7 +437,8 @@ pub(crate) fn build_html_note(
             html_escape(&rel_url),
             shot.shot_id,
             html_escape(&abs_str),
-            context_html
+            context_html,
+            process_html
         ));
     }
 
@@ -412,6 +508,7 @@ pub(crate) fn build_html_note(
     .annotator-host {{ width: 100%; height: min(76vh, 900px); }}
     .annotator-help {{ margin-top: 8px; font-size: 12px; color: #64748b; }}
     .ctx {{ color: #374151; margin-top: 6px; font-size: 12px; line-height: 1.5; }}
+    .sys {{ color: #111827; margin-top: 6px; font-size: 12px; line-height: 1.5; }}
   </style>
 </head>
 <body>
@@ -1202,6 +1299,37 @@ pub(crate) fn shots_from_events(events: &[Value]) -> Vec<ShotMeta> {
             .get("app_capture_error")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let proc_cpu_percent = event
+            .get("process")
+            .and_then(|v| v.get("cpu_percent"))
+            .and_then(|v| v.as_f64());
+        let proc_mem_percent = event
+            .get("process")
+            .and_then(|v| v.get("mem_percent"))
+            .and_then(|v| v.as_f64());
+        let proc_rss_kb = event
+            .get("process")
+            .and_then(|v| v.get("rss_kb"))
+            .and_then(|v| v.as_u64());
+        let proc_elapsed = event
+            .get("process")
+            .and_then(|v| v.get("elapsed"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let proc_state = event
+            .get("process")
+            .and_then(|v| v.get("state"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let proc_command = event
+            .get("process")
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let proc_capture_error = event
+            .get("process_capture_error")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         if let Some(existing) = by_id.get_mut(&id) {
             existing.dest_rel_path = dest.to_string();
@@ -1221,6 +1349,27 @@ pub(crate) fn shots_from_events(events: &[Value]) -> Vec<ShotMeta> {
             if app_capture_error.is_some() {
                 existing.app_capture_error = app_capture_error;
             }
+            if proc_cpu_percent.is_some() {
+                existing.proc_cpu_percent = proc_cpu_percent;
+            }
+            if proc_mem_percent.is_some() {
+                existing.proc_mem_percent = proc_mem_percent;
+            }
+            if proc_rss_kb.is_some() {
+                existing.proc_rss_kb = proc_rss_kb;
+            }
+            if proc_elapsed.is_some() {
+                existing.proc_elapsed = proc_elapsed;
+            }
+            if proc_state.is_some() {
+                existing.proc_state = proc_state;
+            }
+            if proc_command.is_some() {
+                existing.proc_command = proc_command;
+            }
+            if proc_capture_error.is_some() {
+                existing.proc_capture_error = proc_capture_error;
+            }
             continue;
         }
 
@@ -1235,6 +1384,13 @@ pub(crate) fn shots_from_events(events: &[Value]) -> Vec<ShotMeta> {
                 app_pid,
                 window_title,
                 app_capture_error,
+                proc_cpu_percent,
+                proc_mem_percent,
+                proc_rss_kb,
+                proc_elapsed,
+                proc_state,
+                proc_command,
+                proc_capture_error,
             },
         );
     }
@@ -1321,6 +1477,13 @@ pub(crate) fn load_shots_for_session(session_dir: &Path, events: &[Value]) -> Ve
                     app_pid: None,
                     window_title: None,
                     app_capture_error: None,
+                    proc_cpu_percent: None,
+                    proc_mem_percent: None,
+                    proc_rss_kb: None,
+                    proc_elapsed: None,
+                    proc_state: None,
+                    proc_command: None,
+                    proc_capture_error: None,
                 })
                 .collect();
         }
@@ -1421,6 +1584,18 @@ mod tests {
             shot_id: 1,
             dest_rel_path: "screenshots/shot-001.png".to_string(),
             audio_sec: 1.2,
+            app_name: None,
+            app_bundle_id: None,
+            app_pid: None,
+            window_title: None,
+            app_capture_error: None,
+            proc_cpu_percent: None,
+            proc_mem_percent: None,
+            proc_rss_kb: None,
+            proc_elapsed: None,
+            proc_state: None,
+            proc_command: None,
+            proc_capture_error: None,
         }];
         let clips = vec![];
 

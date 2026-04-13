@@ -16,9 +16,9 @@ use crate::transcription::{
 };
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
-    clear_active_state, command_exists, detect_screenshot_dir, emit_json, file_mtime_epoch,
-    get_audio_duration_sec, load_active_state, move_session_screenshots, now_iso, play_event_sound,
-    print_out, print_verbose, process_is_alive, read_json,
+    capture_process_stats, clear_active_state, command_exists, detect_screenshot_dir, emit_json,
+    file_mtime_epoch, get_audio_duration_sec, load_active_state, move_session_screenshots, now_iso,
+    play_event_sound, print_out, print_verbose, process_is_alive, read_json,
     recorder_error_looks_like_invalid_audio_device, resolve_audio_device,
     resolve_audio_device_uncached, round3, save_active_state, session_stamp,
     spawn_clipboard_watcher, spawn_recorder, stop_clipboard_watcher, stop_recorder, unix_now,
@@ -342,7 +342,7 @@ pub(crate) fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
 
     let mtime = file_mtime_epoch(&dest_abs).unwrap_or_else(unix_now);
     let audio_sec = (mtime - state.started_at_epoch).max(0.0);
-    let (app_payload, app_capture_error) = match capture_frontmost_app_meta(cli) {
+    let (app_payload, app_capture_error, app_pid) = match capture_frontmost_app_meta(cli) {
         Ok(meta) => (
             json!({
                 "name": meta.name,
@@ -351,8 +351,29 @@ pub(crate) fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
                 "window_title": meta.window_title,
             }),
             Value::Null,
+            meta.pid,
         ),
-        Err(reason) => (Value::Null, Value::String(reason)),
+        Err(reason) => (Value::Null, Value::String(reason), None),
+    };
+    let (process_payload, process_capture_error) = match app_pid {
+        Some(pid) => match capture_process_stats(pid, cli) {
+            Ok(proc_stats) => (
+                json!({
+                    "cpu_percent": proc_stats.cpu_percent,
+                    "mem_percent": proc_stats.mem_percent,
+                    "rss_kb": proc_stats.rss_kb,
+                    "elapsed": proc_stats.elapsed,
+                    "state": proc_stats.state,
+                    "command": proc_stats.command,
+                }),
+                Value::Null,
+            ),
+            Err(reason) => (Value::Null, Value::String(reason)),
+        },
+        None => (
+            Value::Null,
+            Value::String("app_pid_unavailable".to_string()),
+        ),
     };
 
     append_jsonl(
@@ -368,6 +389,8 @@ pub(crate) fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
             "method": "direct_screencapture",
             "app": app_payload,
             "app_capture_error": app_capture_error,
+            "process": process_payload,
+            "process_capture_error": process_capture_error,
         }),
     )?;
 
@@ -392,6 +415,8 @@ pub(crate) fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
             "audioSec": round3(audio_sec),
             "app": app_payload,
             "app_capture_error": app_capture_error,
+            "process": process_payload,
+            "process_capture_error": process_capture_error,
             "dry_run": false,
         }),
     );

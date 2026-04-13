@@ -27,6 +27,13 @@ pub struct ShotMeta {
     pub app_pid: Option<i32>,
     pub window_title: Option<String>,
     pub app_capture_error: Option<String>,
+    pub proc_cpu_percent: Option<f64>,
+    pub proc_mem_percent: Option<f64>,
+    pub proc_rss_kb: Option<u64>,
+    pub proc_elapsed: Option<String>,
+    pub proc_state: Option<String>,
+    pub proc_command: Option<String>,
+    pub proc_capture_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
