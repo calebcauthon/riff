@@ -66,7 +66,7 @@ fn count_session_images(session_dir: &Path) -> usize {
         .count()
 }
 
-fn extract_transcript_from_note(note_markdown: &str) -> Option<String> {
+pub(crate) fn extract_transcript_from_note(note_markdown: &str) -> Option<String> {
     let marker = "## Transcript";
     let start = note_markdown.find(marker)? + marker.len();
     let after = note_markdown[start..].trim_start();
