@@ -22,7 +22,7 @@ mod transcription;
 
 use crate::cli::{Cli, Commands, HtmlArgs, WatchClipboardArgs};
 use crate::error::{app_error, AppError};
-use crate::history::{cmd_copy, cmd_list, cmd_show, resolve_recent_session_dir};
+use crate::history::{cmd_copy, cmd_list, cmd_show, resolve_session_dir_by_id};
 use crate::models::{SessionState, ShotMeta};
 use crate::paths::{active_state_file, audio_device_cache_file, ensure_dirs, perf_log_file};
 use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
@@ -998,8 +998,7 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
 fn cmd_html(cli: &Cli, args: &HtmlArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
 
-    let requested_rank = args.n.unwrap_or(1);
-    let session_dir = resolve_recent_session_dir(requested_rank)?;
+    let session_dir = resolve_session_dir_by_id(&args.session_id)?;
 
     // Always regenerate so HTML reflects latest template/features.
     let html_path = generate_html_for_session(&session_dir)?;

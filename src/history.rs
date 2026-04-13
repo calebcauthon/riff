@@ -393,7 +393,7 @@ pub(crate) fn resolve_recent_session_dir(rank: usize) -> Result<PathBuf, AppErro
     Ok(session_dirs[rank - 1].clone())
 }
 
-fn resolve_session_dir_by_id(session_id: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn resolve_session_dir_by_id(session_id: &str) -> Result<PathBuf, AppError> {
     if session_id.contains('/') || session_id.contains("..") {
         return Err(app_error(8, format!("Invalid session id: {}", session_id)));
     }

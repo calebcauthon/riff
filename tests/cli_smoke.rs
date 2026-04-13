@@ -119,7 +119,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         "list    List recent sessions",
         "show    Show note markdown for a session id",
         "copy    Print transcript for a recent session index",
-        "html    Open HTML report for a recent session",
+        "html    Open HTML report for a session id",
         "sounds  Pick start/stop sounds and beep timing",
         "status  Show active session status",
     ];
@@ -246,7 +246,7 @@ fn html_generates_sessions_index_and_navigation_link() {
     install_fake_open(&fake_bin);
 
     cmd_with_root_and_fake_path(td.path(), &fake_bin)
-        .args(["html", "1"])
+        .args(["html", "20260413-013012"])
         .assert()
         .success();
 

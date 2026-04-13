@@ -38,7 +38,7 @@ pub enum Commands {
     Show(ShowArgs),
     /// Print transcript for a recent session index
     Copy(CopyArgs),
-    /// Open HTML report for a recent session
+    /// Open HTML report for a session id
     Html(HtmlArgs),
 
     /// Pick start/stop sounds and beep timing
@@ -93,8 +93,8 @@ pub struct ShowArgs {
 
 #[derive(Args, Debug)]
 pub struct HtmlArgs {
-    /// Which recent session to open (1 = most recent)
-    pub n: Option<usize>,
+    /// Session id (for example: 20260413-013011)
+    pub session_id: String,
 }
 
 #[derive(Args, Debug)]
