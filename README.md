@@ -244,6 +244,7 @@ Behavior:
   - `Copy markdown` button
   - `Copy transcript` button
   - `Copy image` button on each screenshot card (falls back to copying image path if image clipboard API is unavailable)
+  - `Browse all sessions` link to `/sessions/index.html` (one transcript row per session with screenshot thumbnails)
 
 ---
 
