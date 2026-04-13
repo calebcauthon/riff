@@ -45,6 +45,8 @@ pub enum Commands {
     Sounds,
     /// Show active session status
     Status,
+    #[command(hide = true, name = "watch-clipboard")]
+    WatchClipboard(WatchClipboardArgs),
 }
 
 #[derive(Args, Debug)]
@@ -93,4 +95,22 @@ pub struct ShowArgs {
 pub struct HtmlArgs {
     /// Which recent session to open (1 = most recent)
     pub n: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub struct WatchClipboardArgs {
+    #[arg(long)]
+    pub session_id: String,
+
+    #[arg(long)]
+    pub events_path: PathBuf,
+
+    #[arg(long)]
+    pub started_at_epoch: f64,
+
+    #[arg(long, default_value_t = 0)]
+    pub start_id: usize,
+
+    #[arg(long, default_value_t = 450)]
+    pub poll_ms: u64,
 }

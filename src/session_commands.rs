@@ -6,8 +6,8 @@ use crate::paths::{
     active_state_file, audio_device_cache_file, ensure_dirs, last_session_file, sessions_dir,
 };
 use crate::reporting::{
-    build_html_note, build_note, inject_screenshot_markers, load_shots_for_session, max_shot_id,
-    shots_from_events,
+    build_html_note, build_note, clipboard_from_events, inject_annotation_markers,
+    load_shots_for_session, max_clipboard_id, max_shot_id, shots_from_events,
 };
 use crate::transcription::{
     default_parakeet_script, ensure_parakeet_server, ensure_web_server, parakeet_server_enabled,
@@ -19,7 +19,8 @@ use crate::{
     move_session_screenshots, now_iso, play_event_sound, print_out, print_verbose,
     process_is_alive, read_json, recorder_error_looks_like_invalid_audio_device,
     resolve_audio_device, resolve_audio_device_uncached, round3, save_active_state, session_stamp,
-    spawn_recorder, stop_recorder, unix_now, write_json,
+    spawn_clipboard_watcher, spawn_recorder, stop_clipboard_watcher, stop_recorder, unix_now,
+    write_json,
 };
 use serde_json::{json, Value};
 use std::env;
@@ -36,6 +37,9 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     let active_path = active_state_file();
     if active_path.exists() {
         let existing: SessionState = read_json(&active_path)?;
+        if let Some(pid) = existing.clipboard_watcher_pid {
+            stop_clipboard_watcher(pid, cli);
+        }
         if let Some(pid) = existing.ffmpeg_pid {
             if process_is_alive(pid) {
                 return Err(app_error(
@@ -188,9 +192,19 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         started_at_epoch: started_epoch,
         screenshot_source_dir: screenshot_dir.display().to_string(),
         audio_device: resolved_audio_device.clone(),
+        clipboard_watcher_pid: None,
     };
 
     save_active_state(&state)?;
+
+    let existing_clips = clipboard_from_events(&read_jsonl_values(&events_path));
+    if let Some(watcher_pid) =
+        spawn_clipboard_watcher(&state, max_clipboard_id(&existing_clips), cli)
+    {
+        let mut updated = state;
+        updated.clipboard_watcher_pid = Some(watcher_pid);
+        save_active_state(&updated)?;
+    }
 
     let mut prewarm_ms = 0.0;
     // Warm the Parakeet server in the background so stop is faster.
@@ -384,6 +398,9 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let mut web_server_ms = 0.0;
 
     if !cli.dry_run {
+        if let Some(pid) = state.clipboard_watcher_pid {
+            stop_clipboard_watcher(pid, cli);
+        }
         append_jsonl(
             &events_path,
             &json!({
@@ -417,6 +434,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let t_move_screens = Instant::now();
     let prior_events = read_jsonl_values(&events_path);
     let mut shots = load_shots_for_session(&session_dir, &prior_events);
+    let clips = clipboard_from_events(&prior_events);
     let moved_shots = move_session_screenshots(
         &source_dir,
         &screenshots_dir,
@@ -438,11 +456,13 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let audio_duration = get_audio_duration_sec(Path::new(&state.audio_path));
 
     let t_render = Instant::now();
-    let transcript_annotated = inject_screenshot_markers(&transcript_raw, &shots, audio_duration);
+    let transcript_annotated =
+        inject_annotation_markers(&transcript_raw, &shots, &clips, audio_duration);
     let note_md = build_note(
         &state,
         &ended_iso,
         &shots,
+        &clips,
         &transcript_annotated,
         &transcription_meta,
         audio_duration,
@@ -457,6 +477,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         &transcript_annotated,
         &note_md,
         &shots,
+        &clips,
         &session_dir,
     );
     let html_path = session_dir.join("note.html");
@@ -495,6 +516,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "type": "session_stopped",
                 "session_id": state.session_id,
                 "screenshots": shots.len(),
+                "clipboard_captures": clips.len(),
                 "screenshots_moved": moved_count,
                 "audio_duration_sec": audio_duration,
                 "note": note_path,
@@ -512,6 +534,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "html_path": html_path,
                 "stopped_at": ended_iso,
                 "screenshots": shots.len(),
+                "clipboard_captures": clips.len(),
             }),
         )?;
 
@@ -549,11 +572,12 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     print_out(
         cli,
         format!(
-            "Stopped session {}\nsession_dir: {}\nscreenshots_moved: {}\nscreenshots_total: {}\nnote: {}\nhtml: {}\nstop_ms: {}",
+            "Stopped session {}\nsession_dir: {}\nscreenshots_moved: {}\nscreenshots_total: {}\nclipboard_captures: {}\nnote: {}\nhtml: {}\nstop_ms: {}",
             state.session_id,
             session_dir.display(),
             moved_count,
             shots.len(),
+            clips.len(),
             note_path.display(),
             html_path.display(),
             round3(stop_total_ms),
@@ -584,6 +608,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "html_path": html_path,
             "screenshots_moved": moved_count,
             "screenshots_total": shots.len(),
+            "clipboard_captures": clips.len(),
             "stop_ms": round3(stop_total_ms),
             "phases": {
                 "stop_recorder_ms": round3(stop_recorder_ms),

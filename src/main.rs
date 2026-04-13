@@ -20,7 +20,7 @@ mod reporting;
 mod session_commands;
 mod transcription;
 
-use crate::cli::{Cli, Commands, HtmlArgs};
+use crate::cli::{Cli, Commands, HtmlArgs, WatchClipboardArgs};
 use crate::error::{app_error, AppError};
 use crate::history::{cmd_copy, cmd_list, cmd_show, resolve_recent_session_dir};
 use crate::models::{SessionState, ShotMeta};
@@ -116,6 +116,132 @@ fn bool_env_enabled(name: &str, default: bool) -> bool {
         ),
         Err(_) => default,
     }
+}
+
+fn clipboard_monitor_enabled() -> bool {
+    bool_env_enabled("ISPY_CLIPBOARD_MONITOR", true)
+}
+
+fn normalize_clipboard_text(raw: &str) -> String {
+    raw.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_string()
+}
+
+fn read_clipboard_text() -> Option<String> {
+    if !command_exists("pbpaste") {
+        return None;
+    }
+    let out = Command::new("pbpaste").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn monitor_clipboard_loop(args: &WatchClipboardArgs) -> Result<(), AppError> {
+    if !clipboard_monitor_enabled() || !command_exists("pbpaste") {
+        return Ok(());
+    }
+
+    let events_path = args.events_path.clone();
+    let mut last_seen = read_clipboard_text()
+        .map(|s| normalize_clipboard_text(&s))
+        .unwrap_or_default();
+    let mut next_id = args.start_id.saturating_add(1);
+
+    loop {
+        let Some(current_raw) = read_clipboard_text() else {
+            thread::sleep(Duration::from_millis(args.poll_ms.max(100)));
+            continue;
+        };
+        let current = normalize_clipboard_text(&current_raw);
+
+        if !current.is_empty() && current != last_seen {
+            let audio_sec = (unix_now() - args.started_at_epoch).max(0.0);
+            let payload = json!({
+                "ts": now_iso(),
+                "type": "clipboard_copied",
+                "id": next_id,
+                "text": current,
+                "audioSec": round3(audio_sec),
+            });
+            append_jsonl(&events_path, &payload)?;
+            last_seen = payload
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            next_id = next_id.saturating_add(1);
+        }
+
+        thread::sleep(Duration::from_millis(args.poll_ms.max(100)));
+    }
+}
+
+fn cmd_watch_clipboard(_cli: &Cli, args: &WatchClipboardArgs) -> Result<i32, AppError> {
+    monitor_clipboard_loop(args)?;
+    Ok(0)
+}
+
+pub(crate) fn spawn_clipboard_watcher(
+    state: &SessionState,
+    start_id: usize,
+    cli: &Cli,
+) -> Option<i32> {
+    if !clipboard_monitor_enabled() {
+        print_verbose(cli, "Clipboard watcher disabled by ISPY_CLIPBOARD_MONITOR.");
+        return None;
+    }
+    if !command_exists("pbpaste") {
+        print_verbose(
+            cli,
+            "Clipboard watcher not started because pbpaste is unavailable.",
+        );
+        return None;
+    }
+
+    let exe = env::current_exe().ok()?;
+    let child = Command::new(exe)
+        .arg("--quiet")
+        .arg("watch-clipboard")
+        .arg("--session-id")
+        .arg(&state.session_id)
+        .arg("--events-path")
+        .arg(&state.events_path)
+        .arg("--started-at-epoch")
+        .arg(state.started_at_epoch.to_string())
+        .arg("--start-id")
+        .arg(start_id.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let pid = child.id() as i32;
+    print_verbose(cli, format!("Clipboard watcher started with pid={pid}"));
+    Some(pid)
+}
+
+pub(crate) fn stop_clipboard_watcher(pid: i32, cli: &Cli) {
+    if !process_is_alive(pid) {
+        return;
+    }
+    let _ = send_signal(pid, libc::SIGTERM);
+    let deadline = SystemTime::now() + Duration::from_millis(800);
+    while SystemTime::now() < deadline {
+        if !process_is_alive(pid) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(40));
+    }
+    let _ = send_signal(pid, libc::SIGKILL);
+    print_verbose(
+        cli,
+        format!("Clipboard watcher pid={pid} was force-stopped."),
+    );
 }
 
 fn resolve_sound_path(spec: &str) -> PathBuf {
@@ -832,16 +958,23 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
     let state: SessionState = read_json(&active)?;
     let pid = state.ffmpeg_pid;
     let alive = pid.map(process_is_alive).unwrap_or(false);
+    let watcher_pid = state.clipboard_watcher_pid;
+    let watcher_alive = watcher_pid.map(process_is_alive).unwrap_or(false);
 
     print_out(
         cli,
         format!(
-            "Active session: {}\nsession_dir: {}\nffmpeg_pid: {} (alive={})",
+            "Active session: {}\nsession_dir: {}\nffmpeg_pid: {} (alive={})\nclipboard_watcher_pid: {} (alive={})",
             state.session_id,
             state.session_dir,
             pid.map(|p| p.to_string())
                 .unwrap_or_else(|| "none".to_string()),
             alive
+            ,
+            watcher_pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            watcher_alive
         ),
     );
 
@@ -854,6 +987,8 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
             "started_at_iso": state.started_at_iso,
             "ffmpeg_pid": pid,
             "ffmpeg_alive": alive,
+            "clipboard_watcher_pid": watcher_pid,
+            "clipboard_watcher_alive": watcher_alive,
         }),
     );
 
@@ -933,6 +1068,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Copy(args) => cmd_copy(cli, args),
         Commands::Show(args) => cmd_show(cli, args),
         Commands::Html(args) => cmd_html(cli, args),
+        Commands::WatchClipboard(args) => cmd_watch_clipboard(cli, args),
     }
 }
 

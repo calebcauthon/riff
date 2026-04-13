@@ -3,48 +3,59 @@ use crate::history::{
     extract_transcript_from_note, format_duration_compact, read_jsonl_values,
     read_transcript_text_for_session, session_duration_seconds, session_started_iso,
 };
-use crate::models::{SessionState, ShotMeta};
+use crate::models::{ClipboardMeta, SessionState, ShotMeta};
 use crate::SUPPORTED_IMAGE_EXTS;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(crate) fn inject_screenshot_markers(
+pub(crate) fn inject_annotation_markers(
     transcript: &str,
     shots: &[ShotMeta],
+    clips: &[ClipboardMeta],
     audio_duration_sec: Option<f64>,
 ) -> String {
     let clean = transcript.trim();
+    let mut markers = shots
+        .iter()
+        .map(|s| (s.audio_sec, format!("[Screenshot {}]", s.shot_id)))
+        .chain(
+            clips
+                .iter()
+                .map(|c| (c.audio_sec, format!("[Clipboard {}]", c.clip_id))),
+        )
+        .collect::<Vec<_>>();
+    markers.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     if clean.is_empty() {
-        if shots.is_empty() {
+        if markers.is_empty() {
             return "_No transcript available._".to_string();
         }
         let mut lines = vec!["_No transcript available._".to_string(), String::new()];
-        for shot in shots {
-            lines.push(format!("[Screenshot {}]", shot.shot_id));
+        for (_, marker) in markers {
+            lines.push(marker);
         }
         return lines.join("\n");
     }
 
-    if shots.is_empty() {
+    if markers.is_empty() {
         return clean.to_string();
     }
 
     let Some(duration) = audio_duration_sec else {
-        let tail = shots
+        let tail = markers
             .iter()
-            .map(|s| format!("[Screenshot {}]", s.shot_id))
+            .map(|(_, m)| m.clone())
             .collect::<Vec<_>>()
             .join(" ");
         return format!("{}\n\n{}", clean, tail);
     };
 
     if duration <= 0.0 {
-        let tail = shots
+        let tail = markers
             .iter()
-            .map(|s| format!("[Screenshot {}]", s.shot_id))
+            .map(|(_, m)| m.clone())
             .collect::<Vec<_>>()
             .join(" ");
         return format!("{}\n\n{}", clean, tail);
@@ -62,11 +73,10 @@ pub(crate) fn inject_screenshot_markers(
     let base_len = tokens.len();
     let mut inserted = 0usize;
 
-    for shot in shots {
-        let ratio = (shot.audio_sec / duration).clamp(0.0, 1.0);
+    for (audio_sec, marker) in markers {
+        let ratio = (audio_sec / duration).clamp(0.0, 1.0);
         let mut idx = ((base_len as f64) * ratio).round() as usize;
         idx = idx.min(tokens.len());
-        let marker = format!("[Screenshot {}]", shot.shot_id);
         let insert_at = (idx + inserted).min(tokens.len());
         tokens.insert(insert_at, marker);
         inserted += 1;
@@ -87,10 +97,31 @@ fn format_hms(seconds: f64) -> String {
     }
 }
 
+fn clip_preview(text: &str, max_chars: usize) -> String {
+    let single_line = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split('\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let normalized = single_line.trim();
+    let chars = normalized.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        normalized.to_string()
+    } else {
+        let mut out = chars[..max_chars].iter().collect::<String>();
+        out.push_str("...");
+        out
+    }
+}
+
 pub(crate) fn build_note(
     state: &SessionState,
     ended_iso: &str,
     shots: &[ShotMeta],
+    clips: &[ClipboardMeta],
     transcript: &str,
     transcription_meta: &Value,
     audio_duration_sec: Option<f64>,
@@ -106,6 +137,7 @@ pub(crate) fn build_note(
         state.screenshot_source_dir
     ));
     lines.push(format!("- Screenshots captured: {}", shots.len()));
+    lines.push(format!("- Clipboard captures: {}", clips.len()));
 
     if let Some(duration) = audio_duration_sec {
         lines.push(format!("- Audio duration: {}", format_hms(duration)));
@@ -138,6 +170,17 @@ pub(crate) fn build_note(
         lines.push(String::new());
     }
 
+    if !clips.is_empty() {
+        for clip in clips {
+            lines.push(format!(
+                "Clipboard {}: {}",
+                clip.clip_id,
+                clip_preview(&clip.text, 120)
+            ));
+        }
+        lines.push(String::new());
+    }
+
     if transcript.trim().is_empty() {
         lines.push("_No transcript available._".to_string());
     } else {
@@ -154,6 +197,21 @@ pub(crate) fn build_note(
                 shot.shot_id,
                 shot.dest_rel_path,
                 format_hms(shot.audio_sec)
+            ));
+        }
+        lines.push(String::new());
+    }
+
+    if !clips.is_empty() {
+        lines.push("## Clipboard Footnotes".to_string());
+        lines.push(String::new());
+        for clip in clips {
+            lines.push(format!(
+                "[Clipboard {}]: \"{}\" (t={}, chars={})",
+                clip.clip_id,
+                clip.text.replace('\n', "\\n"),
+                format_hms(clip.audio_sec),
+                clip.text.chars().count()
             ));
         }
         lines.push(String::new());
@@ -190,6 +248,7 @@ pub(crate) fn build_html_note(
     transcript: &str,
     markdown_for_copy: &str,
     shots: &[ShotMeta],
+    clips: &[ClipboardMeta],
     session_dir: &Path,
 ) -> String {
     let t_status = transcription_meta
@@ -215,6 +274,19 @@ pub(crate) fn build_html_note(
             html_escape(&rel_url),
             shot.shot_id,
             html_escape(&abs_str)
+        ));
+    }
+
+    let mut clip_cards = String::new();
+    for clip in clips {
+        let preview = clip_preview(&clip.text, 300);
+        clip_cards.push_str(&format!(
+            r#"<div class="card"><div class="card-head"><strong>Clipboard {}</strong><button class="btn small copy-clip" data-text="{}">Copy text</button></div><div class="transcript">{}</div><div class="path">t={} · {} chars</div></div>"#,
+            clip.clip_id,
+            html_escape(&clip.text),
+            html_escape(&preview),
+            html_escape(&format_hms(clip.audio_sec)),
+            clip.text.chars().count()
         ));
     }
 
@@ -270,6 +342,7 @@ pub(crate) fn build_html_note(
         <li><strong>Ended (UTC):</strong> {ended_iso}</li>
         <li><strong>Audio duration:</strong> {duration}</li>
         <li><strong>Screenshots:</strong> {screenshots}</li>
+        <li><strong>Clipboard captures:</strong> {clips}</li>
         <li><strong>Transcription status:</strong> {t_status}</li>
         <li><strong>Transcription method:</strong> {t_method}</li>
       </ul>
@@ -286,6 +359,11 @@ pub(crate) fn build_html_note(
     <section class="panel">
       <h2>Screenshots</h2>
       {gallery_html}
+    </section>
+
+    <section class="panel">
+      <h2>Clipboard</h2>
+      {clipboard_html}
     </section>
   </div>
 
@@ -364,6 +442,17 @@ pub(crate) fn build_html_note(
         }}
       }});
     }});
+
+    document.querySelectorAll('.copy-clip').forEach((btn) => {{
+      btn.addEventListener('click', async () => {{
+        const text = btn.dataset.text || '';
+        try {{
+          await copyText(text, 'Clipboard text copied');
+        }} catch (err) {{
+          setStatus('Could not copy clipboard text');
+        }}
+      }});
+    }});
   </script>
 </body>
 </html>
@@ -373,6 +462,7 @@ pub(crate) fn build_html_note(
         ended_iso = html_escape(ended_iso),
         duration = html_escape(&duration),
         screenshots = shots.len(),
+        clips = clips.len(),
         t_status = html_escape(t_status),
         t_method = html_escape(t_method),
         transcript_html = html_escape(&transcript_text),
@@ -382,6 +472,11 @@ pub(crate) fn build_html_note(
             "<div>No screenshots in this session.</div>".to_string()
         } else {
             format!("<div class=\"grid\">{}</div>", gallery)
+        },
+        clipboard_html = if clip_cards.is_empty() {
+            "<div>No clipboard captures in this session.</div>".to_string()
+        } else {
+            format!("<div class=\"grid\">{}</div>", clip_cards)
         },
     )
 }
@@ -423,8 +518,49 @@ pub(crate) fn shots_from_events(events: &[Value]) -> Vec<ShotMeta> {
     by_id.into_values().collect()
 }
 
+pub(crate) fn clipboard_from_events(events: &[Value]) -> Vec<ClipboardMeta> {
+    let mut by_id: BTreeMap<usize, ClipboardMeta> = BTreeMap::new();
+
+    for event in events {
+        let etype = event
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if etype != "clipboard_copied" {
+            continue;
+        }
+
+        let Some(id) = event.get("id").and_then(|v| v.as_u64()).map(|v| v as usize) else {
+            continue;
+        };
+        let Some(text) = event.get("text").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let audio_sec = event
+            .get("audioSec")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        by_id.insert(
+            id,
+            ClipboardMeta {
+                clip_id: id,
+                text: text.to_string(),
+                audio_sec,
+            },
+        );
+    }
+
+    by_id.into_values().collect()
+}
+
 pub(crate) fn max_shot_id(shots: &[ShotMeta]) -> usize {
     shots.iter().map(|s| s.shot_id).max().unwrap_or(0)
+}
+
+pub(crate) fn max_clipboard_id(clips: &[ClipboardMeta]) -> usize {
+    clips.iter().map(|c| c.clip_id).max().unwrap_or(0)
 }
 
 pub(crate) fn load_shots_for_session(session_dir: &Path, events: &[Value]) -> Vec<ShotMeta> {
@@ -496,7 +632,7 @@ pub(crate) fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, A
     let transcription_meta = transcription_meta_from_events(&events);
     let transcript_fallback = read_transcript_text_for_session(session_dir);
     let shots = load_shots_for_session(session_dir, &events);
-
+    let clips = clipboard_from_events(&events);
     let note_path = session_dir.join("note.md");
     let mut markdown_for_copy = if note_path.exists() {
         fs::read_to_string(&note_path).unwrap_or_default()
@@ -504,15 +640,17 @@ pub(crate) fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, A
         String::new()
     };
 
-    let transcript = if !markdown_for_copy.trim().is_empty() {
+    let transcript_base = if !markdown_for_copy.trim().is_empty() {
         extract_transcript_from_note(&markdown_for_copy)
             .unwrap_or_else(|| transcript_fallback.clone())
     } else {
         transcript_fallback
     };
+    let transcript_annotated =
+        inject_annotation_markers(&transcript_base, &shots, &clips, audio_duration);
 
     if markdown_for_copy.trim().is_empty() {
-        markdown_for_copy = transcript.clone();
+        markdown_for_copy = transcript_annotated.clone();
     }
 
     let html = build_html_note(
@@ -521,9 +659,10 @@ pub(crate) fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, A
         &ended_iso,
         audio_duration,
         &transcription_meta,
-        &transcript,
+        &transcript_annotated,
         &markdown_for_copy,
         &shots,
+        &clips,
         session_dir,
     );
 
