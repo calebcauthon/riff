@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -176,6 +177,69 @@ fn copy_fails_when_transcript_not_available() {
         .failure()
         .code(8)
         .stderr(predicates::str::contains("No transcript found for session"));
+}
+
+#[test]
+fn copy_prints_transcript_from_most_recent_session() {
+    let td = tempdir().expect("tempdir");
+    make_session(
+        td.path(),
+        "20260413-013011",
+        "# Session\n\n## Transcript\nolder words\n",
+    );
+    make_session(
+        td.path(),
+        "20260413-013012",
+        "# Session\n\n## Transcript\nnew words here\n",
+    );
+
+    cmd_with_root(td.path())
+        .arg("copy")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("new words here"))
+        .stdout(predicates::str::contains("older words").not());
+}
+
+#[test]
+fn status_reports_no_active_session_when_idle() {
+    let td = tempdir().expect("tempdir");
+
+    cmd_with_root(td.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No active session."));
+}
+
+#[test]
+fn status_reports_active_session_after_start() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    cmd_with_root(td.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Active session:"))
+        .stdout(predicates::str::contains("alive=true"));
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args(["stop", "--transcribe-cmd", "printf '' > {out_txt}"])
+        .assert()
+        .success();
 }
 
 #[test]
