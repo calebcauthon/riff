@@ -188,13 +188,6 @@ Picker controls:
 dictate status
 ```
 
-### Last session
-
-```bash
-dictate last
-dictate last --open
-```
-
 ### List recent sessions
 
 ```bash

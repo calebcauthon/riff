@@ -46,7 +46,6 @@ enum Commands {
     Stop(StopArgs),
     Sounds,
     Status,
-    Last(LastArgs),
     List(ListArgs),
     Copy(CopyArgs),
     Show(ShowArgs),
@@ -75,12 +74,6 @@ struct StopArgs {
 
     #[arg(long)]
     parakeet_model: Option<String>,
-}
-
-#[derive(Args, Debug)]
-struct LastArgs {
-    #[arg(long)]
-    open: bool,
 }
 
 #[derive(Args, Debug)]
@@ -3320,61 +3313,6 @@ fn cmd_html(cli: &Cli, args: &HtmlArgs) -> Result<i32, AppError> {
     Ok(0)
 }
 
-fn cmd_last(cli: &Cli, args: &LastArgs) -> Result<i32, AppError> {
-    ensure_dirs()?;
-    let path = last_session_file();
-    if !path.exists() {
-        return Err(app_error(8, "No previous session found."));
-    }
-
-    let data: Value = read_json(&path)?;
-    let session_id = data
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let session_dir = data
-        .get("session_dir")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let note_path = data
-        .get("note_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-
-    print_out(
-        cli,
-        format!(
-            "Last session: {}\nsession_dir: {}\nnote: {}",
-            session_id, session_dir, note_path
-        ),
-    );
-
-    emit_json(
-        cli,
-        &json!({
-            "ok": true,
-            "session_id": session_id,
-            "session_dir": session_dir,
-            "note_path": note_path,
-        }),
-    );
-
-    if args.open {
-        let status = Command::new("open")
-            .arg(OsString::from(note_path))
-            .status()
-            .map_err(|e| app_error(1, format!("Failed to run 'open': {e}")))?;
-        if !status.success() {
-            return Err(app_error(
-                1,
-                format!("open command failed with status: {status}"),
-            ));
-        }
-    }
-
-    Ok(0)
-}
-
 fn run(cli: &Cli) -> Result<i32, AppError> {
     match &cli.command {
         Commands::Start(args) => cmd_start(cli, args),
@@ -3382,7 +3320,6 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Stop(args) => cmd_stop(cli, args),
         Commands::Sounds => cmd_sounds(cli),
         Commands::Status => cmd_status(cli),
-        Commands::Last(args) => cmd_last(cli, args),
         Commands::List(args) => cmd_list(cli, args),
         Commands::Copy(args) => cmd_copy(cli, args),
         Commands::Show(args) => cmd_show(cli, args),
