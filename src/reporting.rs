@@ -28,6 +28,7 @@ pub(crate) fn inject_annotation_markers(
                 .map(|c| (c.audio_sec, format!("[Clipboard {}]", c.clip_id))),
         )
         .collect::<Vec<_>>();
+    markers.retain(|(_, marker)| !clean.contains(marker));
     markers.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     if clean.is_empty() {
