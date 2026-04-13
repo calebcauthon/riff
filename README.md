@@ -13,8 +13,9 @@ On `stop`, ispy:
 - finds screenshots created during the session in your normal screenshot folder
 - copies them to session tmp storage (`/tmp/ispy/sessions/<session-id>/screenshots`)
 - deletes the originals from your normal screenshot folder
+- captures copied clipboard text during the session
 - runs local transcription (Parakeet via Python script / warm local server)
-- writes `note.md` with `[Screenshot N]` markers + footnotes
+- writes `note.md` with `[Screenshot N]` / `[Clipboard N]` markers + footnotes
 - writes `note.html` with metadata, transcript, and image preview gallery
 - auto-starts local web server (idle-timeout) for richer HTML behavior
 
@@ -116,6 +117,9 @@ export ISPY_PARAKEET_SERVER_URL="http://127.0.0.1:8765"
 export ISPY_WEB_SERVER=1
 export ISPY_WEB_SERVER_URL="http://127.0.0.1:8766"
 export ISPY_WEB_SERVER_IDLE_TIMEOUT_SEC=1800
+
+# optional clipboard monitor controls
+export ISPY_CLIPBOARD_MONITOR=1
 ```
 
 ---

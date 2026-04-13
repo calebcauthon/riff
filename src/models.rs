@@ -13,12 +13,21 @@ pub struct SessionState {
     pub started_at_epoch: f64,
     pub screenshot_source_dir: String,
     pub audio_device: String,
+    #[serde(default)]
+    pub clipboard_watcher_pid: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ShotMeta {
     pub shot_id: usize,
     pub dest_rel_path: String,
+    pub audio_sec: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClipboardMeta {
+    pub clip_id: usize,
+    pub text: String,
     pub audio_sec: f64,
 }
 
