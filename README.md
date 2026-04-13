@@ -216,11 +216,11 @@ dictate copy | pbcopy
 ### Show full session markdown to stdout
 
 ```bash
-dictate show        # most recent (same as show 1)
-dictate show 2      # 2nd most recent
+dictate show 20260413-013011
 ```
 
-Outputs raw `note.md` markdown for the selected session.
+`show` now takes a session id (not a numeric index). Use `dictate list` to find ids.
+Outputs raw `note.md` markdown for that session.
 
 ### Open session HTML report
 

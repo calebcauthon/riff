@@ -41,15 +41,26 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Start dictation session
     Start(StartArgs),
+    /// Capture screenshot into active session
     Shot,
+    /// Stop dictation and transcribe
     Stop(StopArgs),
-    Sounds,
-    Status,
+
+    /// List recent sessions
     List(ListArgs),
-    Copy(CopyArgs),
+    /// Show note markdown for a session id
     Show(ShowArgs),
+    /// Print transcript for a recent session index
+    Copy(CopyArgs),
+    /// Open HTML report for a recent session
     Html(HtmlArgs),
+
+    /// Pick start/stop sounds and beep timing
+    Sounds,
+    /// Show active session status
+    Status,
 }
 
 #[derive(Args, Debug)]
@@ -90,8 +101,8 @@ struct CopyArgs {
 
 #[derive(Args, Debug)]
 struct ShowArgs {
-    /// Which recent session to output (1 = most recent)
-    n: Option<usize>,
+    /// Session id (for example: 20260413-013011)
+    session_id: String,
 }
 
 #[derive(Args, Debug)]
@@ -3147,6 +3158,25 @@ fn resolve_recent_session_dir(rank: usize) -> Result<PathBuf, AppError> {
     Ok(session_dirs[rank - 1].clone())
 }
 
+fn resolve_session_dir_by_id(session_id: &str) -> Result<PathBuf, AppError> {
+    if session_id.contains('/') || session_id.contains("..") {
+        return Err(app_error(8, format!("Invalid session id: {}", session_id)));
+    }
+
+    let path = sessions_dir().join(session_id);
+    if !path.is_dir() {
+        return Err(app_error(
+            8,
+            format!(
+                "Session not found: {} (run 'dictate list' to see available ids)",
+                session_id
+            ),
+        ));
+    }
+
+    Ok(path)
+}
+
 fn cmd_list(cli: &Cli, args: &ListArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
 
@@ -3232,8 +3262,7 @@ fn cmd_copy(_cli: &Cli, args: &CopyArgs) -> Result<i32, AppError> {
 fn cmd_show(_cli: &Cli, args: &ShowArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
 
-    let requested_rank = args.n.unwrap_or(1);
-    let session_dir = resolve_recent_session_dir(requested_rank)?;
+    let session_dir = resolve_session_dir_by_id(&args.session_id)?;
     let note_path = session_dir.join("note.md");
 
     if !note_path.exists() {
