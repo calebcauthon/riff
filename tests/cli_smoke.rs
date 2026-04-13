@@ -1,12 +1,27 @@
 use assert_cmd::Command;
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 fn cmd_with_root(root: &Path) -> Command {
     let mut cmd = Command::cargo_bin("dictate").expect("dictate binary should build");
     cmd.env("ISPY_ROOT", root);
     cmd.env("ISPY_BEEP", "0");
+    cmd.env("ISPY_WEB_SERVER", "0");
+    cmd.env("ISPY_PARAKEET_SERVER", "0");
+    cmd
+}
+
+fn cmd_with_root_and_fake_path(root: &Path, fake_bin: &Path) -> Command {
+    let mut cmd = cmd_with_root(root);
+    let mut paths = vec![fake_bin.to_path_buf()];
+    if let Some(existing) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&existing));
+    }
+    let joined = env::join_paths(paths).expect("join PATH");
+    cmd.env("PATH", joined);
     cmd
 }
 
@@ -14,6 +29,63 @@ fn make_session(root: &Path, session_id: &str, note_md: &str) {
     let session_dir = root.join("sessions").join(session_id);
     fs::create_dir_all(&session_dir).expect("create session dir");
     fs::write(session_dir.join("note.md"), note_md).expect("write note.md");
+}
+
+fn write_executable(path: &Path, content: &str) {
+    fs::write(path, content).expect("write script");
+    let mut perm = fs::metadata(path).expect("metadata").permissions();
+    perm.set_mode(0o755);
+    fs::set_permissions(path, perm).expect("chmod +x");
+}
+
+fn install_fake_tools(dir: &Path) {
+    fs::create_dir_all(dir).expect("create fake tools dir");
+
+    write_executable(
+        &dir.join("ffmpeg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"-list_devices true"* ]]; then
+  echo "AVFoundation audio devices"
+  echo "[0] Built-in Microphone"
+  exit 0
+fi
+out="${@: -1}"
+mkdir -p "$(dirname "$out")"
+: > "$out"
+trap 'exit 0' INT TERM
+while true; do sleep 1; done
+"#,
+    );
+
+    write_executable(
+        &dir.join("screencapture"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+out="${@: -1}"
+mkdir -p "$(dirname "$out")"
+: > "$out"
+exit 0
+"#,
+    );
+}
+
+fn only_session_id(root: &Path) -> String {
+    let sessions_dir = root.join("sessions");
+    let entries = fs::read_dir(&sessions_dir)
+        .expect("read sessions dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect::<Vec<PathBuf>>();
+
+    assert_eq!(entries.len(), 1, "expected exactly 1 session dir");
+
+    entries[0]
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("session id")
+        .to_string()
 }
 
 #[test]
@@ -104,4 +176,64 @@ fn copy_fails_when_transcript_not_available() {
         .failure()
         .code(8)
         .stderr(predicates::str::contains("No transcript found for session"));
+}
+
+#[test]
+fn end_to_end_start_shot_stop_produces_transcript_and_note() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .arg("shot")
+        .assert()
+        .success();
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "stop",
+            "--transcribe-cmd",
+            "printf 'hello from integration test\\n' > {out_txt}",
+        ])
+        .assert()
+        .success();
+
+    let session_id = only_session_id(td.path());
+    let session_dir = td.path().join("sessions").join(&session_id);
+
+    let transcript_txt = fs::read_to_string(session_dir.join("transcript.txt"))
+        .expect("transcript.txt should exist");
+    assert!(
+        transcript_txt.contains("hello from integration test"),
+        "unexpected transcript.txt: {transcript_txt}"
+    );
+
+    let note_md = fs::read_to_string(session_dir.join("note.md")).expect("note.md should exist");
+    assert!(
+        note_md.contains("hello from integration test"),
+        "note.md missing transcript text: {note_md}"
+    );
+    assert!(
+        note_md.contains("[Screenshot 1]"),
+        "note.md missing screenshot marker: {note_md}"
+    );
+
+    cmd_with_root(td.path())
+        .args(["show", &session_id])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("hello from integration test"))
+        .stdout(predicates::str::contains("[Screenshot 1]"));
 }
