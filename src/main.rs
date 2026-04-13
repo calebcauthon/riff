@@ -44,6 +44,7 @@ enum Commands {
     Start(StartArgs),
     Shot,
     Stop(StopArgs),
+    Sounds,
     Status,
     Last(LastArgs),
     List(ListArgs),
@@ -277,6 +278,93 @@ fn append_jsonl(path: &Path, payload: &Value) -> Result<(), AppError> {
 fn append_perf_event(payload: Value) {
     if let Err(e) = append_jsonl(&perf_log_file(), &payload) {
         eprintln!("[perf] failed to append perf log: {}", e);
+    }
+}
+
+fn bool_env_enabled(name: &str, default: bool) -> bool {
+    match env::var(name) {
+        Ok(v) => !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => default,
+    }
+}
+
+fn resolve_sound_path(spec: &str) -> PathBuf {
+    if spec.contains('/') {
+        return PathBuf::from(spec);
+    }
+
+    let mut name = spec.to_string();
+    if !name.ends_with(".aiff") {
+        name.push_str(".aiff");
+    }
+
+    PathBuf::from("/System/Library/Sounds").join(name)
+}
+
+fn env_beep_count(kind: &str) -> u8 {
+    let key = if kind == "start" {
+        "ISPY_BEEP_START_COUNT"
+    } else {
+        "ISPY_BEEP_STOP_COUNT"
+    };
+
+    let parsed = env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or(1);
+
+    parsed.clamp(1, 3)
+}
+
+fn env_beep_gap_sec() -> f32 {
+    let parsed = env::var("ISPY_BEEP_GAP_SEC")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.08);
+
+    parsed.clamp(0.0, 1.0)
+}
+
+fn play_event_sound(kind: &str, cli: &Cli) {
+    if !bool_env_enabled("ISPY_BEEP", true) {
+        return;
+    }
+
+    let env_key = if kind == "start" {
+        "ISPY_BEEP_START"
+    } else {
+        "ISPY_BEEP_STOP"
+    };
+    let default_sound = if kind == "start" { "Ping" } else { "Glass" };
+    let sound_spec = env::var(env_key).unwrap_or_else(|_| default_sound.to_string());
+    let sound_path = resolve_sound_path(&sound_spec);
+    let count = env_beep_count(kind);
+    let gap_sec = env_beep_gap_sec();
+
+    if command_exists("afplay") && sound_path.exists() {
+        // Spawn detached shell loop so beeps can continue even after this process exits.
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg(
+                "count=\"$1\"; path=\"$2\"; gap=\"$3\"; i=1; pids=\"\"; while [ \"$i\" -le \"$count\" ]; do afplay \"$path\" >/dev/null 2>&1 & p=\"$!\"; pids=\"$pids $p\"; i=$((i+1)); [ \"$i\" -le \"$count\" ] && sleep \"$gap\"; done; for p in $pids; do wait \"$p\" 2>/dev/null || true; done",
+            )
+            .arg("ispy-beep")
+            .arg(count.to_string())
+            .arg(sound_path.as_os_str())
+            .arg(format!("{:.2}", gap_sec))
+            .spawn();
+        return;
+    }
+
+    if command_exists("osascript") {
+        let script = format!("beep {}", count);
+        let _ = Command::new("osascript").args(["-e", &script]).spawn();
+        if cli.verbose && !cli.quiet {
+            eprintln!("[verbose] fallback beep used for {} x{}", kind, count);
+        }
     }
 }
 
@@ -790,6 +878,8 @@ fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "parakeet_prewarm_ms": round3(prewarm_ms)
         }
     }));
+
+    play_event_sound("start", cli);
 
     print_out(
         cli,
@@ -1323,6 +1413,26 @@ fn default_web_server_script() -> Option<PathBuf> {
         for _ in 0..5 {
             if let Some(p) = parent.clone() {
                 candidates.push(p.join("scripts/ispy_web_server.py"));
+                parent = p.parent().map(|x| x.to_path_buf());
+            }
+        }
+    }
+
+    candidates.into_iter().find(|p| p.exists())
+}
+
+fn default_sound_picker_script() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(cwd) = env::current_dir() {
+        candidates.push(cwd.join("scripts/pick_ispy_sounds.sh"));
+    }
+
+    if let Ok(exe) = env::current_exe() {
+        let mut parent = exe.parent().map(|p| p.to_path_buf());
+        for _ in 0..5 {
+            if let Some(p) = parent.clone() {
+                candidates.push(p.join("scripts/pick_ispy_sounds.sh"));
                 parent = p.parent().map(|x| x.to_path_buf());
             }
         }
@@ -2482,6 +2592,10 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         "transcription_status": transcription_meta.get("status").and_then(|v| v.as_str())
     }));
 
+    if !cli.dry_run {
+        play_event_sound("stop", cli);
+    }
+
     print_out(
         cli,
         format!(
@@ -2533,6 +2647,35 @@ fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "dry_run": cli.dry_run,
         }),
     );
+
+    Ok(0)
+}
+
+fn cmd_sounds(_cli: &Cli) -> Result<i32, AppError> {
+    ensure_dirs()?;
+
+    let script_path = env::var("ISPY_SOUND_PICKER_SCRIPT")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(default_sound_picker_script)
+        .ok_or_else(|| {
+            app_error(
+                1,
+                "Could not find sound picker script. Expected scripts/pick_ispy_sounds.sh",
+            )
+        })?;
+
+    let status = Command::new("bash")
+        .arg(&script_path)
+        .status()
+        .map_err(|e| app_error(1, format!("Failed to run sound picker: {e}")))?;
+
+    if !status.success() {
+        return Err(app_error(
+            status.code().unwrap_or(1),
+            format!("Sound picker exited with status: {status}"),
+        ));
+    }
 
     Ok(0)
 }
@@ -3179,6 +3322,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Start(args) => cmd_start(cli, args),
         Commands::Shot => cmd_shot(cli),
         Commands::Stop(args) => cmd_stop(cli, args),
+        Commands::Sounds => cmd_sounds(cli),
         Commands::Status => cmd_status(cli),
         Commands::Last(args) => cmd_last(cli, args),
         Commands::List(args) => cmd_list(cli, args),

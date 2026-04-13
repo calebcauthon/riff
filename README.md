@@ -165,6 +165,23 @@ Flags:
 - `{out_txt}`
 - `{session_dir}`
 
+### Sounds (interactive picker)
+
+```bash
+dictate sounds
+```
+
+Browse system/user sounds, preview each, and set start/stop beep choices.
+
+Picker controls:
+- `↑/↓` (or `j/k`) move selection
+- `p` or `space` preview selected sound (uses configured repeat count for selected START/STOP sound)
+- `1` set START sound (press `1` again on same sound to cycle repeats `x1 -> x2 -> x3`)
+- `2` set STOP sound (press `2` again on same sound to cycle repeats `x1 -> x2 -> x3`)
+- `+` / `-` increase/decrease delay between repeated beeps
+- `Esc` (or `s`) save + exit
+- `q` quit without saving
+
 ### Status
 
 ```bash
@@ -268,6 +285,31 @@ Focus on these fields:
 - start: `phases.spawn_recorder_ms`
 - stop: `phases.transcribe_ms` (usually the biggest)
 - stop: `phases.web_server_ms` (local HTML server startup/health)
+
+---
+
+## Audio cues (start/stop beeps)
+
+By default, successful start/stop plays two different macOS sounds:
+- start: `Ping`
+- stop: `Glass`
+
+Customize or disable:
+
+```bash
+export ISPY_BEEP=1                 # default on (set 0 to disable)
+export ISPY_BEEP_START="Ping"     # name in /System/Library/Sounds or absolute path
+export ISPY_BEEP_STOP="Glass"     # name in /System/Library/Sounds or absolute path
+export ISPY_BEEP_START_COUNT=1     # 1..3 repeats
+export ISPY_BEEP_STOP_COUNT=1      # 1..3 repeats
+export ISPY_BEEP_GAP_SEC=0.08      # launch interval between repeats (0.00..1.00); lower values overlap beeps
+```
+
+Interactive picker (preview + choose start/stop sounds):
+
+```bash
+dictate sounds
+```
 
 ---
 
