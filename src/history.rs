@@ -316,7 +316,7 @@ fn render_sessions_table(rows: &[SessionListRow]) -> String {
     lines.join("\n")
 }
 
-fn collect_recent_session_dirs(limit: usize) -> Result<Vec<PathBuf>, AppError> {
+pub(crate) fn collect_recent_session_dirs(limit: usize) -> Result<Vec<PathBuf>, AppError> {
     let mut dirs = fs::read_dir(sessions_dir())
         .map_err(|e| app_error(1, format!("Failed to read sessions dir: {e}")))?
         .flatten()
@@ -360,6 +360,14 @@ fn build_list_row(session_dir: &Path) -> SessionListRow {
         images,
         duration,
     }
+}
+
+pub(crate) fn collect_recent_session_rows(limit: usize) -> Result<Vec<SessionListRow>, AppError> {
+    let session_dirs = collect_recent_session_dirs(limit)?;
+    Ok(session_dirs
+        .iter()
+        .map(|dir| build_list_row(dir))
+        .collect::<Vec<_>>())
 }
 
 pub(crate) fn resolve_recent_session_dir(rank: usize) -> Result<PathBuf, AppError> {
@@ -409,8 +417,8 @@ pub(crate) fn cmd_list(cli: &Cli, args: &ListArgs) -> Result<i32, AppError> {
 
     let requested = args.n.unwrap_or(10);
     let limit = requested.clamp(1, 200);
-    let session_dirs = collect_recent_session_dirs(limit)?;
-    if session_dirs.is_empty() {
+    let rows = collect_recent_session_rows(limit)?;
+    if rows.is_empty() {
         print_out(cli, "No sessions found.");
         emit_json(
             cli,
@@ -422,11 +430,6 @@ pub(crate) fn cmd_list(cli: &Cli, args: &ListArgs) -> Result<i32, AppError> {
         );
         return Ok(0);
     }
-
-    let rows = session_dirs
-        .iter()
-        .map(|dir| build_list_row(dir))
-        .collect::<Vec<_>>();
 
     let table = render_sessions_table(&rows);
     print_out(cli, table);

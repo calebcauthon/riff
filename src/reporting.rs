@@ -1,9 +1,11 @@
 use crate::error::{app_error, AppError};
 use crate::history::{
-    extract_transcript_from_note, format_duration_compact, read_jsonl_values,
-    read_transcript_text_for_session, session_duration_seconds, session_started_iso,
+    collect_recent_session_rows, extract_transcript_from_note, format_duration_compact,
+    read_jsonl_values, read_transcript_text_for_session, session_duration_seconds,
+    session_started_iso,
 };
-use crate::models::{ClipboardMeta, SessionState, ShotMeta};
+use crate::models::{ClipboardMeta, SessionListRow, SessionState, ShotMeta};
+use crate::paths::sessions_dir;
 use crate::SUPPORTED_IMAGE_EXTS;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -250,6 +252,7 @@ pub(crate) fn build_html_note(
     shots: &[ShotMeta],
     clips: &[ClipboardMeta],
     session_dir: &Path,
+    sessions_index_href: &str,
 ) -> String {
     let t_status = transcription_meta
         .get("status")
@@ -314,6 +317,9 @@ pub(crate) fn build_html_note(
     .panel {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; }}
     .actions {{ display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }}
     .transcript-head {{ display: flex; align-items: center; gap: 4px; margin-bottom: 12px; }}
+    .nav {{ margin: 0 0 14px; }}
+    .nav a {{ color: #1d4ed8; text-decoration: none; font-weight: 600; }}
+    .nav a:hover {{ text-decoration: underline; }}
     .status {{ font-size: 12px; color: #475569; }}
     .btn {{ background: #111827; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; }}
     .btn:hover {{ background: #1f2937; }}
@@ -331,6 +337,7 @@ pub(crate) fn build_html_note(
 <body>
   <div class="wrap">
     <h1>Dictation Session {session_id}</h1>
+    <p class="nav"><a href="{sessions_index_href}">Browse all sessions</a></p>
 
     <section class="meta">
       <div class="actions">
@@ -468,6 +475,7 @@ pub(crate) fn build_html_note(
         transcript_html = html_escape(&transcript_text),
         transcript_copy_html = html_escape(&transcript_text),
         markdown_html = html_escape(markdown_for_copy),
+        sessions_index_href = html_escape(sessions_index_href),
         gallery_html = if gallery.is_empty() {
             "<div>No screenshots in this session.</div>".to_string()
         } else {
@@ -478,6 +486,107 @@ pub(crate) fn build_html_note(
         } else {
             format!("<div class=\"grid\">{}</div>", clip_cards)
         },
+    )
+}
+
+fn build_sessions_index_html(rows: &[SessionListRow]) -> String {
+    let mut entries_html = String::new();
+    for row in rows {
+        let session_dir = sessions_dir().join(&row.session_id);
+        let transcript = read_transcript_text_for_session(&session_dir);
+        let transcript = if transcript.trim().is_empty() {
+            "No transcript available.".to_string()
+        } else {
+            transcript.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+
+        let mut thumb_items = String::new();
+        let screenshots_dir = session_dir.join("screenshots");
+        if let Ok(entries) = fs::read_dir(screenshots_dir) {
+            let mut files = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file())
+                .filter(|p| {
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|s| s.to_ascii_lowercase())
+                        .map(|ext| SUPPORTED_IMAGE_EXTS.contains(&ext.as_str()))
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
+            files.sort();
+
+            for path in files.iter().take(8) {
+                let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let rel = format!("./{}/screenshots/{}", row.session_id, file_name);
+                thumb_items.push_str(&format!(
+                    r#"<a class="thumb" href="{rel}" target="_blank" rel="noreferrer"><img src="{rel}" alt="Screenshot thumbnail for {session_id}" loading="lazy" /></a>"#,
+                    rel = html_escape(&rel),
+                    session_id = html_escape(&row.session_id),
+                ));
+            }
+        }
+
+        entries_html.push_str(&format!(
+            r#"<article class="row"><div class="main"><div class="row-top"><a class="session" href="./{session_id}/note.html">{session_id}</a><span class="meta">{timestamp}</span><span class="meta">{images} images</span><span class="meta">{duration}</span></div><div class="transcript" title="{transcript_title}">{transcript}</div></div><div class="thumbs">{thumbs}</div></article>"#,
+            session_id = html_escape(&row.session_id),
+            timestamp = html_escape(&row.timestamp),
+            images = row.images,
+            duration = html_escape(&row.duration),
+            transcript = html_escape(&transcript),
+            transcript_title = html_escape(&transcript),
+            thumbs = if thumb_items.is_empty() {
+                "<div class=\"thumb-empty\">No screenshots.</div>".to_string()
+            } else {
+                thumb_items
+            },
+        ));
+    }
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dictation Sessions</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #f5f7fb; color: #111827; }}
+    .wrap {{ max-width: 1100px; margin: 0 auto; padding: 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 30px; }}
+    .sub {{ color: #4b5563; margin: 0 0 18px; }}
+    .rows {{ display: flex; flex-direction: column; gap: 12px; }}
+    .row {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px 12px; display: flex; align-items: center; gap: 12px; }}
+    .main {{ min-width: 0; flex: 1; }}
+    .row-top {{ display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; margin-bottom: 4px; overflow: hidden; }}
+    .session {{ color: #1d4ed8; text-decoration: none; font-weight: 700; }}
+    .session:hover {{ text-decoration: underline; }}
+    .meta {{ color: #334155; font-size: 13px; white-space: nowrap; }}
+    .transcript {{ line-height: 1.35; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .thumbs {{ display: flex; flex-wrap: nowrap; gap: 6px; flex-shrink: 0; overflow-x: auto; }}
+    .thumb {{ display: block; width: 64px; height: 48px; border-radius: 6px; overflow: hidden; border: 1px solid #e2e8f0; background: #f8fafc; flex-shrink: 0; }}
+    .thumb img {{ width: 100%; height: 100%; object-fit: cover; display: block; }}
+    .thumb-empty {{ color: #64748b; font-size: 12px; white-space: nowrap; }}
+    .empty {{ padding: 16px; border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Dictation Sessions</h1>
+    <p class="sub">Browse and open session reports.</p>
+    {content}
+  </div>
+</body>
+</html>
+"#,
+        content = if entries_html.is_empty() {
+            "<div class=\"empty\">No sessions found.</div>".to_string()
+        } else {
+            format!("<div class=\"rows\">{entries_html}</div>")
+        }
     )
 }
 
@@ -664,9 +773,19 @@ pub(crate) fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, A
         &shots,
         &clips,
         session_dir,
+        "../index.html",
     );
 
     let html_path = session_dir.join("note.html");
+    fs::write(&html_path, html)
+        .map_err(|e| app_error(1, format!("Failed to write {}: {e}", html_path.display())))?;
+    Ok(html_path)
+}
+
+pub(crate) fn generate_sessions_index_html() -> Result<PathBuf, AppError> {
+    let rows = collect_recent_session_rows(5000)?;
+    let html = build_sessions_index_html(&rows);
+    let html_path = sessions_dir().join("index.html");
     fs::write(&html_path, html)
         .map_err(|e| app_error(1, format!("Failed to write {}: {e}", html_path.display())))?;
     Ok(html_path)

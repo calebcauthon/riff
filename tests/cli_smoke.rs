@@ -71,6 +71,17 @@ exit 0
     );
 }
 
+fn install_fake_open(dir: &Path) {
+    fs::create_dir_all(dir).expect("create fake tools dir");
+    write_executable(
+        &dir.join("open"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+"#,
+    );
+}
+
 fn only_session_id(root: &Path) -> String {
     let sessions_dir = root.join("sessions");
     let entries = fs::read_dir(&sessions_dir)
@@ -207,6 +218,54 @@ fn copy_prints_transcript_from_most_recent_session() {
         .success()
         .stdout(predicates::str::contains("new words here"))
         .stdout(predicates::str::contains("older words").not());
+}
+
+#[test]
+fn html_generates_sessions_index_and_navigation_link() {
+    let td = tempdir().expect("tempdir");
+    make_session(
+        td.path(),
+        "20260413-013011",
+        "# Session\n\n## Transcript\nolder words\n",
+    );
+    make_session(
+        td.path(),
+        "20260413-013012",
+        "# Session\n\n## Transcript\nnew words\n",
+    );
+    let shots_dir = td
+        .path()
+        .join("sessions")
+        .join("20260413-013012")
+        .join("screenshots");
+    fs::create_dir_all(&shots_dir).expect("create screenshots dir");
+    fs::write(shots_dir.join("shot-1.png"), b"fakepng").expect("write shot-1");
+    fs::write(shots_dir.join("shot-2.png"), b"fakepng").expect("write shot-2");
+
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_open(&fake_bin);
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args(["html", "1"])
+        .assert()
+        .success();
+
+    let index_path = td.path().join("sessions").join("index.html");
+    let index_html = fs::read_to_string(&index_path).expect("sessions index should exist");
+    assert!(index_html.contains("./20260413-013012/note.html"));
+    assert!(index_html.contains("./20260413-013011/note.html"));
+    assert!(index_html.contains("new words"));
+    assert!(index_html.contains("./20260413-013012/screenshots/shot-1.png"));
+    assert!(index_html.contains("class=\"thumb\""));
+
+    let note_path = td
+        .path()
+        .join("sessions")
+        .join("20260413-013012")
+        .join("note.html");
+    let note_html = fs::read_to_string(&note_path).expect("note html should exist");
+    assert!(note_html.contains("Browse all sessions"));
+    assert!(note_html.contains("../index.html"));
 }
 
 #[test]

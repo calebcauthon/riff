@@ -25,7 +25,7 @@ use crate::error::{app_error, AppError};
 use crate::history::{cmd_copy, cmd_list, cmd_show, resolve_recent_session_dir};
 use crate::models::{SessionState, ShotMeta};
 use crate::paths::{active_state_file, audio_device_cache_file, ensure_dirs, perf_log_file};
-use crate::reporting::generate_html_for_session;
+use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
 use crate::session_commands::{cmd_shot, cmd_start, cmd_stop};
 use crate::transcription::{
     default_sound_picker_script, ensure_web_server, touch_web_server, web_server_base_url,
@@ -1003,6 +1003,7 @@ fn cmd_html(cli: &Cli, args: &HtmlArgs) -> Result<i32, AppError> {
 
     // Always regenerate so HTML reflects latest template/features.
     let html_path = generate_html_for_session(&session_dir)?;
+    let index_path = generate_sessions_index_html()?;
 
     let session_id = session_dir
         .file_name()
@@ -1047,6 +1048,7 @@ fn cmd_html(cli: &Cli, args: &HtmlArgs) -> Result<i32, AppError> {
             "ok": true,
             "session_dir": session_dir,
             "html_path": html_path,
+            "sessions_index_path": index_path,
             "opened": true,
             "opened_target": opened_target,
             "web_server_ready": server_ready,

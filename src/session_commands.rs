@@ -6,8 +6,9 @@ use crate::paths::{
     active_state_file, audio_device_cache_file, ensure_dirs, last_session_file, sessions_dir,
 };
 use crate::reporting::{
-    build_html_note, build_note, clipboard_from_events, inject_annotation_markers,
-    load_shots_for_session, max_clipboard_id, max_shot_id, shots_from_events,
+    build_html_note, build_note, clipboard_from_events, generate_sessions_index_html,
+    inject_annotation_markers, load_shots_for_session, max_clipboard_id, max_shot_id,
+    shots_from_events,
 };
 use crate::transcription::{
     default_parakeet_script, ensure_parakeet_server, ensure_web_server, parakeet_server_enabled,
@@ -479,6 +480,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         &shots,
         &clips,
         &session_dir,
+        "../index.html",
     );
     let html_path = session_dir.join("note.html");
     let render_ms = t_render.elapsed().as_secs_f64() * 1000.0;
@@ -537,6 +539,8 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "clipboard_captures": clips.len(),
             }),
         )?;
+
+        let _ = generate_sessions_index_html()?;
 
         clear_active_state()?;
 
