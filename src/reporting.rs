@@ -1,7 +1,7 @@
 use crate::error::{app_error, AppError};
 use crate::history::{
-    format_duration_compact, read_jsonl_values, read_transcript_text_for_session,
-    session_duration_seconds, session_started_iso,
+    extract_transcript_from_note, format_duration_compact, read_jsonl_values,
+    read_transcript_text_for_session, session_duration_seconds, session_started_iso,
 };
 use crate::models::{SessionState, ShotMeta};
 use crate::SUPPORTED_IMAGE_EXTS;
@@ -201,13 +201,11 @@ pub(crate) fn build_html_note(
         .and_then(|v| v.as_str())
         .unwrap_or("-");
 
-    let mut path_lines = String::new();
     let mut gallery = String::new();
     for shot in shots {
         let abs = session_dir.join(&shot.dest_rel_path);
         let abs_str = abs.display().to_string();
         let rel_url = shot.dest_rel_path.clone();
-        path_lines.push_str(&format!("Screenshot {}: {}\n", shot.shot_id, abs_str));
         gallery.push_str(&format!(
             r#"<figure class="card"><div class="card-head"><figcaption>Screenshot {}</figcaption><button class="btn small copy-image" data-url="{}" data-path="{}">Copy image</button></div><a href="{}" target="_blank" rel="noreferrer"><img src="{}" alt="Screenshot {}" loading="lazy" /></a><div class="path">{}</div></figure>"#,
             shot.shot_id,
@@ -223,10 +221,8 @@ pub(crate) fn build_html_note(
     let duration = format_duration_compact(audio_duration_sec);
     let transcript_text = if transcript.trim().is_empty() {
         "_No transcript available._".to_string()
-    } else if path_lines.is_empty() {
-        transcript.trim().to_string()
     } else {
-        format!("{}\n{}", path_lines.trim_end(), transcript.trim())
+        transcript.trim().to_string()
     };
 
     format!(
@@ -245,10 +241,12 @@ pub(crate) fn build_html_note(
     .meta ul {{ margin: 0; padding-left: 18px; line-height: 1.6; }}
     .panel {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; }}
     .actions {{ display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }}
+    .transcript-head {{ display: flex; align-items: center; gap: 4px; margin-bottom: 12px; }}
     .status {{ font-size: 12px; color: #475569; }}
     .btn {{ background: #111827; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; }}
     .btn:hover {{ background: #1f2937; }}
     .btn.small {{ padding: 6px 10px; font-size: 12px; }}
+    .btn.tiny {{ padding: 3px 8px; font-size: 11px; border-radius: 6px; }}
     .transcript {{ white-space: pre-wrap; line-height: 1.6; font-size: 15px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }}
     .card {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px; margin: 0; }}
@@ -265,7 +263,6 @@ pub(crate) fn build_html_note(
     <section class="meta">
       <div class="actions">
         <button id="copyMarkdownBtn" class="btn">Copy markdown</button>
-        <button id="copyTranscriptBtn" class="btn">Copy transcript</button>
         <span id="copyStatus" class="status"></span>
       </div>
       <ul>
@@ -279,7 +276,10 @@ pub(crate) fn build_html_note(
     </section>
 
     <section class="panel">
-      <h2>Transcript</h2>
+      <div class="transcript-head">
+        <h2 style="margin: 0;">Transcript</h2>
+        <button id="copyTranscriptBtn" class="btn tiny">Copy</button>
+      </div>
       <div class="transcript">{transcript_html}</div>
     </section>
 
@@ -309,6 +309,16 @@ pub(crate) fn build_html_note(
       setStatus(successMessage);
     }}
 
+    function flashButtonLabel(btn, tempLabel, timeoutMs) {{
+      if (!btn) return;
+      const original = btn.dataset.originalLabel || btn.textContent || '';
+      btn.dataset.originalLabel = original;
+      btn.textContent = tempLabel;
+      window.setTimeout(() => {{
+        btn.textContent = original;
+      }}, timeoutMs);
+    }}
+
     document.getElementById('copyMarkdownBtn')?.addEventListener('click', async () => {{
       const markdown = document.getElementById('markdownContent')?.value || '';
       try {{
@@ -318,10 +328,12 @@ pub(crate) fn build_html_note(
       }}
     }});
 
-    document.getElementById('copyTranscriptBtn')?.addEventListener('click', async () => {{
+    const copyTranscriptBtn = document.getElementById('copyTranscriptBtn');
+    copyTranscriptBtn?.addEventListener('click', async () => {{
       const transcript = document.getElementById('transcriptContent')?.value || '';
       try {{
         await copyText(transcript, 'Transcript copied');
+        flashButtonLabel(copyTranscriptBtn, 'Copied', 1000);
       }} catch (err) {{
         setStatus('Could not copy transcript');
       }}
@@ -482,15 +494,26 @@ pub(crate) fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, A
     let ended_iso = session_ended_iso(&events).unwrap_or_else(|| "unknown".to_string());
     let audio_duration = session_duration_seconds(&events, session_dir);
     let transcription_meta = transcription_meta_from_events(&events);
-    let transcript = read_transcript_text_for_session(session_dir);
+    let transcript_fallback = read_transcript_text_for_session(session_dir);
     let shots = load_shots_for_session(session_dir, &events);
 
     let note_path = session_dir.join("note.md");
-    let markdown_for_copy = if note_path.exists() {
+    let mut markdown_for_copy = if note_path.exists() {
         fs::read_to_string(&note_path).unwrap_or_default()
     } else {
-        transcript.clone()
+        String::new()
     };
+
+    let transcript = if !markdown_for_copy.trim().is_empty() {
+        extract_transcript_from_note(&markdown_for_copy)
+            .unwrap_or_else(|| transcript_fallback.clone())
+    } else {
+        transcript_fallback
+    };
+
+    if markdown_for_copy.trim().is_empty() {
+        markdown_for_copy = transcript.clone();
+    }
 
     let html = build_html_note(
         &session_id,
