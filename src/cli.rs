@@ -93,8 +93,8 @@ pub struct ShowArgs {
 
 #[derive(Args, Debug)]
 pub struct HtmlArgs {
-    /// Session id (for example: 20260413-013011)
-    pub session_id: String,
+    /// Session id (for example: 20260413-013011); defaults to most recent when omitted
+    pub session_id: Option<String>,
 }
 
 #[derive(Args, Debug)]

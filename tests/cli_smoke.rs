@@ -246,7 +246,7 @@ fn html_generates_sessions_index_and_navigation_link() {
     install_fake_open(&fake_bin);
 
     cmd_with_root_and_fake_path(td.path(), &fake_bin)
-        .args(["html", "20260413-013012"])
+        .arg("html")
         .assert()
         .success();
 
