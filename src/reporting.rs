@@ -338,8 +338,10 @@ pub(crate) fn build_html_note(
     .path {{ color: #6b7280; margin-top: 8px; font-size: 12px; word-break: break-all; }}
     .annotator-modal {{ position: fixed; inset: 0; background: rgba(15, 23, 42, 0.72); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 9999; }}
     .annotator-modal.open {{ display: flex; }}
-    .annotator-panel {{ width: min(1200px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: #fff; border-radius: 12px; border: 1px solid #e5e7eb; padding: 12px; }}
+    .annotator-panel {{ position: relative; width: min(1200px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: #fff; border-radius: 12px; border: 1px solid #e5e7eb; padding: 12px; }}
     .annotator-toolbar {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }}
+    .annotator-close-x {{ position: absolute; top: 10px; right: 10px; width: 32px; height: 32px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #111827; font-size: 20px; line-height: 1; cursor: pointer; }}
+    .annotator-close-x:hover {{ background: #f1f5f9; }}
     .annotator-stage {{ position: relative; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background: #f8fafc; min-height: 420px; }}
     .annotator-loading {{ position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #475569; font-size: 14px; z-index: 2; pointer-events: none; }}
     .annotator-loading.hidden {{ display: none; }}
@@ -388,9 +390,9 @@ pub(crate) fn build_html_note(
   </div>
   <div id="annotatorModal" class="annotator-modal" aria-hidden="true">
     <div class="annotator-panel">
+      <button id="annotatorCloseBtn" class="annotator-close-x" aria-label="Close annotation dialog">&times;</button>
       <div class="annotator-toolbar">
-        <button id="annotatorCloseBtn" class="btn small">Close</button>
-        <button id="annotatorSaveBtn" class="btn small">Save scene</button>
+        <button id="annotatorSaveBtn" class="btn small">Save &amp; close</button>
         <button id="annotatorDownloadBtn" class="btn small">Download annotated PNG</button>
         <span id="annotatorStatus" class="status"></span>
       </div>
@@ -547,7 +549,7 @@ pub(crate) fn build_html_note(
       }}
       try {{
         await window.__ispySaveExcalidraw();
-        setAnnotatorStatus('Scene saved');
+        closeAnnotator();
       }} catch (_err) {{
         setAnnotatorStatus('Could not save scene');
       }}
