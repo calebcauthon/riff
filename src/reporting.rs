@@ -7,6 +7,8 @@ use crate::history::{
 use crate::models::{ClipboardMeta, SessionListRow, SessionState, ShotMeta};
 use crate::paths::sessions_dir;
 use crate::SUPPORTED_IMAGE_EXTS;
+use image::imageops;
+use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -260,9 +262,93 @@ fn shot_process_summary_text(shot: &ShotMeta) -> Option<String> {
     }
 }
 
-fn shot_process_html(shot: &ShotMeta) -> Option<String> {
-    shot_process_summary_text(shot)
-        .map(|s| format!(r#"<div class="sys">System: {}</div>"#, html_escape(&s)))
+#[derive(Debug, Clone)]
+struct ShotOutputVariant {
+    module_id: &'static str,
+    module_name: &'static str,
+    rel_url: String,
+    abs_path: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShotOutputModule {
+    module_id: &'static str,
+    module_name: &'static str,
+    render: fn(&DynamicImage) -> DynamicImage,
+}
+
+fn render_original(img: &DynamicImage) -> DynamicImage {
+    img.clone()
+}
+
+fn render_framed(img: &DynamicImage) -> DynamicImage {
+    let (w, h) = img.dimensions();
+    let border = ((w.max(h) as f32) * 0.05).round().max(16.0) as u32;
+    let framed_w = w + border * 2;
+    let framed_h = h + border * 2;
+    let mut out = ImageBuffer::from_pixel(framed_w, framed_h, Rgba([236, 241, 248, 255]));
+    imageops::overlay(&mut out, img, border as i64, border as i64);
+    DynamicImage::ImageRgba8(out)
+}
+
+fn render_enhanced(img: &DynamicImage) -> DynamicImage {
+    img.brighten(8).adjust_contrast(18.0).unsharpen(1.2, 1)
+}
+
+const SHOT_OUTPUT_MODULES: &[ShotOutputModule] = &[
+    ShotOutputModule {
+        module_id: "original",
+        module_name: "Original",
+        render: render_original,
+    },
+    ShotOutputModule {
+        module_id: "framed",
+        module_name: "Framed",
+        render: render_framed,
+    },
+    ShotOutputModule {
+        module_id: "enhanced",
+        module_name: "Enhanced",
+        render: render_enhanced,
+    },
+];
+
+fn build_shot_output_variants(session_dir: &Path, shot: &ShotMeta) -> Vec<ShotOutputVariant> {
+    let source_abs = session_dir.join(&shot.dest_rel_path);
+    let source_img = match image::open(&source_abs) {
+        Ok(img) => img,
+        Err(_) => return Vec::new(),
+    };
+
+    let out_root = session_dir.join("screenshots").join("derived");
+    if fs::create_dir_all(&out_root).is_err() {
+        return Vec::new();
+    }
+
+    let mut variants = Vec::<ShotOutputVariant>::new();
+    for module in SHOT_OUTPUT_MODULES {
+        let out_name = format!(
+            "shot-{id:03}__{module}.png",
+            id = shot.shot_id,
+            module = module.module_id
+        );
+        let out_abs = out_root.join(&out_name);
+        let out_rel = format!("screenshots/derived/{out_name}");
+
+        let rendered = (module.render)(&source_img);
+        if rendered.save(&out_abs).is_err() {
+            continue;
+        }
+
+        variants.push(ShotOutputVariant {
+            module_id: module.module_id,
+            module_name: module.module_name,
+            rel_url: out_rel,
+            abs_path: out_abs.display().to_string(),
+        });
+    }
+
+    variants
 }
 
 pub(crate) fn build_note(
@@ -379,6 +465,7 @@ pub(crate) fn build_note(
     lines.push("- `transcript.txt` (if available)".to_string());
     lines.push("- `note.html`".to_string());
     lines.push("- `screenshots/`".to_string());
+    lines.push("- `screenshots/derived/`".to_string());
     lines.push(String::new());
 
     lines.join("\n")
@@ -423,22 +510,38 @@ pub(crate) fn build_html_note(
         let ctx_text = shot_context_text(shot);
         let context_html = ctx_text
             .as_ref()
-            .map(|s| format!(r#"<div class="ctx">{}</div>"#, html_escape(s)))
+            .map(|s| format!(r#"<div class="ctx">App: {}</div>"#, html_escape(s)))
             .unwrap_or_default();
-        let process_html = shot_process_html(shot).unwrap_or_default();
+        let process_html = shot_process_summary_text(shot)
+            .map(|s| format!(r#"<div class="sys">System: {}</div>"#, html_escape(&s)))
+            .unwrap_or_default();
+        let mut variants_html = String::new();
+        let mut variants = build_shot_output_variants(session_dir, shot);
+        if variants.is_empty() {
+            variants.push(ShotOutputVariant {
+                module_id: "source",
+                module_name: "Source",
+                rel_url: rel_url.clone(),
+                abs_path: abs_str.clone(),
+            });
+        }
+        for variant in variants {
+            variants_html.push_str(&format!(
+                r#"<figure class="variant" data-module="{module_id}"><div class="variant-head"><figcaption>{module_name}</figcaption><button class="btn tiny copy-image" data-url="{url}" data-path="{path}">Copy image</button></div><div class="img-wrap"><a href="{url}" target="_blank" rel="noreferrer"><img src="{url}" alt="Screenshot {shot_id} - {module_name}" loading="lazy" /></a></div></figure>"#,
+                module_id = variant.module_id,
+                module_name = html_escape(variant.module_name),
+                url = html_escape(&variant.rel_url),
+                path = html_escape(&variant.abs_path),
+                shot_id = shot.shot_id,
+            ));
+        }
         gallery.push_str(&format!(
-            r#"<figure class="card"><div class="card-head"><figcaption>Screenshot {}</figcaption><div class="card-actions"><button class="btn small annotate-image" data-url="{}" data-path="{}">Annotate</button><button class="btn small copy-image" data-url="{}" data-path="{}">Copy image</button></div></div><a href="{}" target="_blank" rel="noreferrer"><img src="{}" alt="Screenshot {}" loading="lazy" /></a><div class="path">{}</div>{}{}</figure>"#,
-            shot.shot_id,
-            html_escape(&rel_url),
-            html_escape(&abs_str),
-            html_escape(&rel_url),
-            html_escape(&abs_str),
-            html_escape(&rel_url),
-            html_escape(&rel_url),
+            r#"<article class="shot-card"><div class="shot-head"><h3>Screenshot {}</h3><div class="path">{}</div>{}{}</div><div class="variants">{}</div></article>"#,
             shot.shot_id,
             html_escape(&abs_str),
             context_html,
-            process_html
+            process_html,
+            variants_html
         ));
     }
 
@@ -490,11 +593,21 @@ pub(crate) fn build_html_note(
     .btn.tiny {{ padding: 3px 8px; font-size: 11px; border-radius: 6px; }}
     .transcript {{ white-space: pre-wrap; line-height: 1.6; font-size: 15px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }}
+    .shot-grid {{ display: grid; grid-template-columns: 1fr; gap: 12px; }}
     .card {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px; margin: 0; }}
     .card-head {{ display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }}
     .card-actions {{ display: flex; align-items: center; gap: 6px; }}
     .card img {{ width: 100%; height: auto; border-radius: 8px; display: block; }}
     .card figcaption {{ font-weight: 600; margin: 0; }}
+    .shot-card {{ border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; padding: 12px; }}
+    .shot-head h3 {{ margin: 0 0 6px; font-size: 16px; }}
+    .variants {{ margin-top: 10px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }}
+    .variant {{ border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px; background: #fff; margin: 0; }}
+    .variant-head {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 8px; }}
+    .variant-head figcaption {{ font-size: 12px; font-weight: 700; color: #374151; }}
+    .img-wrap {{ position: relative; border-radius: 8px; overflow: hidden; background: #f8fafc; }}
+    .img-wrap a {{ display: block; }}
+    .img-wrap img {{ width: 100%; height: auto; display: block; }}
     .path {{ color: #6b7280; margin-top: 8px; font-size: 12px; word-break: break-all; }}
     .annotator-modal {{ position: fixed; inset: 0; background: rgba(15, 23, 42, 0.72); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 9999; }}
     .annotator-modal.open {{ display: flex; }}
@@ -542,6 +655,7 @@ pub(crate) fn build_html_note(
 
     <section class="panel">
       <h2>Screenshots</h2>
+      <div class="path">Each input screenshot is rendered through all active output modules.</div>
       {gallery_html}
     </section>
 
@@ -1078,7 +1192,7 @@ pub(crate) fn build_html_note(
         gallery_html = if gallery.is_empty() {
             "<div>No screenshots in this session.</div>".to_string()
         } else {
-            format!("<div class=\"grid\">{}</div>", gallery)
+            format!("<div class=\"shot-grid\">{}</div>", gallery)
         },
         clipboard_html = if clip_cards.is_empty() {
             "<div>No clipboard captures in this session.</div>".to_string()
