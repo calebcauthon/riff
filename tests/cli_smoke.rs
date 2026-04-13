@@ -117,7 +117,9 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         assert!(stdout.contains(line), "missing help line: {line}\n{stdout}");
     }
 
-    let order = ["start", "shot", "stop", "list", "show", "copy", "html", "sounds", "status"];
+    let order = [
+        "start", "shot", "stop", "list", "show", "copy", "html", "sounds", "status",
+    ];
     let mut last = 0usize;
     for name in order {
         let idx = stdout
@@ -163,13 +165,19 @@ fn show_with_missing_session_id_fails_cleanly() {
         .assert()
         .failure()
         .code(8)
-        .stderr(predicates::str::contains("Session not found: does-not-exist"));
+        .stderr(predicates::str::contains(
+            "Session not found: does-not-exist",
+        ));
 }
 
 #[test]
 fn copy_fails_when_transcript_not_available() {
     let td = tempdir().expect("tempdir");
-    make_session(td.path(), "20260413-013012", "# Session\n\nNo transcript here\n");
+    make_session(
+        td.path(),
+        "20260413-013012",
+        "# Session\n\nNo transcript here\n",
+    );
 
     cmd_with_root(td.path())
         .arg("copy")
