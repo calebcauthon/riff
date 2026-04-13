@@ -331,8 +331,8 @@ fn spawn_web_server(python_bin: &str, script_path: &Path, cli: &Cli) -> Result<(
         ),
     );
 
-    let child = Command::new(python_bin)
-        .arg(script_path)
+    let mut cmd = Command::new(python_bin);
+    cmd.arg(script_path)
         .arg("--root")
         .arg(root_dir())
         .arg("--host")
@@ -342,7 +342,13 @@ fn spawn_web_server(python_bin: &str, script_path: &Path, cli: &Cli) -> Result<(
         .arg("--idle-timeout-sec")
         .arg(web_server_idle_timeout_sec().to_string())
         .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_file_err))
+        .stderr(Stdio::from(log_file_err));
+
+    if let Ok(exe) = env::current_exe() {
+        cmd.env("ISPY_DICTATE_BIN", exe);
+    }
+
+    let child = cmd
         .spawn()
         .map_err(|e| app_error(1, format!("Failed to start web server: {e}")))?;
 

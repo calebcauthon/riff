@@ -18,9 +18,10 @@ mod models;
 mod paths;
 mod reporting;
 mod session_commands;
+mod shot_modules;
 mod transcription;
 
-use crate::cli::{Cli, Commands, HtmlArgs, WatchClipboardArgs};
+use crate::cli::{Cli, Commands, HtmlArgs, ScreenshotUseArgs, WatchClipboardArgs};
 use crate::error::{app_error, AppError};
 use crate::history::{
     cmd_copy, cmd_list, cmd_show, resolve_recent_session_dir, resolve_session_dir_by_id,
@@ -1388,6 +1389,127 @@ fn cmd_kill_server(cli: &Cli) -> Result<i32, AppError> {
     Ok(0)
 }
 
+fn cmd_screenshot_use(cli: &Cli, args: &ScreenshotUseArgs) -> Result<i32, AppError> {
+    ensure_dirs()?;
+    let session_dir = resolve_session_dir_by_id(&args.session_id)?;
+    let events_path = session_dir.join("events.jsonl");
+    let events = history::read_jsonl_values(&events_path);
+    let shots = reporting::load_shots_for_session(&session_dir, &events);
+
+    let Some(shot) = shots.iter().find(|s| s.shot_id == args.shot_id) else {
+        return Err(app_error(
+            8,
+            format!(
+                "Screenshot id {} not found in session {}",
+                args.shot_id, args.session_id
+            ),
+        ));
+    };
+
+    let target_path = session_dir.join(&shot.dest_rel_path);
+    if !target_path.exists() {
+        return Err(app_error(
+            8,
+            format!(
+                "Transcript screenshot path missing: {}",
+                target_path.display()
+            ),
+        ));
+    }
+
+    let stem = target_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("shot")
+        .to_string();
+    let ext = target_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("png")
+        .to_string();
+
+    let backup_path = target_path.with_file_name(format!("{stem}__original.{ext}"));
+    if !backup_path.exists() {
+        fs::copy(&target_path, &backup_path).map_err(|e| {
+            app_error(
+                1,
+                format!(
+                    "Failed to create original backup {}: {e}",
+                    backup_path.display()
+                ),
+            )
+        })?;
+    }
+
+    let normalized_module = args.module.trim().to_ascii_lowercase();
+    let source_path = if normalized_module == "original" {
+        backup_path.clone()
+    } else {
+        session_dir
+            .join("screenshots")
+            .join("derived")
+            .join(format!(
+                "shot-{:03}__{}.png",
+                args.shot_id, normalized_module
+            ))
+    };
+
+    if !source_path.exists() {
+        let _ = generate_html_for_session(&session_dir)?;
+    }
+    if !source_path.exists() {
+        return Err(app_error(
+            8,
+            format!(
+                "Derived screenshot module '{}' not found for shot {} (expected: {})",
+                normalized_module,
+                args.shot_id,
+                source_path.display()
+            ),
+        ));
+    }
+
+    fs::copy(&source_path, &target_path).map_err(|e| {
+        app_error(
+            1,
+            format!(
+                "Failed to copy source image {} -> {}: {e}",
+                source_path.display(),
+                target_path.display()
+            ),
+        )
+    })?;
+
+    let _ = generate_html_for_session(&session_dir)?;
+    let _ = generate_sessions_index_html()?;
+
+    print_out(
+        cli,
+        format!(
+            "Set screenshot {} module '{}' as transcript image\npath: {}\nbackup: {}",
+            args.shot_id,
+            normalized_module,
+            target_path.display(),
+            backup_path.display()
+        ),
+    );
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": "screenshot_use",
+            "session_id": args.session_id,
+            "shot_id": args.shot_id,
+            "module": normalized_module,
+            "target_path": target_path,
+            "backup_path": backup_path,
+            "source_path": source_path,
+        }),
+    );
+
+    Ok(0)
+}
+
 fn run(cli: &Cli) -> Result<i32, AppError> {
     match &cli.command {
         Commands::Start(args) => cmd_start(cli, args),
@@ -1399,6 +1521,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Copy(args) => cmd_copy(cli, args),
         Commands::Show(args) => cmd_show(cli, args),
         Commands::Html(args) => cmd_html(cli, args),
+        Commands::ScreenshotUse(args) => cmd_screenshot_use(cli, args),
         Commands::WatchClipboard(args) => cmd_watch_clipboard(cli, args),
         Commands::KillServer => cmd_kill_server(cli),
     }

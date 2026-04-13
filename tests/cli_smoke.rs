@@ -65,7 +65,7 @@ while true; do sleep 1; done
 set -euo pipefail
 out="${@: -1}"
 mkdir -p "$(dirname "$out")"
-: > "$out"
+printf '%b' '\x89\x50\x4E\x47\x0D\x0A\x1A\x0A\x00\x00\x00\x0D\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1F\x15\xC4\x89\x00\x00\x00\x0A\x49\x44\x41\x54\x78\x9C\x63\x00\x01\x00\x00\x05\x00\x01\x0D\x0A\x2D\xB4\x00\x00\x00\x00\x49\x45\x4E\x44\xAE\x42\x60\x82' > "$out"
 exit 0
 "#,
     );
@@ -138,6 +138,10 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         ("show", "Show note markdown for a session id"),
         ("copy", "Print transcript for a recent session index"),
         ("html", "Open HTML report for a session id"),
+        (
+            "screenshot-use",
+            "Set which derived image is used at the transcript screenshot path",
+        ),
         ("sounds", "Pick start/stop sounds and beep timing"),
         ("status", "Show active session status"),
         (
@@ -165,6 +169,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         "show",
         "copy",
         "html",
+        "screenshot-use",
         "sounds",
         "status",
         "kill-server",
@@ -431,4 +436,63 @@ fn end_to_end_start_shot_stop_produces_transcript_and_note() {
         .success()
         .stdout(predicates::str::contains("hello from integration test"))
         .stdout(predicates::str::contains("[TestApp Screenshot 1]"));
+}
+
+#[test]
+fn screenshot_use_swaps_transcript_image_and_keeps_original_backup() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .arg("shot")
+        .assert()
+        .success();
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "stop",
+            "--transcribe-cmd",
+            "printf 'hello screenshot use\\n' > {out_txt}",
+        ])
+        .assert()
+        .success();
+
+    let session_id = only_session_id(td.path());
+    let session_dir = td.path().join("sessions").join(&session_id);
+    let transcript_path = session_dir.join("screenshots").join("shot-001.png");
+    let before = fs::read(&transcript_path).expect("read original transcript image");
+
+    cmd_with_root(td.path())
+        .args([
+            "screenshot-use",
+            "--session-id",
+            &session_id,
+            "--shot-id",
+            "1",
+            "--module",
+            "polaroid",
+        ])
+        .assert()
+        .success();
+
+    let after = fs::read(&transcript_path).expect("read swapped transcript image");
+    let backup_path = session_dir
+        .join("screenshots")
+        .join("shot-001__original.png");
+    let backup = fs::read(&backup_path).expect("read original backup image");
+
+    assert_ne!(before, after, "transcript screenshot should be replaced");
+    assert_eq!(before, backup, "backup should keep original image bytes");
 }
