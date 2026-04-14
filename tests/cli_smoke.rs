@@ -118,6 +118,17 @@ fn only_session_id(root: &Path) -> String {
         .to_string()
 }
 
+fn extract_transcript_section(note_markdown: &str) -> String {
+    let marker = "## Transcript";
+    let start = note_markdown
+        .find(marker)
+        .expect("note should contain transcript section")
+        + marker.len();
+    let after = note_markdown[start..].trim_start_matches('\n');
+    let end = after.find("\n## ").unwrap_or(after.len());
+    after[..end].to_string()
+}
+
 #[test]
 fn help_lists_commands_in_logical_order_with_descriptions() {
     let td = tempdir().expect("tempdir");
@@ -428,6 +439,18 @@ fn end_to_end_start_shot_stop_produces_transcript_and_note() {
     assert!(
         note_md.contains("mem=4.5%"),
         "note.md missing screenshot memory metric: {note_md}"
+    );
+    let transcript_section = extract_transcript_section(&note_md);
+    let shot_path = session_dir.join("screenshots").join("shot-001.png");
+    let expected_prefix = format!("Screenshot 1: {}\n\n", shot_path.display());
+    assert!(
+        transcript_section.starts_with(&expected_prefix),
+        "transcript should start with screenshot path then two line breaks: {transcript_section}"
+    );
+    let disallowed_prefix = format!("Screenshot 1: {}\n\n\n", shot_path.display());
+    assert!(
+        !transcript_section.starts_with(&disallowed_prefix),
+        "transcript should not have more than two line breaks after path: {transcript_section}"
     );
 
     cmd_with_root(td.path())
