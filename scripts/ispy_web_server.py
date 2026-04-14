@@ -7,12 +7,15 @@ Serves /tmp/ispy (or configured root) over localhost and exits after idle timeou
 Endpoints:
 - GET  /health        -> JSON health payload
 - POST /touch         -> reset idle timer
+- POST /save-image    -> write annotated PNG into served sessions tree
 - GET  /sessions/...  -> static files (e.g., note.html)
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 import threading
@@ -21,6 +24,7 @@ from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,6 +53,12 @@ def main() -> int:
             return max(0.0, time.time() - last_activity["ts"])
 
     class Handler(SimpleHTTPRequestHandler):
+        def end_headers(self) -> None:  # noqa: D401
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            super().end_headers()
+
         def _json(self, status: int, payload: dict) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(status)
@@ -56,6 +66,22 @@ def main() -> int:
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _read_json_body(self) -> dict | None:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                return None
+            if length <= 0 or length > 25_000_000:
+                return None
+            raw = self.rfile.read(length)
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+            if not isinstance(parsed, dict):
+                return None
+            return parsed
 
         def log_message(self, fmt: str, *args):  # noqa: ANN001
             # Keep logs minimal in background mode.
@@ -78,6 +104,10 @@ def main() -> int:
             touch()
             super().do_GET()
 
+        def do_OPTIONS(self):  # noqa: N802
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.end_headers()
+
         def do_POST(self):  # noqa: N802
             if self.path.rstrip("/") == "/touch":
                 touch()
@@ -87,6 +117,72 @@ def main() -> int:
                         "ok": True,
                         "touched": True,
                         "idle_sec": round(idle_seconds(), 3),
+                    },
+                )
+                return
+
+            if self.path.rstrip("/") == "/save-image":
+                payload = self._read_json_body()
+                if payload is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid json body"})
+                    return
+
+                raw_url = str(payload.get("url", ""))
+                raw_abs_path = str(payload.get("absPath", ""))
+                data_url = str(payload.get("dataUrl", ""))
+                if not data_url:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "dataUrl required"})
+                    return
+
+                target: Path | None = None
+                if raw_abs_path:
+                    try:
+                        abs_path = Path(raw_abs_path).expanduser().resolve()
+                        abs_path.relative_to(root)
+                        target = abs_path
+                    except Exception:
+                        self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "absPath escapes server root"})
+                        return
+
+                if target is None:
+                    if not raw_url:
+                        self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "url or absPath required"})
+                        return
+                    parsed = urlparse(raw_url)
+                    rel_path = parsed.path.lstrip("/")
+                    if not rel_path:
+                        self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid url path"})
+                        return
+                    target = (root / rel_path).resolve()
+
+                prefix = "data:image/png;base64,"
+                if not data_url.startswith(prefix):
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "dataUrl must be image/png base64"})
+                    return
+
+                encoded = data_url[len(prefix) :]
+                try:
+                    png_bytes = base64.b64decode(encoded, validate=True)
+                except (binascii.Error, ValueError):
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid base64 payload"})
+                    return
+
+                try:
+                    target.relative_to(root)
+                except ValueError:
+                    self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "path escapes server root"})
+                    return
+
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(png_bytes)
+                touch()
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "saved": True,
+                        "path": str(target),
+                        "bytes": len(png_bytes),
                     },
                 )
                 return
