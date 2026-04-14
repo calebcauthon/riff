@@ -119,7 +119,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         ("list", "List recent sessions"),
         ("show", "Show note markdown for a session id"),
         ("copy", "Print transcript for a recent session index"),
-        ("html", "Open HTML report for a recent session"),
+        ("html", "Open HTML report for a session id"),
         ("sounds", "Pick start/stop sounds and beep timing"),
         ("status", "Show active session status"),
         ("kill-server", "Kill background helper servers (web + parakeet)"),
