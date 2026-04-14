@@ -274,6 +274,8 @@ fn html_generates_sessions_index_and_navigation_link() {
     assert!(index_html.contains("new words"));
     assert!(index_html.contains("./20260413-013012/screenshots/shot-1.png"));
     assert!(index_html.contains("class=\"thumb\""));
+    assert!(index_html.contains("class=\"btn tiny copy-row-transcript\""));
+    assert!(index_html.contains("data-href=\"./20260413-013012/note.html\""));
 
     let note_path = td
         .path()

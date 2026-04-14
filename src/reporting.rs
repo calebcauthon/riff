@@ -931,11 +931,24 @@ fn build_sessions_index_html(rows: &[SessionListRow]) -> String {
     let mut entries_html = String::new();
     for row in rows {
         let session_dir = sessions_dir().join(&row.session_id);
-        let transcript = read_transcript_text_for_session(&session_dir);
-        let transcript = if transcript.trim().is_empty() {
+        let note_path = session_dir.join("note.md");
+        let transcript_raw = fs::read_to_string(&note_path)
+            .ok()
+            .and_then(|markdown| extract_transcript_from_note(&markdown))
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| read_transcript_text_for_session(&session_dir));
+        let transcript_copy = if transcript_raw.trim().is_empty() {
             "No transcript available.".to_string()
         } else {
-            transcript.split_whitespace().collect::<Vec<_>>().join(" ")
+            transcript_raw.trim().to_string()
+        };
+        let transcript = if transcript_raw.trim().is_empty() {
+            "No transcript available.".to_string()
+        } else {
+            transcript_raw
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
         };
 
         let mut thumb_items = String::new();
@@ -969,12 +982,13 @@ fn build_sessions_index_html(rows: &[SessionListRow]) -> String {
         }
 
         entries_html.push_str(&format!(
-            r#"<article class="row"><div class="main"><div class="row-top"><a class="session" href="./{session_id}/note.html">{session_id}</a><span class="meta">{timestamp}</span><span class="meta">{images} images</span><span class="meta">{duration}</span></div><div class="transcript" title="{transcript_title}">{transcript}</div></div><div class="thumbs">{thumbs}</div></article>"#,
+            r#"<article class="row" data-href="./{session_id}/note.html" tabindex="0"><div class="main"><div class="row-top"><span class="session">{session_id}</span><span class="meta">{timestamp}</span><span class="meta">{images} images</span><span class="meta">{duration}</span><button class="btn tiny copy-row-transcript" data-transcript="{transcript_copy}" title="Copy transcript">Copy</button></div><div class="transcript" title="{transcript_title}">{transcript}</div></div><div class="thumbs">{thumbs}</div></article>"#,
             session_id = html_escape(&row.session_id),
             timestamp = html_escape(&row.timestamp),
             images = row.images,
             duration = html_escape(&row.duration),
             transcript = html_escape(&transcript),
+            transcript_copy = html_escape(&transcript_copy),
             transcript_title = html_escape(&transcript),
             thumbs = if thumb_items.is_empty() {
                 "<div class=\"thumb-empty\">No screenshots.</div>".to_string()
@@ -997,11 +1011,12 @@ fn build_sessions_index_html(rows: &[SessionListRow]) -> String {
     h1 {{ margin: 0 0 8px; font-size: 30px; }}
     .sub {{ color: #4b5563; margin: 0 0 18px; }}
     .rows {{ display: flex; flex-direction: column; gap: 12px; }}
-    .row {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px 12px; display: flex; align-items: center; gap: 12px; }}
+    .row {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px 12px; display: flex; align-items: center; gap: 12px; cursor: pointer; }}
+    .row:hover {{ border-color: #cbd5e1; box-shadow: 0 2px 8px rgba(2, 6, 23, 0.08); }}
+    .row:focus-visible {{ outline: 2px solid #2563eb; outline-offset: 2px; }}
     .main {{ min-width: 0; flex: 1; }}
     .row-top {{ display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; margin-bottom: 4px; overflow: hidden; }}
-    .session {{ color: #1d4ed8; text-decoration: none; font-weight: 700; }}
-    .session:hover {{ text-decoration: underline; }}
+    .session {{ color: #1d4ed8; font-weight: 700; white-space: nowrap; }}
     .meta {{ color: #334155; font-size: 13px; white-space: nowrap; }}
     .transcript {{ line-height: 1.35; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
     .thumbs {{ display: flex; flex-wrap: nowrap; gap: 6px; flex-shrink: 0; overflow-x: auto; }}
@@ -1017,6 +1032,53 @@ fn build_sessions_index_html(rows: &[SessionListRow]) -> String {
     <p class="sub">Browse and open session reports.</p>
     {content}
   </div>
+  <script>
+    async function copyText(text) {{
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {{
+        throw new Error('Clipboard unavailable');
+      }}
+      await navigator.clipboard.writeText(text);
+    }}
+
+    document.querySelectorAll('.row').forEach((row) => {{
+      row.addEventListener('click', (event) => {{
+        if (event.target.closest('.copy-row-transcript') || event.target.closest('.thumb')) {{
+          return;
+        }}
+        const href = row.dataset.href;
+        if (href) window.location.href = href;
+      }});
+
+      row.addEventListener('keydown', (event) => {{
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        const href = row.dataset.href;
+        if (!href) return;
+        event.preventDefault();
+        window.location.href = href;
+      }});
+    }});
+
+    document.querySelectorAll('.copy-row-transcript').forEach((btn) => {{
+      btn.addEventListener('click', async (event) => {{
+        event.preventDefault();
+        event.stopPropagation();
+        const text = btn.dataset.transcript || '';
+        const original = btn.textContent || 'Copy';
+        try {{
+          await copyText(text);
+          btn.textContent = 'Copied';
+          window.setTimeout(() => {{
+            btn.textContent = original;
+          }}, 900);
+        }} catch (_err) {{
+          btn.textContent = 'Failed';
+          window.setTimeout(() => {{
+            btn.textContent = original;
+          }}, 900);
+        }}
+      }});
+    }});
+  </script>
 </body>
 </html>
 "#,
