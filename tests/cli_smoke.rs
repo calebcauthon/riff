@@ -496,6 +496,11 @@ fn screenshot_use_swaps_transcript_image_and_keeps_original_backup() {
     let session_dir = td.path().join("sessions").join(&session_id);
     let transcript_path = session_dir.join("screenshots").join("shot-001.png");
     let before = fs::read(&transcript_path).expect("read original transcript image");
+    let polaroid_path = session_dir
+        .join("screenshots")
+        .join("derived")
+        .join("shot-001__polaroid.png");
+    let polaroid_before = fs::read(&polaroid_path).expect("read derived polaroid before use");
 
     cmd_with_root(td.path())
         .args([
@@ -515,7 +520,16 @@ fn screenshot_use_swaps_transcript_image_and_keeps_original_backup() {
         .join("screenshots")
         .join("shot-001__original.png");
     let backup = fs::read(&backup_path).expect("read original backup image");
+    let polaroid_after = fs::read(&polaroid_path).expect("read derived polaroid after use");
 
     assert_ne!(before, after, "transcript screenshot should be replaced");
     assert_eq!(before, backup, "backup should keep original image bytes");
+    assert_eq!(
+        after, polaroid_before,
+        "transcript screenshot should be a byte-for-byte copy of selected variant"
+    );
+    assert_eq!(
+        polaroid_before, polaroid_after,
+        "derived variant bytes should not be rewritten after selecting transcript image"
+    );
 }

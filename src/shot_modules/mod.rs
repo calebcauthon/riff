@@ -51,7 +51,26 @@ pub(crate) fn build_shot_output_variants(
     shot: &ShotMeta,
 ) -> Vec<ShotOutputVariant> {
     let source_abs = session_dir.join(&shot.dest_rel_path);
-    let source_img = match image::open(&source_abs) {
+    let source_base_abs = {
+        let stem = source_abs
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("shot")
+            .to_string();
+        let ext = source_abs
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("png")
+            .to_string();
+        let backup = source_abs.with_file_name(format!("{stem}__original.{ext}"));
+        if backup.exists() {
+            backup
+        } else {
+            source_abs.clone()
+        }
+    };
+
+    let source_img = match image::open(&source_base_abs) {
         Ok(img) => img,
         Err(_) => return Vec::new(),
     };
