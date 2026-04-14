@@ -77,6 +77,9 @@ pub(crate) fn inject_annotation_markers(
     let mut inserted = 0usize;
 
     for (audio_sec, marker) in markers {
+        if clean.contains(&marker) {
+            continue;
+        }
         let ratio = (audio_sec / duration).clamp(0.0, 1.0);
         let mut idx = ((base_len as f64) * ratio).round() as usize;
         idx = idx.min(tokens.len());
@@ -86,6 +89,26 @@ pub(crate) fn inject_annotation_markers(
     }
 
     tokens.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inject_annotation_markers_does_not_duplicate_existing_screenshot_marker() {
+        let transcript =
+            "Screenshot 1: /tmp/ispy/sessions/abc/screenshots/shot-001.png Testing, testing, [Screenshot 1] testing.";
+        let shots = vec![ShotMeta {
+            shot_id: 1,
+            dest_rel_path: "screenshots/shot-001.png".to_string(),
+            audio_sec: 1.0,
+        }];
+
+        let out = inject_annotation_markers(transcript, &shots, &[], Some(3.0));
+        assert_eq!(out, transcript);
+        assert!(!out.contains("[Screenshot [Screenshot 1] 1]"));
+    }
 }
 
 fn format_hms(seconds: f64) -> String {
