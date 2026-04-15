@@ -92,7 +92,7 @@ pub(crate) fn inject_annotation_markers(
 }
 
 #[cfg(test)]
-mod tests {
+mod marker_tests {
     use super::*;
 
     #[test]
@@ -1350,9 +1350,8 @@ mod tests {
         let html = sample_html();
         assert!(html.contains("annotate-image"));
         assert!(html.contains("data-url=\"screenshots/shot-001.png\""));
-        assert!(
-            html.contains("data-path=\"/tmp/ispy/sessions/20260413-151333/screenshots/shot-001.png\"")
-        );
+        assert!(html
+            .contains("data-path=\"/tmp/ispy/sessions/20260413-151333/screenshots/shot-001.png\""));
     }
 
     #[test]

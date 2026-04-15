@@ -122,7 +122,10 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         ("html", "Open HTML report for a session id"),
         ("sounds", "Pick start/stop sounds and beep timing"),
         ("status", "Show active session status"),
-        ("kill-server", "Kill background helper servers (web + parakeet)"),
+        (
+            "kill-server",
+            "Kill background helper servers (web + parakeet)",
+        ),
     ];
 
     for (name, desc) in must_have {

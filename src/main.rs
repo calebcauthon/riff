@@ -408,18 +408,49 @@ fn resolve_audio_device_with_cache(requested: &str, cli: &Cli, use_cache: bool) 
         return requested.to_string();
     }
 
+    let avoid = ["iphone", "continuity"];
+    let built_in = ["macbook", "built-in", "internal"];
+    let devices = list_avfoundation_audio_devices();
     let cache_file = audio_device_cache_file();
+
     if use_cache {
         if let Ok(cached) = fs::read_to_string(&cache_file) {
             let cached = cached.trim();
             if cached.starts_with(':') && cached.len() > 1 {
-                print_verbose(cli, format!("Using cached audio device {}", cached));
-                return cached.to_string();
+                if devices.is_empty() {
+                    print_verbose(
+                        cli,
+                        format!(
+                            "Using cached audio device {} (device list unavailable)",
+                            cached
+                        ),
+                    );
+                    return cached.to_string();
+                }
+
+                let cached_idx = &cached[1..];
+                if let Some((_, name)) = devices.iter().find(|(idx, _)| idx == cached_idx) {
+                    let lc = name.to_ascii_lowercase();
+                    if !contains_any(&lc, &avoid) {
+                        print_verbose(
+                            cli,
+                            format!("Using cached audio device {} ({})", cached, name),
+                        );
+                        return cached.to_string();
+                    }
+                    print_verbose(
+                        cli,
+                        format!(
+                            "Ignoring cached audio device {} ({}), matched avoided device class.",
+                            cached, name
+                        ),
+                    );
+                    let _ = fs::remove_file(&cache_file);
+                }
             }
         }
     }
 
-    let devices = list_avfoundation_audio_devices();
     if devices.is_empty() {
         print_verbose(
             cli,
@@ -427,9 +458,6 @@ fn resolve_audio_device_with_cache(requested: &str, cli: &Cli, use_cache: bool) 
         );
         return ":0".to_string();
     }
-
-    let avoid = ["iphone", "continuity"];
-    let built_in = ["macbook", "built-in", "internal"];
 
     let preferred = devices
         .iter()
@@ -1148,14 +1176,23 @@ fn cmd_kill_server(cli: &Cli) -> Result<i32, AppError> {
 
     if !cli.quiet {
         for item in &report {
-            let server = item.get("server").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let server = item
+                .get("server")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let pid = item
                 .get("pid")
                 .and_then(|v| v.as_i64())
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "-".to_string());
-            let signal = item.get("signal").and_then(|v| v.as_str()).unwrap_or("none");
+            let signal = item
+                .get("signal")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none");
             println!(
                 "kill-server {}: status={} pid={} signal={}",
                 server, status, pid, signal
