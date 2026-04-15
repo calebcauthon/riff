@@ -40,6 +40,8 @@ pub enum Commands {
     Copy(CopyArgs),
     /// Open HTML report for a session id
     Html(HtmlArgs),
+    /// Set which derived image is used at the transcript screenshot path
+    ScreenshotUse(ScreenshotUseArgs),
 
     /// Pick start/stop sounds and beep timing
     Sounds,
@@ -97,6 +99,21 @@ pub struct ShowArgs {
 pub struct HtmlArgs {
     /// Session id (for example: 20260413-013011); defaults to most recent when omitted
     pub session_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ScreenshotUseArgs {
+    /// Session id (for example: 20260413-013011)
+    #[arg(long)]
+    pub session_id: String,
+
+    /// Screenshot id (for example: 1)
+    #[arg(long)]
+    pub shot_id: usize,
+
+    /// Module id (for example: polaroid, framed, enhanced, original)
+    #[arg(long)]
+    pub module: String,
 }
 
 #[derive(Args, Debug)]

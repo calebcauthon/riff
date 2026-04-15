@@ -7,6 +7,7 @@ Serves /tmp/ispy (or configured root) over localhost and exits after idle timeou
 Endpoints:
 - GET  /health        -> JSON health payload
 - POST /touch         -> reset idle timer
+- POST /use-screenshot -> promote derived module image into transcript screenshot path
 - POST /save-image    -> write annotated PNG into served sessions tree
 - GET  /sessions/...  -> static files (e.g., note.html)
 """
@@ -18,6 +19,7 @@ import base64
 import binascii
 import json
 import os
+import subprocess
 import threading
 import time
 from functools import partial
@@ -53,11 +55,10 @@ def main() -> int:
             return max(0.0, time.time() - last_activity["ts"])
 
     class Handler(SimpleHTTPRequestHandler):
-        def end_headers(self) -> None:  # noqa: D401
+        def _write_cors_headers(self) -> None:
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
-            super().end_headers()
 
         def _json(self, status: int, payload: dict) -> None:
             body = json.dumps(payload).encode("utf-8")
@@ -104,6 +105,10 @@ def main() -> int:
             touch()
             super().do_GET()
 
+        def end_headers(self) -> None:  # noqa: N802
+            self._write_cors_headers()
+            super().end_headers()
+
         def do_OPTIONS(self):  # noqa: N802
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
@@ -117,6 +122,79 @@ def main() -> int:
                         "ok": True,
                         "touched": True,
                         "idle_sec": round(idle_seconds(), 3),
+                    },
+                )
+                return
+
+            if self.path.rstrip("/") == "/use-screenshot":
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                except ValueError:
+                    length = 0
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                try:
+                    payload = json.loads(raw.decode("utf-8") or "{}")
+                except json.JSONDecodeError:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid json"})
+                    return
+
+                session_id = str(payload.get("session_id") or "").strip()
+                module = str(payload.get("module") or "").strip()
+                shot_id = payload.get("shot_id")
+                if not session_id or not module or not isinstance(shot_id, int):
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"ok": False, "error": "session_id, shot_id(int), and module are required"},
+                    )
+                    return
+
+                dictate_bin = os.environ.get("ISPY_DICTATE_BIN", "dictate")
+                cmd = [
+                    dictate_bin,
+                    "--json",
+                    "--quiet",
+                    "screenshot-use",
+                    "--session-id",
+                    session_id,
+                    "--shot-id",
+                    str(shot_id),
+                    "--module",
+                    module,
+                ]
+                try:
+                    run = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                except Exception as e:  # noqa: BLE001
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "ok": False,
+                            "error": "dictate screenshot-use execution failed",
+                            "detail": str(e),
+                            "cmd": cmd,
+                        },
+                    )
+                    return
+                if run.returncode != 0:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "ok": False,
+                            "error": "dictate screenshot-use failed",
+                            "code": run.returncode,
+                            "stderr": run.stderr.strip(),
+                            "stdout": run.stdout.strip(),
+                        },
+                    )
+                    return
+
+                touch()
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "session_id": session_id,
+                        "shot_id": shot_id,
+                        "module": module,
                     },
                 )
                 return

@@ -22,6 +22,18 @@ pub struct ShotMeta {
     pub shot_id: usize,
     pub dest_rel_path: String,
     pub audio_sec: f64,
+    pub app_name: Option<String>,
+    pub app_bundle_id: Option<String>,
+    pub app_pid: Option<i32>,
+    pub window_title: Option<String>,
+    pub app_capture_error: Option<String>,
+    pub proc_cpu_percent: Option<f64>,
+    pub proc_mem_percent: Option<f64>,
+    pub proc_rss_kb: Option<u64>,
+    pub proc_elapsed: Option<String>,
+    pub proc_state: Option<String>,
+    pub proc_command: Option<String>,
+    pub proc_capture_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]

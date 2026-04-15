@@ -6,6 +6,7 @@ use crate::history::{
 };
 use crate::models::{ClipboardMeta, SessionListRow, SessionState, ShotMeta};
 use crate::paths::sessions_dir;
+use crate::shot_modules::{build_shot_output_variants, ShotOutputVariant};
 use crate::SUPPORTED_IMAGE_EXTS;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -18,17 +19,24 @@ pub(crate) fn inject_annotation_markers(
     clips: &[ClipboardMeta],
     audio_duration_sec: Option<f64>,
 ) -> String {
-    let clean = transcript.trim();
+    let mut clean = transcript.trim().to_string();
+    for _ in 0..4 {
+        let (next, changed) = strip_annotation_markers_once(&clean);
+        clean = next;
+        if !changed {
+            break;
+        }
+    }
+    let clean = clean.trim();
     let mut markers = shots
         .iter()
-        .map(|s| (s.audio_sec, format!("[Screenshot {}]", s.shot_id)))
+        .map(|s| (s.audio_sec, format!("[{}]", shot_marker_label(s))))
         .chain(
             clips
                 .iter()
                 .map(|c| (c.audio_sec, format!("[Clipboard {}]", c.clip_id))),
         )
         .collect::<Vec<_>>();
-    markers.retain(|(_, marker)| !clean.contains(marker));
     markers.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     if clean.is_empty() {
@@ -77,9 +85,6 @@ pub(crate) fn inject_annotation_markers(
     let mut inserted = 0usize;
 
     for (audio_sec, marker) in markers {
-        if clean.contains(&marker) {
-            continue;
-        }
         let ratio = (audio_sec / duration).clamp(0.0, 1.0);
         let mut idx = ((base_len as f64) * ratio).round() as usize;
         idx = idx.min(tokens.len());
@@ -91,24 +96,58 @@ pub(crate) fn inject_annotation_markers(
     tokens.join(" ")
 }
 
-#[cfg(test)]
-mod marker_tests {
-    use super::*;
-
-    #[test]
-    fn inject_annotation_markers_does_not_duplicate_existing_screenshot_marker() {
-        let transcript =
-            "Screenshot 1: /tmp/ispy/sessions/abc/screenshots/shot-001.png Testing, testing, [Screenshot 1] testing.";
-        let shots = vec![ShotMeta {
-            shot_id: 1,
-            dest_rel_path: "screenshots/shot-001.png".to_string(),
-            audio_sec: 1.0,
-        }];
-
-        let out = inject_annotation_markers(transcript, &shots, &[], Some(3.0));
-        assert_eq!(out, transcript);
-        assert!(!out.contains("[Screenshot [Screenshot 1] 1]"));
+fn is_annotation_marker_body(body: &str) -> bool {
+    let t = body.trim();
+    if let Some(rest) = t.strip_prefix("Screenshot ") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
     }
+    if let Some(rest) = t.strip_prefix("Clipboard ") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    if let Some((prefix, suffix)) = t.rsplit_once(" Screenshot ") {
+        return !prefix.trim().is_empty()
+            && !suffix.is_empty()
+            && suffix.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+fn strip_annotation_markers_once(input: &str) -> (String, bool) {
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    let bytes = input.as_bytes();
+    let mut changed = false;
+
+    while i < bytes.len() {
+        if bytes[i] != b'[' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        let start = i;
+        let mut end = i + 1;
+        while end < bytes.len() && bytes[end] != b']' {
+            end += 1;
+        }
+        if end >= bytes.len() {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        let body = &input[start + 1..end];
+        if is_annotation_marker_body(body) {
+            changed = true;
+            i = end + 1;
+            continue;
+        }
+
+        out.push_str(&input[start..=end]);
+        i = end + 1;
+    }
+
+    (out, changed)
 }
 
 fn format_hms(seconds: f64) -> String {
@@ -140,6 +179,94 @@ fn clip_preview(text: &str, max_chars: usize) -> String {
         let mut out = chars[..max_chars].iter().collect::<String>();
         out.push_str("...");
         out
+    }
+}
+
+fn images_visually_equal(a: &Path, b: &Path) -> bool {
+    let Ok(img_a) = image::open(a) else {
+        return false;
+    };
+    let Ok(img_b) = image::open(b) else {
+        return false;
+    };
+    if img_a.width() != img_b.width() || img_a.height() != img_b.height() {
+        return false;
+    }
+    img_a.to_rgba8().as_raw() == img_b.to_rgba8().as_raw()
+}
+
+fn shot_marker_label(shot: &ShotMeta) -> String {
+    if let Some(app_name) = shot
+        .app_name
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        format!("{app_name} Screenshot {}", shot.shot_id)
+    } else {
+        format!("Screenshot {}", shot.shot_id)
+    }
+}
+
+fn shot_context_text(shot: &ShotMeta) -> Option<String> {
+    let mut parts = Vec::<String>::new();
+    if let Some(name) = shot.app_name.as_ref() {
+        parts.push(format!("App: {}", name));
+    }
+    if let Some(bundle) = shot.app_bundle_id.as_ref() {
+        parts.push(format!("Bundle: {}", bundle));
+    }
+    if let Some(pid) = shot.app_pid {
+        parts.push(format!("PID: {}", pid));
+    }
+    if let Some(window_title) = shot.window_title.as_ref() {
+        parts.push(format!("Window: {}", window_title));
+    }
+    if parts.is_empty() {
+        if let Some(reason) = shot.app_capture_error.as_ref() {
+            parts.push(format!("App metadata unavailable: {}", reason));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
+fn shot_process_summary_text(shot: &ShotMeta) -> Option<String> {
+    let mut parts = Vec::<String>::new();
+    if let Some(pid) = shot.app_pid {
+        parts.push(format!("pid={pid}"));
+    }
+    if let Some(cpu) = shot.proc_cpu_percent {
+        parts.push(format!("cpu={cpu:.1}%"));
+    }
+    if let Some(mem) = shot.proc_mem_percent {
+        parts.push(format!("mem={mem:.1}%"));
+    }
+    if let Some(rss) = shot.proc_rss_kb {
+        parts.push(format!("rss={} KB", rss));
+    }
+    if let Some(elapsed) = shot.proc_elapsed.as_ref() {
+        parts.push(format!("elapsed={elapsed}"));
+    }
+    if let Some(state) = shot.proc_state.as_ref() {
+        parts.push(format!("state={state}"));
+    }
+    if let Some(command) = shot.proc_command.as_ref() {
+        parts.push(format!("command={command}"));
+    }
+    if parts.is_empty() {
+        if let Some(reason) = shot.proc_capture_error.as_ref() {
+            parts.push(format!("unavailable ({reason})"));
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
     }
 }
 
@@ -179,21 +306,23 @@ pub(crate) fn build_note(
         lines.push(format!("- Transcription method: `{method}`"));
     }
 
-    lines.push(String::new());
-    lines.push("## Transcript".to_string());
-    lines.push(String::new());
-
     if !shots.is_empty() {
+        lines.push(String::new());
+        lines.push("## Screenshot Metadata".to_string());
+        lines.push(String::new());
         let session_dir = Path::new(&state.session_dir);
         for shot in shots {
             let abs_path = session_dir.join(&shot.dest_rel_path);
-            lines.push(format!(
-                "Screenshot {}: {}",
-                shot.shot_id,
-                abs_path.display()
-            ));
+            lines.push(format!("[Screenshot {}]", shot.shot_id));
+            lines.push(format!("- Path: {}", abs_path.display()));
+            if let Some(ctx) = shot_context_text(shot) {
+                lines.push(format!("- {}", ctx));
+            }
+            if let Some(proc_summary) = shot_process_summary_text(shot) {
+                lines.push(format!("- Process: {}", proc_summary));
+            }
+            lines.push(String::new());
         }
-        lines.push(String::new());
     }
 
     if !clips.is_empty() {
@@ -202,6 +331,22 @@ pub(crate) fn build_note(
                 "Clipboard {}: {}",
                 clip.clip_id,
                 clip_preview(&clip.text, 120)
+            ));
+        }
+        lines.push(String::new());
+    }
+
+    lines.push("## Transcript".to_string());
+    lines.push(String::new());
+
+    if !shots.is_empty() {
+        let session_dir = Path::new(&state.session_dir);
+        for shot in shots {
+            let abs_path = session_dir.join(&shot.dest_rel_path);
+            lines.push(format!(
+                "{}: {}",
+                shot_marker_label(shot),
+                abs_path.display()
             ));
         }
         lines.push(String::new());
@@ -218,9 +363,10 @@ pub(crate) fn build_note(
         lines.push("## Screenshot Footnotes".to_string());
         lines.push(String::new());
         for shot in shots {
+            let label = shot_marker_label(shot);
             lines.push(format!(
-                "[Screenshot {}]: {} (t={})",
-                shot.shot_id,
+                "[{}]: {} (t={})",
+                label,
                 shot.dest_rel_path,
                 format_hms(shot.audio_sec)
             ));
@@ -251,6 +397,7 @@ pub(crate) fn build_note(
     lines.push("- `transcript.txt` (if available)".to_string());
     lines.push("- `note.html`".to_string());
     lines.push("- `screenshots/`".to_string());
+    lines.push("- `screenshots/derived/`".to_string());
     lines.push(String::new());
 
     lines.join("\n")
@@ -263,6 +410,39 @@ fn html_escape(input: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+fn strip_leading_screenshot_path_block(text: &str) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut idx = 0usize;
+    let mut saw_path_line = false;
+
+    while idx < lines.len() {
+        let t = lines[idx].trim();
+        if is_screenshot_path_line(t) {
+            saw_path_line = true;
+            idx += 1;
+            continue;
+        }
+        break;
+    }
+
+    if !saw_path_line {
+        return text.to_string();
+    }
+
+    while idx < lines.len() && lines[idx].trim().is_empty() {
+        idx += 1;
+    }
+
+    lines[idx..].join("\n")
+}
+
+fn is_screenshot_path_line(line: &str) -> bool {
+    let Some((prefix, path_part)) = line.split_once(": ") else {
+        return false;
+    };
+    path_part.starts_with('/') && is_annotation_marker_body(prefix)
 }
 
 pub(crate) fn build_html_note(
@@ -292,17 +472,79 @@ pub(crate) fn build_html_note(
         let abs = session_dir.join(&shot.dest_rel_path);
         let abs_str = abs.display().to_string();
         let rel_url = shot.dest_rel_path.clone();
+        let ctx_text = shot_context_text(shot);
+        let context_html = ctx_text
+            .as_ref()
+            .map(|s| format!(r#"<div class="ctx">App: {}</div>"#, html_escape(s)))
+            .unwrap_or_default();
+        let process_html = shot_process_summary_text(shot)
+            .map(|s| format!(r#"<div class="sys">System: {}</div>"#, html_escape(&s)))
+            .unwrap_or_default();
+        let mut variants_html = String::new();
+        let mut variants = build_shot_output_variants(session_dir, shot);
+        if variants.is_empty() {
+            variants.push(ShotOutputVariant {
+                module_id: "source",
+                module_name: "Source",
+                rel_url: rel_url.clone(),
+                abs_path: abs_str.clone(),
+            });
+        }
+        let transcript_bytes = fs::read(&abs).ok();
+        let selected_module = variants.iter().find_map(|variant| {
+            let variant_path = Path::new(&variant.abs_path);
+            let byte_match = transcript_bytes
+                .as_ref()
+                .and_then(|bytes| {
+                    fs::read(variant_path)
+                        .ok()
+                        .filter(|candidate| candidate == bytes)
+                })
+                .is_some();
+            if byte_match || images_visually_equal(&abs, variant_path) {
+                Some(variant.module_id)
+            } else {
+                None
+            }
+        });
+        for variant in variants {
+            let is_selected = selected_module == Some(variant.module_id);
+            let selected_class = if is_selected { " selected" } else { "" };
+            let selected_badge = if is_selected {
+                r#"<span class="active-pill">In transcript</span>"#
+            } else {
+                ""
+            };
+            let use_button = if is_selected {
+                r#"<button class="ispy-btn tiny use-variant" disabled aria-disabled="true">In transcript</button>"#
+                    .to_string()
+            } else {
+                format!(
+                    r#"<button class="ispy-btn tiny use-variant" data-session-id="{session_id}" data-shot-id="{shot_id}" data-module="{module_id}">Use for transcript</button>"#,
+                    session_id = html_escape(session_id),
+                    shot_id = shot.shot_id,
+                    module_id = variant.module_id,
+                )
+            };
+            variants_html.push_str(&format!(
+                r#"<figure class="variant{selected_class}" data-module="{module_id}" data-shot-id="{shot_id}"><div class="variant-head"><div class="variant-title"><figcaption>{module_name}</figcaption>{selected_badge}</div><div class="variant-actions">{use_button}<button class="ispy-btn tiny annotate-image" data-url="{url}" data-path="{path}">Annotate</button><button class="ispy-btn tiny copy-image" data-url="{url}" data-path="{path}">Copy image</button></div></div><div class="img-wrap"><a href="{url}" target="_blank" rel="noreferrer"><img src="{url}" alt="Screenshot {shot_id} - {module_name}" loading="lazy" /></a></div></figure>"#,
+                selected_class = selected_class,
+                selected_badge = selected_badge,
+                use_button = use_button,
+                module_id = variant.module_id,
+                module_name = html_escape(variant.module_name),
+                url = html_escape(&variant.rel_url),
+                path = html_escape(&variant.abs_path),
+                shot_id = shot.shot_id,
+            ));
+        }
         gallery.push_str(&format!(
-            r#"<figure class="card"><div class="card-head"><figcaption>Screenshot {}</figcaption><div class="card-actions"><button class="btn small annotate-image" data-url="{}" data-path="{}">Annotate</button><button class="btn small copy-image" data-url="{}" data-path="{}">Copy image</button></div></div><a href="{}" target="_blank" rel="noreferrer"><img src="{}" alt="Screenshot {}" loading="lazy" /></a><div class="path">{}</div></figure>"#,
+            r#"<article class="shot-card"><div class="shot-head"><h3>Screenshot {}</h3><div class="path">{}</div>{}{}</div><div class="variants">{}</div></article>"#,
             shot.shot_id,
-            html_escape(&rel_url),
             html_escape(&abs_str),
-            html_escape(&rel_url),
-            html_escape(&abs_str),
-            html_escape(&rel_url),
-            html_escape(&rel_url),
-            shot.shot_id,
-            html_escape(&abs_str)
+            context_html,
+            process_html,
+            variants_html
         ));
     }
 
@@ -310,7 +552,7 @@ pub(crate) fn build_html_note(
     for clip in clips {
         let preview = clip_preview(&clip.text, 300);
         clip_cards.push_str(&format!(
-            r#"<div class="card"><div class="card-head"><strong>Clipboard {}</strong><button class="btn small copy-clip" data-text="{}">Copy text</button></div><div class="transcript">{}</div><div class="path">t={} · {} chars</div></div>"#,
+            r#"<div class="card"><div class="card-head"><strong>Clipboard {}</strong><button class="ispy-btn small copy-clip" data-text="{}">Copy text</button></div><div class="transcript">{}</div><div class="path">t={} · {} chars</div></div>"#,
             clip.clip_id,
             html_escape(&clip.text),
             html_escape(&preview),
@@ -320,20 +562,29 @@ pub(crate) fn build_html_note(
     }
 
     let duration = format_duration_compact(audio_duration_sec);
-    let transcript_text = if transcript.trim().is_empty() {
+    let transcript_core = strip_leading_screenshot_path_block(transcript.trim());
+    let mut transcript_text = if transcript_core.trim().is_empty() {
         "_No transcript available._".to_string()
     } else {
-        transcript.trim().to_string()
+        transcript_core.trim().to_string()
     };
+    if !shots.is_empty() {
+        let mut path_lines = String::new();
+        for shot in shots {
+            let abs = session_dir.join(&shot.dest_rel_path);
+            path_lines.push_str(&format!("{}: {}\n", shot_marker_label(shot), abs.display()));
+        }
+        transcript_text = format!("{}\n\n{}", path_lines.trim_end(), transcript_text);
+    }
 
     format!(
-        r##"<!doctype html>
+        r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Dictation {session_id}</title>
-  <link rel="stylesheet" href="https://esm.sh/@excalidraw/excalidraw@0.18.0/dist/dev/index.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@excalidraw/excalidraw@0.18.0/dist/prod/index.min.css" />
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #f5f7fb; color: #111827; }}
     .wrap {{ max-width: 1000px; margin: 0 auto; padding: 24px; }}
@@ -348,24 +599,39 @@ pub(crate) fn build_html_note(
     .nav a {{ color: #1d4ed8; text-decoration: none; font-weight: 600; }}
     .nav a:hover {{ text-decoration: underline; }}
     .status {{ font-size: 12px; color: #475569; }}
-    .btn {{ background: #111827; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; }}
-    .btn:hover {{ background: #1f2937; }}
-    .btn.small {{ padding: 6px 10px; font-size: 12px; }}
-    .btn.tiny {{ padding: 3px 8px; font-size: 11px; border-radius: 6px; }}
+    .ispy-btn {{ background: #111827; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; }}
+    .ispy-btn:hover {{ background: #1f2937; }}
+    .ispy-btn.small {{ padding: 6px 10px; font-size: 12px; }}
+    .ispy-btn.tiny {{ padding: 3px 8px; font-size: 11px; border-radius: 6px; }}
     .transcript {{ white-space: pre-wrap; line-height: 1.6; font-size: 15px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }}
+    .shot-grid {{ display: grid; grid-template-columns: 1fr; gap: 12px; }}
     .card {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px; margin: 0; }}
     .card-head {{ display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }}
-    .card-actions {{ display: flex; align-items: center; gap: 6px; }}
     .card img {{ width: 100%; height: auto; border-radius: 8px; display: block; }}
     .card figcaption {{ font-weight: 600; margin: 0; }}
+    .shot-card {{ border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; padding: 12px; }}
+    .shot-head h3 {{ margin: 0 0 6px; font-size: 16px; }}
+    .variants {{ margin-top: 10px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }}
+    .variant {{ border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px; background: #fff; margin: 0; }}
+    .variant.selected {{ border-color: #0f766e; box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14); }}
+    .variant-head {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 8px; }}
+    .variant-title {{ display: flex; align-items: center; gap: 6px; min-width: 0; }}
+    .variant-actions {{ display: flex; align-items: center; gap: 6px; }}
+    .variant-head figcaption {{ font-size: 12px; font-weight: 700; color: #374151; }}
+    .active-pill {{ font-size: 10px; font-weight: 700; letter-spacing: 0.02em; color: #0f766e; background: #ccfbf1; border: 1px solid #99f6e4; padding: 2px 6px; border-radius: 999px; white-space: nowrap; }}
+    .img-wrap {{ position: relative; border-radius: 8px; overflow: hidden; background: #f8fafc; }}
+    .img-wrap a {{ display: block; }}
+    .img-wrap img {{ width: 100%; height: auto; display: block; }}
     .path {{ color: #6b7280; margin-top: 8px; font-size: 12px; word-break: break-all; }}
+    .ctx {{ color: #374151; margin-top: 6px; font-size: 12px; line-height: 1.5; }}
+    .sys {{ color: #111827; margin-top: 6px; font-size: 12px; line-height: 1.5; }}
     .annotator-modal {{ position: fixed; inset: 0; background: rgba(15, 23, 42, 0.72); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 9999; }}
     .annotator-modal.open {{ display: flex; }}
-    .annotator-panel {{ position: relative; width: min(1200px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: #fff; border-radius: 12px; border: 1px solid #e5e7eb; padding: 12px; }}
+    .annotator-panel {{ width: min(1200px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: #fff; border-radius: 12px; border: 1px solid #e5e7eb; padding: 12px; }}
     .annotator-toolbar {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }}
-    .annotator-close-x {{ position: absolute; top: 10px; right: 10px; width: 32px; height: 32px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #111827; font-size: 20px; line-height: 1; cursor: pointer; }}
-    .annotator-close-x:hover {{ background: #f1f5f9; }}
+    .annotator-toolbar-spacer {{ flex: 1; }}
+    .annotator-close-btn {{ min-width: 32px; padding: 4px 10px; font-size: 16px; line-height: 1; }}
     .annotator-stage {{ position: relative; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background: #f8fafc; min-height: 420px; }}
     .annotator-loading {{ position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #475569; font-size: 14px; z-index: 2; pointer-events: none; }}
     .annotator-loading.hidden {{ display: none; }}
@@ -380,7 +646,7 @@ pub(crate) fn build_html_note(
 
     <section class="meta">
       <div class="actions">
-        <button id="copyMarkdownBtn" class="btn">Copy markdown</button>
+        <button id="copyMarkdownBtn" class="ispy-btn">Copy markdown</button>
         <span id="copyStatus" class="status"></span>
       </div>
       <ul>
@@ -397,13 +663,14 @@ pub(crate) fn build_html_note(
     <section class="panel">
       <div class="transcript-head">
         <h2 style="margin: 0;">Transcript</h2>
-        <button id="copyTranscriptBtn" class="btn tiny">Copy</button>
+        <button id="copyTranscriptBtn" class="ispy-btn tiny">Copy</button>
       </div>
       <div class="transcript">{transcript_html}</div>
     </section>
 
     <section class="panel">
       <h2>Screenshots</h2>
+      <div class="path">Each input screenshot is rendered through all active output modules.</div>
       {gallery_html}
     </section>
 
@@ -412,13 +679,15 @@ pub(crate) fn build_html_note(
       {clipboard_html}
     </section>
   </div>
+
   <div id="annotatorModal" class="annotator-modal" aria-hidden="true">
     <div class="annotator-panel">
-      <button id="annotatorCloseBtn" class="annotator-close-x" aria-label="Close annotation dialog">&times;</button>
       <div class="annotator-toolbar">
-        <button id="annotatorSaveBtn" class="btn small">Save &amp; close</button>
-        <button id="annotatorDownloadBtn" class="btn small">Download annotated PNG</button>
+        <button id="annotatorSaveCloseBtn" class="ispy-btn small">Save and close</button>
+        <button id="annotatorDownloadBtn" class="ispy-btn small">Download annotated PNG</button>
+        <span class="annotator-toolbar-spacer"></span>
         <span id="annotatorStatus" class="status"></span>
+        <button id="annotatorCloseBtn" class="ispy-btn small annotator-close-btn" aria-label="Close annotator" title="Close annotator">×</button>
       </div>
       <div class="annotator-stage">
         <div id="annotatorLoading" class="annotator-loading">Loading Excalidraw…</div>
@@ -430,6 +699,38 @@ pub(crate) fn build_html_note(
 
   <textarea id="markdownContent" style="display:none;">{markdown_html}</textarea>
   <textarea id="transcriptContent" style="display:none;">{transcript_copy_html}</textarea>
+  <script>
+    (function () {{
+      function openFallbackAnnotator(btn) {{
+        if (!btn) return;
+        var url = btn.getAttribute('data-url') || '';
+        var path = btn.getAttribute('data-path') || url;
+        var modal = document.getElementById('annotatorModal');
+        var loading = document.getElementById('annotatorLoading');
+        if (!modal) return;
+        modal.classList.add('open');
+        modal.setAttribute('aria-hidden', 'false');
+        if (loading) {{
+          loading.classList.remove('hidden');
+          loading.textContent = 'Loading Excalidraw…';
+        }}
+        if (typeof window.__ispyOpenExcalidraw === 'function') {{
+          window.__ispyOpenExcalidraw(url, path);
+        }} else if (loading) {{
+          loading.textContent = 'Annotator runtime not ready yet. Please wait a second and click Annotate again.';
+        }}
+      }}
+
+      document.addEventListener('click', function (evt) {{
+        var target = evt.target;
+        if (!target) return;
+        var btn = target.closest ? target.closest('.annotate-image') : null;
+        if (!btn) return;
+        evt.preventDefault();
+        openFallbackAnnotator(btn);
+      }});
+    }})();
+  </script>
   <script>
     const copyStatus = document.getElementById('copyStatus');
     function setStatus(msg) {{
@@ -517,8 +818,6 @@ pub(crate) fn build_html_note(
 
     const annotatorModal = document.getElementById('annotatorModal');
     const annotatorStatus = document.getElementById('annotatorStatus');
-    const annotatorLoading = document.getElementById('annotatorLoading');
-    let currentAnnotatorPath = '';
 
     function setAnnotatorStatus(message) {{
       if (!annotatorStatus) return;
@@ -528,22 +827,10 @@ pub(crate) fn build_html_note(
       }}, 2200);
     }}
 
-    function openAnnotator(url, path) {{
-      if (!annotatorModal) return;
-      currentAnnotatorPath = path || url;
-      annotatorModal.classList.add('open');
-      annotatorModal.setAttribute('aria-hidden', 'false');
-      annotatorLoading?.classList.remove('hidden');
-      if (typeof window.__ispyOpenExcalidraw === 'function') {{
-        window.__ispyOpenExcalidraw(url, currentAnnotatorPath);
-      }}
-    }}
-
     function closeAnnotator() {{
       if (!annotatorModal) return;
       annotatorModal.classList.remove('open');
       annotatorModal.setAttribute('aria-hidden', 'true');
-      currentAnnotatorPath = '';
     }}
 
     document.getElementById('annotatorCloseBtn')?.addEventListener('click', closeAnnotator);
@@ -554,25 +841,14 @@ pub(crate) fn build_html_note(
       if (evt.key === 'Escape' && annotatorModal?.classList.contains('open')) closeAnnotator();
     }});
 
-    document.querySelectorAll('.annotate-image').forEach((btn) => {{
-      btn.addEventListener('click', () => {{
-        const url = btn.dataset.url || '';
-        const path = btn.dataset.path || url;
-        if (!url) {{
-          setAnnotatorStatus('Missing image URL');
-          return;
-        }}
-        openAnnotator(url, path);
-      }});
-    }});
-
-    document.getElementById('annotatorSaveBtn')?.addEventListener('click', async () => {{
+    document.getElementById('annotatorSaveCloseBtn')?.addEventListener('click', async () => {{
       if (typeof window.__ispySaveExcalidraw !== 'function') {{
         setAnnotatorStatus('Excalidraw not ready');
         return;
       }}
       try {{
         await window.__ispySaveExcalidraw();
+        setAnnotatorStatus('Saved');
         closeAnnotator();
       }} catch (_err) {{
         setAnnotatorStatus('Could not save scene');
@@ -591,6 +867,63 @@ pub(crate) fn build_html_note(
         setAnnotatorStatus('Could not export PNG');
       }}
     }});
+
+    document.querySelectorAll('.use-variant').forEach((btn) => {{
+      btn.addEventListener('click', async () => {{
+        const sessionId = btn.dataset.sessionId || '';
+        const module = btn.dataset.module || '';
+        const shotId = Number(btn.dataset.shotId || '0');
+        if (!sessionId || !module || !shotId) {{
+          setStatus('Missing variant metadata');
+          return;
+        }}
+
+        const original = btn.textContent || 'Use for transcript';
+        btn.disabled = true;
+        btn.textContent = 'Applying...';
+        try {{
+          const candidates = [];
+          if (window.location.protocol !== 'file:') {{
+            candidates.push('/use-screenshot');
+          }}
+          candidates.push('http://127.0.0.1:8766/use-screenshot');
+
+          let applied = false;
+          let lastError = null;
+          for (const endpoint of candidates) {{
+            try {{
+              const res = await fetch(endpoint, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{
+                  session_id: sessionId,
+                  shot_id: shotId,
+                  module
+                }})
+              }});
+              const payload = await res.json().catch(() => ({{}}));
+              if (!res.ok || !payload.ok) {{
+                throw new Error(payload.error || 'Failed to apply variant');
+              }}
+              applied = true;
+              break;
+            }} catch (endpointErr) {{
+              lastError = endpointErr;
+            }}
+          }}
+          if (!applied) {{
+            throw lastError || new Error('Failed to apply variant');
+          }}
+          setStatus(`Now using ${{module}} for Screenshot ${{shotId}}`);
+          window.setTimeout(() => window.location.reload(), 450);
+        }} catch (err) {{
+          setStatus(`Could not apply variant: ${{err.message || 'unknown error'}}`);
+          btn.disabled = false;
+          btn.textContent = original;
+          return;
+        }}
+      }});
+    }});
   </script>
   <script type="importmap">
     {{
@@ -604,6 +937,11 @@ pub(crate) fn build_html_note(
   </script>
   <script type="module">
     window.EXCALIDRAW_ASSET_PATH = 'https://esm.sh/@excalidraw/excalidraw@0.18.0/dist/dev/';
+    const EXCALIDRAW_CSS_ID = 'ispy-excalidraw-css';
+    const EXCALIDRAW_CSS_URLS = [
+      'https://cdn.jsdelivr.net/npm/@excalidraw/excalidraw@0.18.0/dist/prod/index.min.css',
+      'https://unpkg.com/@excalidraw/excalidraw@0.18.0/dist/prod/index.min.css',
+    ];
     const host = document.getElementById('annotatorHost');
     const annotatorLoading = document.getElementById('annotatorLoading');
     const sceneStoragePrefix = 'ispy-excalidraw-scene-';
@@ -655,13 +993,13 @@ pub(crate) fn build_html_note(
         const baseUrl = btn.dataset.url || targetUrl;
         const cacheBusted = `${{baseUrl}}?v=${{stamp}}`;
         btn.dataset.url = baseUrl;
-        const card = btn.closest('.card');
-        if (!card) return;
-        card.querySelectorAll('button[data-path]').forEach((cardBtn) => {{
-          cardBtn.dataset.url = baseUrl;
+        const variant = btn.closest('.variant');
+        if (!variant) return;
+        variant.querySelectorAll('button[data-path]').forEach((variantBtn) => {{
+          variantBtn.dataset.url = baseUrl;
         }});
-        const img = card.querySelector('img');
-        const link = card.querySelector('a');
+        const img = variant.querySelector('img');
+        const link = variant.querySelector('a');
         if (img) img.src = cacheBusted;
         if (link) link.href = cacheBusted;
       }});
@@ -694,6 +1032,20 @@ pub(crate) fn build_html_note(
         }};
       }})();
       return loaderPromise;
+    }}
+
+    function ensureExcalidrawCss() {{
+      if (document.getElementById(EXCALIDRAW_CSS_ID)) return;
+      const link = document.createElement('link');
+      link.id = EXCALIDRAW_CSS_ID;
+      link.rel = 'stylesheet';
+      link.href = EXCALIDRAW_CSS_URLS[0];
+      link.onerror = () => {{
+        if (link.href !== EXCALIDRAW_CSS_URLS[1]) {{
+          link.href = EXCALIDRAW_CSS_URLS[1];
+        }}
+      }};
+      document.head.appendChild(link);
     }}
 
     async function blobToDataUrl(blob) {{
@@ -770,7 +1122,6 @@ pub(crate) fn build_html_note(
             appState: savedAppState,
             files: (saved && typeof saved.files === 'object' && saved.files) ? saved.files : {{}},
           }};
-          // Rewrite old payloads so subsequent opens don't hit bad historical state.
           localStorage.setItem(sceneKey(path), JSON.stringify(savedPayload));
           return {{
             elements: savedPayload.elements,
@@ -803,6 +1154,7 @@ pub(crate) fn build_html_note(
 
     async function renderAnnotator(url, path) {{
       if (!host) return;
+      ensureExcalidrawCss();
       const resolvedUrl = new URL(url, window.location.href).toString();
       currentContext = {{ url, path, resolvedUrl }};
       setLoading(true, 'Loading Excalidraw…');
@@ -924,7 +1276,7 @@ pub(crate) fn build_html_note(
   </script>
 </body>
 </html>
-"##,
+"#,
         session_id = html_escape(session_id),
         started_iso = html_escape(started_iso),
         ended_iso = html_escape(ended_iso),
@@ -940,7 +1292,7 @@ pub(crate) fn build_html_note(
         gallery_html = if gallery.is_empty() {
             "<div>No screenshots in this session.</div>".to_string()
         } else {
-            format!("<div class=\"grid\">{}</div>", gallery)
+            format!("<div class=\"shot-grid\">{}</div>", gallery)
         },
         clipboard_html = if clip_cards.is_empty() {
             "<div>No clipboard captures in this session.</div>".to_string()
@@ -954,24 +1306,11 @@ fn build_sessions_index_html(rows: &[SessionListRow]) -> String {
     let mut entries_html = String::new();
     for row in rows {
         let session_dir = sessions_dir().join(&row.session_id);
-        let note_path = session_dir.join("note.md");
-        let transcript_raw = fs::read_to_string(&note_path)
-            .ok()
-            .and_then(|markdown| extract_transcript_from_note(&markdown))
-            .filter(|text| !text.trim().is_empty())
-            .unwrap_or_else(|| read_transcript_text_for_session(&session_dir));
-        let transcript_copy = if transcript_raw.trim().is_empty() {
+        let transcript = read_transcript_text_for_session(&session_dir);
+        let transcript = if transcript.trim().is_empty() {
             "No transcript available.".to_string()
         } else {
-            transcript_raw.trim().to_string()
-        };
-        let transcript = if transcript_raw.trim().is_empty() {
-            "No transcript available.".to_string()
-        } else {
-            transcript_raw
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
+            transcript.split_whitespace().collect::<Vec<_>>().join(" ")
         };
 
         let mut thumb_items = String::new();
@@ -1004,14 +1343,16 @@ fn build_sessions_index_html(rows: &[SessionListRow]) -> String {
             }
         }
 
+        let note_href = format!("./{}/note.html", row.session_id);
         entries_html.push_str(&format!(
-            r#"<article class="row" data-href="./{session_id}/note.html" tabindex="0"><div class="main"><div class="row-top"><span class="session">{session_id}</span><span class="meta">{timestamp}</span><span class="meta">{images} images</span><span class="meta">{duration}</span><button class="btn tiny copy-row-transcript" data-transcript="{transcript_copy}" title="Copy transcript">Copy</button></div><div class="transcript" title="{transcript_title}">{transcript}</div></div><div class="thumbs">{thumbs}</div></article>"#,
+            r#"<article class="row"><div class="main"><div class="row-top"><a class="session" href="{note_href}">{session_id}</a><span class="meta">{timestamp}</span><span class="meta">{images} images</span><span class="meta">{duration}</span><button class="btn tiny copy-row-transcript" data-href="{note_href}" data-transcript="{transcript_attr}">Copy transcript</button></div><div class="transcript" title="{transcript_title}">{transcript}</div></div><div class="thumbs">{thumbs}</div></article>"#,
+            note_href = html_escape(&note_href),
             session_id = html_escape(&row.session_id),
             timestamp = html_escape(&row.timestamp),
             images = row.images,
             duration = html_escape(&row.duration),
             transcript = html_escape(&transcript),
-            transcript_copy = html_escape(&transcript_copy),
+            transcript_attr = html_escape(&transcript),
             transcript_title = html_escape(&transcript),
             thumbs = if thumb_items.is_empty() {
                 "<div class=\"thumb-empty\">No screenshots.</div>".to_string()
@@ -1034,12 +1375,14 @@ fn build_sessions_index_html(rows: &[SessionListRow]) -> String {
     h1 {{ margin: 0 0 8px; font-size: 30px; }}
     .sub {{ color: #4b5563; margin: 0 0 18px; }}
     .rows {{ display: flex; flex-direction: column; gap: 12px; }}
-    .row {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px 12px; display: flex; align-items: center; gap: 12px; cursor: pointer; }}
-    .row:hover {{ border-color: #cbd5e1; box-shadow: 0 2px 8px rgba(2, 6, 23, 0.08); }}
-    .row:focus-visible {{ outline: 2px solid #2563eb; outline-offset: 2px; }}
+    .row {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px 12px; display: flex; align-items: center; gap: 12px; }}
     .main {{ min-width: 0; flex: 1; }}
     .row-top {{ display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; margin-bottom: 4px; overflow: hidden; }}
-    .session {{ color: #1d4ed8; font-weight: 700; white-space: nowrap; }}
+    .session {{ color: #1d4ed8; text-decoration: none; font-weight: 700; }}
+    .session:hover {{ text-decoration: underline; }}
+    .btn {{ background: #111827; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; }}
+    .btn:hover {{ background: #1f2937; }}
+    .btn.tiny {{ padding: 3px 8px; font-size: 11px; border-radius: 6px; }}
     .meta {{ color: #334155; font-size: 13px; white-space: nowrap; }}
     .transcript {{ line-height: 1.35; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
     .thumbs {{ display: flex; flex-wrap: nowrap; gap: 6px; flex-shrink: 0; overflow-x: auto; }}
@@ -1056,49 +1399,18 @@ fn build_sessions_index_html(rows: &[SessionListRow]) -> String {
     {content}
   </div>
   <script>
-    async function copyText(text) {{
-      if (!navigator.clipboard || !navigator.clipboard.writeText) {{
-        throw new Error('Clipboard unavailable');
-      }}
-      await navigator.clipboard.writeText(text);
-    }}
-
-    document.querySelectorAll('.row').forEach((row) => {{
-      row.addEventListener('click', (event) => {{
-        if (event.target.closest('.copy-row-transcript') || event.target.closest('.thumb')) {{
-          return;
-        }}
-        const href = row.dataset.href;
-        if (href) window.location.href = href;
-      }});
-
-      row.addEventListener('keydown', (event) => {{
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        const href = row.dataset.href;
-        if (!href) return;
-        event.preventDefault();
-        window.location.href = href;
-      }});
-    }});
-
     document.querySelectorAll('.copy-row-transcript').forEach((btn) => {{
-      btn.addEventListener('click', async (event) => {{
-        event.preventDefault();
-        event.stopPropagation();
-        const text = btn.dataset.transcript || '';
-        const original = btn.textContent || 'Copy';
+      btn.addEventListener('click', async () => {{
+        const transcript = btn.dataset.transcript || '';
+        if (!navigator.clipboard || !navigator.clipboard.writeText) return;
         try {{
-          await copyText(text);
+          await navigator.clipboard.writeText(transcript);
+          const original = btn.textContent || 'Copy transcript';
           btn.textContent = 'Copied';
           window.setTimeout(() => {{
             btn.textContent = original;
-          }}, 900);
-        }} catch (_err) {{
-          btn.textContent = 'Failed';
-          window.setTimeout(() => {{
-            btn.textContent = original;
-          }}, 900);
-        }}
+          }}, 1000);
+        }} catch (_err) {{}}
       }});
     }});
   </script>
@@ -1137,12 +1449,122 @@ pub(crate) fn shots_from_events(events: &[Value]) -> Vec<ShotMeta> {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
 
+        let app_name = event
+            .get("app")
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let app_bundle_id = event
+            .get("app")
+            .and_then(|v| v.get("bundle_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let app_pid = event
+            .get("app")
+            .and_then(|v| v.get("pid"))
+            .and_then(|v| v.as_i64())
+            .and_then(|v| i32::try_from(v).ok());
+        let window_title = event
+            .get("app")
+            .and_then(|v| v.get("window_title"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let app_capture_error = event
+            .get("app_capture_error")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let proc_cpu_percent = event
+            .get("process")
+            .and_then(|v| v.get("cpu_percent"))
+            .and_then(|v| v.as_f64());
+        let proc_mem_percent = event
+            .get("process")
+            .and_then(|v| v.get("mem_percent"))
+            .and_then(|v| v.as_f64());
+        let proc_rss_kb = event
+            .get("process")
+            .and_then(|v| v.get("rss_kb"))
+            .and_then(|v| v.as_u64());
+        let proc_elapsed = event
+            .get("process")
+            .and_then(|v| v.get("elapsed"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let proc_state = event
+            .get("process")
+            .and_then(|v| v.get("state"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let proc_command = event
+            .get("process")
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let proc_capture_error = event
+            .get("process_capture_error")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if let Some(existing) = by_id.get_mut(&id) {
+            existing.dest_rel_path = dest.to_string();
+            existing.audio_sec = audio_sec;
+            if app_name.is_some() {
+                existing.app_name = app_name;
+            }
+            if app_bundle_id.is_some() {
+                existing.app_bundle_id = app_bundle_id;
+            }
+            if app_pid.is_some() {
+                existing.app_pid = app_pid;
+            }
+            if window_title.is_some() {
+                existing.window_title = window_title;
+            }
+            if app_capture_error.is_some() {
+                existing.app_capture_error = app_capture_error;
+            }
+            if proc_cpu_percent.is_some() {
+                existing.proc_cpu_percent = proc_cpu_percent;
+            }
+            if proc_mem_percent.is_some() {
+                existing.proc_mem_percent = proc_mem_percent;
+            }
+            if proc_rss_kb.is_some() {
+                existing.proc_rss_kb = proc_rss_kb;
+            }
+            if proc_elapsed.is_some() {
+                existing.proc_elapsed = proc_elapsed;
+            }
+            if proc_state.is_some() {
+                existing.proc_state = proc_state;
+            }
+            if proc_command.is_some() {
+                existing.proc_command = proc_command;
+            }
+            if proc_capture_error.is_some() {
+                existing.proc_capture_error = proc_capture_error;
+            }
+            continue;
+        }
+
         by_id.insert(
             id,
             ShotMeta {
                 shot_id: id,
                 dest_rel_path: dest.to_string(),
                 audio_sec,
+                app_name,
+                app_bundle_id,
+                app_pid,
+                window_title,
+                app_capture_error,
+                proc_cpu_percent,
+                proc_mem_percent,
+                proc_rss_kb,
+                proc_elapsed,
+                proc_state,
+                proc_command,
+                proc_capture_error,
             },
         );
     }
@@ -1224,6 +1646,18 @@ pub(crate) fn load_shots_for_session(session_dir: &Path, events: &[Value]) -> Ve
                         p.file_name().and_then(|n| n.to_str()).unwrap_or_default()
                     ),
                     audio_sec: 0.0,
+                    app_name: None,
+                    app_bundle_id: None,
+                    app_pid: None,
+                    window_title: None,
+                    app_capture_error: None,
+                    proc_cpu_percent: None,
+                    proc_mem_percent: None,
+                    proc_rss_kb: None,
+                    proc_elapsed: None,
+                    proc_state: None,
+                    proc_command: None,
+                    proc_capture_error: None,
                 })
                 .collect();
         }
@@ -1278,6 +1712,7 @@ pub(crate) fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, A
     } else {
         transcript_fallback
     };
+    let transcript_base = strip_leading_screenshot_path_block(&transcript_base);
     let transcript_annotated =
         inject_annotation_markers(&transcript_base, &shots, &clips, audio_duration);
 
@@ -1313,7 +1748,6 @@ pub(crate) fn generate_sessions_index_html() -> Result<PathBuf, AppError> {
         .map_err(|e| app_error(1, format!("Failed to write {}: {e}", html_path.display())))?;
     Ok(html_path)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1324,6 +1758,18 @@ mod tests {
             shot_id: 1,
             dest_rel_path: "screenshots/shot-001.png".to_string(),
             audio_sec: 1.2,
+            app_name: None,
+            app_bundle_id: None,
+            app_pid: None,
+            window_title: None,
+            app_capture_error: None,
+            proc_cpu_percent: None,
+            proc_mem_percent: None,
+            proc_rss_kb: None,
+            proc_elapsed: None,
+            proc_state: None,
+            proc_command: None,
+            proc_capture_error: None,
         }];
         let clips = vec![];
 
@@ -1349,15 +1795,16 @@ mod tests {
     fn html_has_annotate_button_on_screenshot_cards() {
         let html = sample_html();
         assert!(html.contains("annotate-image"));
-        assert!(html.contains("data-url=\"screenshots/shot-001.png\""));
-        assert!(html
-            .contains("data-path=\"/tmp/ispy/sessions/20260413-151333/screenshots/shot-001.png\""));
+        assert!(html.contains("data-url=\"screenshots/derived/shot-001__"));
+        assert!(html.contains(
+            "data-path=\"/tmp/ispy/sessions/20260413-151333/screenshots/derived/shot-001__"
+        ));
     }
 
     #[test]
     fn save_and_close_writes_back_original_image_path() {
         let html = sample_html();
-        assert!(html.contains("Save &amp; close"));
+        assert!(html.contains("Save and close"));
         assert!(html.contains("await window.__ispySaveExcalidraw();"));
         assert!(html.contains("closeAnnotator();"));
         assert!(html.contains("absPath: currentContext.path"));
