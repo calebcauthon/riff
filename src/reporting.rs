@@ -344,8 +344,8 @@ pub(crate) fn build_note(
         for shot in shots {
             let abs_path = session_dir.join(&shot.dest_rel_path);
             lines.push(format!(
-                "Screenshot {}: {}",
-                shot.shot_id,
+                "{}: {}",
+                shot_marker_label(shot),
                 abs_path.display()
             ));
         }
@@ -419,7 +419,7 @@ fn strip_leading_screenshot_path_block(text: &str) -> String {
 
     while idx < lines.len() {
         let t = lines[idx].trim();
-        if t.starts_with("Screenshot ") && t.contains(": /") {
+        if is_screenshot_path_line(t) {
             saw_path_line = true;
             idx += 1;
             continue;
@@ -436,6 +436,13 @@ fn strip_leading_screenshot_path_block(text: &str) -> String {
     }
 
     lines[idx..].join("\n")
+}
+
+fn is_screenshot_path_line(line: &str) -> bool {
+    let Some((prefix, path_part)) = line.split_once(": ") else {
+        return false;
+    };
+    path_part.starts_with('/') && is_annotation_marker_body(prefix)
 }
 
 pub(crate) fn build_html_note(
@@ -565,7 +572,7 @@ pub(crate) fn build_html_note(
         let mut path_lines = String::new();
         for shot in shots {
             let abs = session_dir.join(&shot.dest_rel_path);
-            path_lines.push_str(&format!("Screenshot {}: {}\n", shot.shot_id, abs.display()));
+            path_lines.push_str(&format!("{}: {}\n", shot_marker_label(shot), abs.display()));
         }
         transcript_text = format!("{}\n\n{}", path_lines.trim_end(), transcript_text);
     }

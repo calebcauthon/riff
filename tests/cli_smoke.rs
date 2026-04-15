@@ -442,12 +442,12 @@ fn end_to_end_start_shot_stop_produces_transcript_and_note() {
     );
     let transcript_section = extract_transcript_section(&note_md);
     let shot_path = session_dir.join("screenshots").join("shot-001.png");
-    let expected_prefix = format!("Screenshot 1: {}\n\n", shot_path.display());
+    let expected_prefix = format!("TestApp Screenshot 1: {}\n\n", shot_path.display());
     assert!(
         transcript_section.starts_with(&expected_prefix),
         "transcript should start with screenshot path then two line breaks: {transcript_section}"
     );
-    let disallowed_prefix = format!("Screenshot 1: {}\n\n\n", shot_path.display());
+    let disallowed_prefix = format!("TestApp Screenshot 1: {}\n\n\n", shot_path.display());
     assert!(
         !transcript_section.starts_with(&disallowed_prefix),
         "transcript should not have more than two line breaks after path: {transcript_section}"
