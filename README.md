@@ -55,7 +55,10 @@ chmod +x dictate
 ```
 
 `dictate` is a wrapper script that builds/runs the Rust binary.
-If `ISPY_PYTHON_BIN` is not set and `~/Code/ispy/.venv/bin/python` exists, the wrapper auto-uses that venv.
+If `ISPY_PYTHON_BIN` is not set, it auto-prefers:
+1. `~/Code/ispy/runtime/python/bin/python` (bundled runtime)
+2. `~/Code/ispy/.venv/bin/python` (dev venv)
+3. `python3` from PATH
 
 Performance note:
 - `dictate start` warms a local Parakeet server in the background (when enabled), so later `dictate stop` calls are faster.
@@ -85,7 +88,7 @@ brew install ffmpeg
 
 ---
 
-## One-time Parakeet setup (Python)
+## One-time Parakeet setup (Python, dev venv)
 
 Create a local venv and install dependencies (**use Python 3.12 preferred; 3.10-3.12 supported**):
 
@@ -120,6 +123,54 @@ export ISPY_WEB_SERVER_IDLE_TIMEOUT_SEC=1800
 
 # optional clipboard monitor controls
 export ISPY_CLIPBOARD_MONITOR=1
+```
+
+---
+
+## Bundled private Python runtime (recommended for distribution)
+
+Use this when you want to package `dictate` for another machine without relying on that machine's system Python.
+
+Create the bundled runtime (full Python distribution copy, not a venv):
+
+```bash
+cd ~/Code/ispy
+brew install uv
+uv python install 3.12
+./scripts/build_bundled_python_runtime.sh
+```
+
+Build the Rust binary:
+
+```bash
+cd ~/Code/ispy
+cargo build --release
+```
+
+Package these paths together:
+
+```text
+dictate
+target/release/dictate
+scripts/
+runtime/python/
+```
+
+When run from that packaged root, `dictate`/ispy will auto-use `runtime/python/bin/python` first.
+This runtime is no-system-dependency for Python itself, but it is still platform/architecture-specific
+(build on same OS/CPU family you intend to run).
+
+Optional script flags:
+
+```bash
+# force a specific uv-managed source interpreter
+./scripts/build_bundled_python_runtime.sh --source-python "$HOME/.local/bin/python3.12"
+
+# copy runtime only (skip package install)
+./scripts/build_bundled_python_runtime.sh --skip-install
+
+# allow non-relocatable runtime sources (not recommended for distribution)
+./scripts/build_bundled_python_runtime.sh --allow-nonrelocatable --source-python /opt/homebrew/bin/python3.12
 ```
 
 ---
@@ -283,6 +334,16 @@ Focus on these fields:
 - start: `phases.spawn_recorder_ms`
 - stop: `phases.transcribe_ms` (usually the biggest)
 - stop: `phases.web_server_ms` (local HTML server startup/health)
+- stop: `transcription_perf.execution_path` (`parakeet`, `custom_command`, etc.)
+- stop: `transcription_perf.server_ensure_ms` (time spent waiting for Parakeet server readiness)
+- stop: `transcription_perf.python_transcribe_ms` (one-shot fallback cost when server isn’t used)
+- stop: `transcription_perf.server_health_before` / `server_health_after` (server availability before/after ensure)
+
+If `transcription_perf.server_pid_alive` is `false`, inspect:
+
+```bash
+tail -n 120 /tmp/ispy/parakeet-server.log
+```
 
 ---
 
@@ -335,7 +396,9 @@ If you see dependency/import errors even after pip install, check your Python ve
 $ISPY_PYTHON_BIN -V
 ```
 
-If it's `3.13+` (especially 3.14), recreate the venv with Python 3.12:
+If it's `3.13+` (especially 3.14), recreate your environment with Python 3.12.
+
+For dev venv:
 
 ```bash
 cd ~/Code/ispy
@@ -344,4 +407,18 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install nemo_toolkit[asr] torch soundfile
+```
+
+For bundled runtime:
+
+```bash
+cd ~/Code/ispy
+uv python install 3.12
+./scripts/build_bundled_python_runtime.sh --python-version 3.12
+```
+
+Check bundled runtime directly:
+
+```bash
+~/Code/ispy/runtime/python/bin/python -V
 ```

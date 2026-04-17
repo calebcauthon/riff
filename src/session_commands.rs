@@ -11,8 +11,8 @@ use crate::reporting::{
     shots_from_events,
 };
 use crate::transcription::{
-    default_parakeet_script, ensure_parakeet_server, ensure_web_server, parakeet_server_enabled,
-    run_transcription,
+    ensure_parakeet_server, ensure_web_server, parakeet_server_enabled, resolve_parakeet_model,
+    resolve_parakeet_script, resolve_python_bin, run_transcription,
 };
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
@@ -212,10 +212,9 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     // Warm the Parakeet server in the background so stop is faster.
     if parakeet_server_enabled() {
         let t_prewarm = Instant::now();
-        if let Some(script_path) = default_parakeet_script() {
-            let python_bin = env::var("ISPY_PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
-            let model = env::var("ISPY_PARAKEET_MODEL")
-                .unwrap_or_else(|_| "nvidia/parakeet-tdt-0.6b-v2".to_string());
+        if let Some(script_path) = resolve_parakeet_script(None) {
+            let python_bin = resolve_python_bin(None);
+            let model = resolve_parakeet_model(None);
             ensure_parakeet_server(&python_bin, &script_path, &model, cli, false);
         }
         prewarm_ms = t_prewarm.elapsed().as_secs_f64() * 1000.0;
@@ -594,6 +593,10 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     }
 
     let stop_total_ms = perf_total.elapsed().as_secs_f64() * 1000.0;
+    let transcription_perf = transcription_meta
+        .get("perf")
+        .cloned()
+        .unwrap_or(Value::Null);
     append_perf_event(json!({
         "ts": now_iso(),
         "action": "stop",
@@ -607,6 +610,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "write_ms": round3(write_ms),
             "web_server_ms": round3(web_server_ms)
         },
+        "transcription_perf": transcription_perf,
         "transcription_method": transcription_meta.get("method").and_then(|v| v.as_str()),
         "transcription_status": transcription_meta.get("status").and_then(|v| v.as_str())
     }));

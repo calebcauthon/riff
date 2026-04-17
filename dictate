@@ -11,7 +11,9 @@ ROOT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 BIN="$ROOT_DIR/target/release/dictate"
 
 # Sensible local defaults for Parakeet python worker.
-if [[ -z "${ISPY_PYTHON_BIN:-}" && -x "$ROOT_DIR/.venv/bin/python" ]]; then
+if [[ -z "${ISPY_PYTHON_BIN:-}" && -x "$ROOT_DIR/runtime/python/bin/python" ]]; then
+  export ISPY_PYTHON_BIN="$ROOT_DIR/runtime/python/bin/python"
+elif [[ -z "${ISPY_PYTHON_BIN:-}" && -x "$ROOT_DIR/.venv/bin/python" ]]; then
   export ISPY_PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 fi
 if [[ -z "${ISPY_PARAKEET_SCRIPT:-}" && -f "$ROOT_DIR/scripts/parakeet_transcribe.py" ]]; then
