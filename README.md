@@ -147,6 +147,15 @@ cd ~/Code/ispy
 cargo build --release
 ```
 
+Create a full distribution artifact tarball (runtime + binary + scripts):
+
+```bash
+cd ~/Code/ispy
+./scripts/create_distribution_artifact.sh
+```
+
+This writes `dist/ispy-<platform>-<sha>-<timestamp>.tar.gz` plus a `.sha256` file.
+
 Package these paths together:
 
 ```text
