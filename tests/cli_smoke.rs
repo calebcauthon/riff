@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
+use serde_json::Value;
 use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -363,6 +364,86 @@ fn status_reports_active_session_after_start() {
         .args(["stop", "--transcribe-cmd", "printf '' > {out_txt}"])
         .assert()
         .success();
+}
+
+#[test]
+fn stop_json_includes_transcription_perf_breakdown() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "--json",
+            "--quiet",
+            "stop",
+            "--transcribe-cmd",
+            "printf 'perf test\\n' > {out_txt}",
+        ])
+        .output()
+        .expect("run stop --json");
+
+    assert!(out.status.success(), "stop should succeed");
+    let payload: Value =
+        serde_json::from_slice(&out.stdout).expect("stop --json should return valid json payload");
+
+    assert_eq!(
+        payload.get("action").and_then(|v| v.as_str()),
+        Some("stop"),
+        "unexpected stop payload: {payload}"
+    );
+    assert!(
+        payload
+            .get("transcription")
+            .and_then(|v| v.get("perf"))
+            .and_then(|v| v.get("total_ms"))
+            .and_then(|v| v.as_f64())
+            .is_some(),
+        "missing transcription perf total_ms in stop json: {payload}"
+    );
+    assert_eq!(
+        payload
+            .get("transcription")
+            .and_then(|v| v.get("perf"))
+            .and_then(|v| v.get("execution_path"))
+            .and_then(|v| v.as_str()),
+        Some("custom_command"),
+        "unexpected execution_path in stop json: {payload}"
+    );
+
+    let perf_log = fs::read_to_string(td.path().join("perf.jsonl")).expect("read perf log");
+    let last_stop = perf_log
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let parsed: Value = serde_json::from_str(line).ok()?;
+            if parsed.get("action").and_then(|v| v.as_str()) == Some("stop") {
+                Some(parsed)
+            } else {
+                None
+            }
+        })
+        .expect("find stop perf record");
+
+    assert!(
+        last_stop
+            .get("transcription_perf")
+            .and_then(|v| v.get("total_ms"))
+            .and_then(|v| v.as_f64())
+            .is_some(),
+        "stop perf log missing transcription_perf.total_ms: {last_stop}"
+    );
 }
 
 #[test]
