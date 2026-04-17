@@ -1,14 +1,14 @@
-# ispy (Rust + local Parakeet)
+# riff (Rust + local Parakeet)
 
 Minimal local dictation CLI for macOS.
 
 Workflow:
 
-1. `dictate start`
-2. Take screenshots with `dictate shot` (recommended) or normal `Cmd+Shift+4`
-3. `dictate stop`
+1. `riff start`
+2. Take screenshots with `riff shot` (recommended) or normal `Cmd+Shift+4`
+3. `riff stop`
 
-On `stop`, ispy:
+On `stop`, riff:
 - stops audio recording
 - finds screenshots created during the session in your normal screenshot folder
 - copies them to session tmp storage (`/tmp/ispy/sessions/<session-id>/screenshots`)
@@ -50,25 +50,25 @@ Performance/observability logs:
 ## Install
 
 ```bash
-cd ~/Code/ispy
-chmod +x dictate
+cd ~/Code/riff
+chmod +x riff
 ```
 
-`dictate` is a wrapper script that builds/runs the Rust binary.
+`riff` is a wrapper script that builds/runs the Rust binary.
 If `ISPY_PYTHON_BIN` is not set, it auto-prefers:
-1. `~/Code/ispy/runtime/python/bin/python` (bundled runtime)
-2. `~/Code/ispy/.venv/bin/python` (dev venv)
+1. `~/Code/riff/runtime/python/bin/python` (bundled runtime)
+2. `~/Code/riff/.venv/bin/python` (dev venv)
 3. `python3` from PATH
 
 Performance note:
-- `dictate start` warms a local Parakeet server in the background (when enabled), so later `dictate stop` calls are faster.
-- `dictate stop` auto-starts a local HTML web server with idle-timeout for richer session pages.
+- `riff start` warms a local Parakeet server in the background (when enabled), so later `riff stop` calls are faster.
+- `riff stop` auto-starts a local HTML web server with idle-timeout for richer session pages.
 
 Optional PATH link:
 
 ```bash
 mkdir -p ~/bin
-ln -sf ~/Code/ispy/dictate ~/bin/dictate
+ln -sf ~/Code/riff/riff ~/bin/riff
 ```
 
 ---
@@ -93,7 +93,7 @@ brew install ffmpeg
 Create a local venv and install dependencies (**use Python 3.12 preferred; 3.10-3.12 supported**):
 
 ```bash
-cd ~/Code/ispy
+cd ~/Code/riff
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
@@ -109,8 +109,8 @@ brew install python@3.12
 Set env vars (add to `~/.zshrc` if desired):
 
 ```bash
-export ISPY_PYTHON_BIN="$HOME/Code/ispy/.venv/bin/python"
-export ISPY_PARAKEET_SCRIPT="$HOME/Code/ispy/scripts/parakeet_transcribe.py"
+export ISPY_PYTHON_BIN="$HOME/Code/riff/.venv/bin/python"
+export ISPY_PARAKEET_SCRIPT="$HOME/Code/riff/scripts/parakeet_transcribe.py"
 export ISPY_PARAKEET_MODEL="nvidia/parakeet-tdt-0.6b-v2"
 # optional perf + warm server controls
 export ISPY_PARAKEET_SERVER=1
@@ -129,12 +129,12 @@ export ISPY_CLIPBOARD_MONITOR=1
 
 ## Bundled private Python runtime (recommended for distribution)
 
-Use this when you want to package `dictate` for another machine without relying on that machine's system Python.
+Use this when you want to package `riff` for another machine without relying on that machine's system Python.
 
 Create the bundled runtime (full Python distribution copy, not a venv):
 
 ```bash
-cd ~/Code/ispy
+cd ~/Code/riff
 brew install uv
 uv python install 3.12
 ./scripts/build_bundled_python_runtime.sh
@@ -143,14 +143,14 @@ uv python install 3.12
 Build the Rust binary:
 
 ```bash
-cd ~/Code/ispy
+cd ~/Code/riff
 cargo build --release
 ```
 
 Create a full distribution artifact tarball (runtime + binary + scripts):
 
 ```bash
-cd ~/Code/ispy
+cd ~/Code/riff
 ./scripts/create_distribution_artifact.sh
 ```
 
@@ -159,13 +159,13 @@ This writes `dist/ispy-<platform>-<sha>-<timestamp>.tar.gz` plus a `.sha256` fil
 Package these paths together:
 
 ```text
-dictate
-target/release/dictate
+riff
+target/release/riff
 scripts/
 runtime/python/
 ```
 
-When run from that packaged root, `dictate`/ispy will auto-use `runtime/python/bin/python` first.
+When run from that packaged root, `riff` will auto-use `runtime/python/bin/python` first.
 This runtime is no-system-dependency for Python itself, but it is still platform/architecture-specific
 (build on same OS/CPU family you intend to run).
 
@@ -189,7 +189,7 @@ Optional script flags:
 ### Start
 
 ```bash
-dictate start
+riff start
 ```
 
 Flags:
@@ -205,7 +205,7 @@ export ISPY_AUDIO_DEVICE=":1"
 ### Shot (capture directly into active session)
 
 ```bash
-dictate shot
+riff shot
 ```
 
 Uses macOS `screencapture -i` and writes directly to the active session's `screenshots/` folder.
@@ -214,7 +214,7 @@ This avoids delayed Desktop screenshot writes and floating thumbnail timing issu
 ### Stop
 
 ```bash
-dictate stop
+riff stop
 ```
 
 Flags:
@@ -232,7 +232,7 @@ Flags:
 ### Sounds (interactive picker)
 
 ```bash
-dictate sounds
+riff sounds
 ```
 
 Browse system/user sounds, preview each, and set start/stop beep choices.
@@ -249,13 +249,13 @@ Picker controls:
 ### Status
 
 ```bash
-dictate status
+riff status
 ```
 
 ### List recent sessions
 
 ```bash
-dictate list 10
+riff list 10
 ```
 
 Shows a terminal table with:
@@ -267,30 +267,30 @@ Shows a terminal table with:
 ### Copy session transcript to stdout
 
 ```bash
-dictate copy        # most recent (same as copy 1)
-dictate copy 3      # 3rd most recent
+riff copy        # most recent (same as copy 1)
+riff copy 3      # 3rd most recent
 ```
 
 Outputs only the transcript section to stdout (pipe to pbcopy, files, etc.):
 
 ```bash
-dictate copy | pbcopy
+riff copy | pbcopy
 ```
 
 ### Show full session markdown to stdout
 
 ```bash
-dictate show 20260413-013011
+riff show 20260413-013011
 ```
 
-`show` now takes a session id (not a numeric index). Use `dictate list` to find ids.
+`show` now takes a session id (not a numeric index). Use `riff list` to find ids.
 Outputs raw `note.md` markdown for that session.
 
 ### Open session HTML report
 
 ```bash
-dictate html        # most recent (same as html 1)
-dictate html 2      # 2nd most recent
+riff html        # most recent (same as html 1)
+riff html 2      # 2nd most recent
 ```
 
 Behavior:
@@ -318,9 +318,9 @@ Behavior:
 Examples:
 
 ```bash
-dictate --dry-run start
-dictate --dry-run stop
-dictate --json status
+riff --dry-run start
+riff --dry-run stop
+riff --json status
 ```
 
 ---
@@ -376,7 +376,7 @@ export ISPY_BEEP_GAP_SEC=0.08      # launch interval between repeats (0.00..1.00
 Interactive picker (preview + choose start/stop sounds):
 
 ```bash
-dictate sounds
+riff sounds
 ```
 
 ---
@@ -384,10 +384,10 @@ dictate sounds
 ## Hotkeys
 
 Current skhd setup on this machine:
-- `alt + /` (keycode `alt - 0x2C`) → toggle start/stop via `scripts/toggle_dictate_and_paste.sh`
+- `alt + /` (keycode `alt - 0x2C`) → toggle start/stop via `scripts/toggle_riff_and_paste.sh`
 - `cmd + alt + d` → fallback toggle
 - `cmd + s` → hard fallback toggle
-- `cmd + alt + 9` → `dictate shot`
+- `cmd + alt + 9` → `riff shot`
 
 Toggle behavior:
 - if inactive: starts dictation
@@ -410,7 +410,7 @@ If it's `3.13+` (especially 3.14), recreate your environment with Python 3.12.
 For dev venv:
 
 ```bash
-cd ~/Code/ispy
+cd ~/Code/riff
 rm -rf .venv
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -421,7 +421,7 @@ pip install nemo_toolkit[asr] torch soundfile
 For bundled runtime:
 
 ```bash
-cd ~/Code/ispy
+cd ~/Code/riff
 uv python install 3.12
 ./scripts/build_bundled_python_runtime.sh --python-version 3.12
 ```
@@ -429,5 +429,5 @@ uv python install 3.12
 Check bundled runtime directly:
 
 ```bash
-~/Code/ispy/runtime/python/bin/python -V
+~/Code/riff/runtime/python/bin/python -V
 ```

@@ -766,7 +766,7 @@ fn load_active_state() -> Result<SessionState, AppError> {
     if !path.exists() {
         return Err(app_error(
             4,
-            "No active session. Run 'dictate start' first.",
+            "No active session. Run 'riff start' first.",
         ));
     }
     read_json(&path)

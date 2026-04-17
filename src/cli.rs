@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "dictate",
-    about = "ispy CLI: local dictation + screenshot session tool"
+    name = "riff",
+    about = "riff CLI: local dictation + screenshot session tool"
 )]
 pub struct Cli {
     #[arg(long, global = true)]

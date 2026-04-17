@@ -148,9 +148,13 @@ def main() -> int:
                     )
                     return
 
-                dictate_bin = os.environ.get("ISPY_DICTATE_BIN", "dictate")
+                riff_bin = (
+                    os.environ.get("ISPY_RIFF_BIN")
+                    or os.environ.get("ISPY_DICTATE_BIN")
+                    or "riff"
+                )
                 cmd = [
-                    dictate_bin,
+                    riff_bin,
                     "--json",
                     "--quiet",
                     "screenshot-use",
@@ -168,7 +172,7 @@ def main() -> int:
                         HTTPStatus.BAD_REQUEST,
                         {
                             "ok": False,
-                            "error": "dictate screenshot-use execution failed",
+                            "error": "riff screenshot-use execution failed",
                             "detail": str(e),
                             "cmd": cmd,
                         },
@@ -179,7 +183,7 @@ def main() -> int:
                         HTTPStatus.BAD_REQUEST,
                         {
                             "ok": False,
-                            "error": "dictate screenshot-use failed",
+                            "error": "riff screenshot-use failed",
                             "code": run.returncode,
                             "stderr": run.stderr.strip(),
                             "stdout": run.stdout.strip(),

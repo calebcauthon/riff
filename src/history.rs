@@ -403,7 +403,7 @@ pub(crate) fn resolve_session_dir_by_id(session_id: &str) -> Result<PathBuf, App
         return Err(app_error(
             8,
             format!(
-                "Session not found: {} (run 'dictate list' to see available ids)",
+                "Session not found: {} (run 'riff list' to see available ids)",
                 session_id
             ),
         ));

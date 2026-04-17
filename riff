@@ -8,7 +8,7 @@ while [[ -L "$SOURCE" ]]; do
   [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
 done
 ROOT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-BIN="$ROOT_DIR/target/release/dictate"
+BIN="$ROOT_DIR/target/release/riff"
 
 # Sensible local defaults for Parakeet python worker.
 if [[ -z "${ISPY_PYTHON_BIN:-}" && -x "$ROOT_DIR/runtime/python/bin/python" ]]; then
@@ -21,7 +21,7 @@ if [[ -z "${ISPY_PARAKEET_SCRIPT:-}" && -f "$ROOT_DIR/scripts/parakeet_transcrib
 fi
 
 if [[ ! -x "$BIN" ]]; then
-  echo "[ispy] Building Rust binary (first run)..." >&2
+  echo "[riff] Building Rust binary (first run)..." >&2
   (cd "$ROOT_DIR" && cargo build --release >/dev/null)
 fi
 

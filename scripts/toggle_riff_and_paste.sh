@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DICTATE_BIN="${DICTATE_BIN:-/Users/caleb/Code/ispy/dictate}"
+RIFF_BIN="${RIFF_BIN:-${DICTATE_BIN:-/Users/caleb/Code/riff/riff}}"
 LOG_ROOT="${ISPY_ROOT:-/tmp/ispy}"
 LOG_FILE="$LOG_ROOT/toggle-hotkey.log"
 
@@ -20,7 +20,7 @@ now_ms() {
 }
 
 is_active() {
-  "$DICTATE_BIN" --json --quiet status 2>/dev/null | grep -q '"active": true'
+  "$RIFF_BIN" --json --quiet status 2>/dev/null | grep -q '"active": true'
 }
 
 paste_clipboard() {
@@ -32,12 +32,12 @@ paste_clipboard() {
 if is_active; then
   t0=$(now_ms)
   log "toggle: active=true -> stopping session"
-  "$DICTATE_BIN" --quiet stop >>"$LOG_FILE" 2>&1
+  "$RIFF_BIN" --quiet stop >>"$LOG_FILE" 2>&1
   t1=$(now_ms)
   log "toggle: stop completed in $((t1 - t0))ms"
 
   # copy command emits transcript text to stdout
-  if "$DICTATE_BIN" copy | pbcopy; then
+  if "$RIFF_BIN" copy | pbcopy; then
     t2=$(now_ms)
     log "toggle: transcript copied in $((t2 - t1))ms"
     if paste_clipboard >>"$LOG_FILE" 2>&1; then
@@ -54,7 +54,7 @@ if is_active; then
 else
   t0=$(now_ms)
   log "toggle: active=false -> starting session"
-  "$DICTATE_BIN" --quiet start >>"$LOG_FILE" 2>&1
+  "$RIFF_BIN" --quiet start >>"$LOG_FILE" 2>&1
   t1=$(now_ms)
   log "toggle: session started in $((t1 - t0))ms"
 fi

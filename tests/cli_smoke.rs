@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 fn cmd_with_root(root: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("dictate").expect("dictate binary should build");
+    let mut cmd = Command::cargo_bin("riff").expect("riff binary should build");
     cmd.env("ISPY_ROOT", root);
     cmd.env("ISPY_BEEP", "0");
     cmd.env("ISPY_WEB_SERVER", "0");

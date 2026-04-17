@@ -121,9 +121,9 @@ if [[ "$SKIP_RUNTIME_BUILD" -eq 0 ]]; then
 fi
 
 REQUIRED_FILES=(
-  "$ROOT_DIR/dictate"
+  "$ROOT_DIR/riff"
   "$ROOT_DIR/README.md"
-  "$ROOT_DIR/target/release/dictate"
+  "$ROOT_DIR/target/release/riff"
   "$ROOT_DIR/scripts/parakeet_transcribe.py"
   "$ROOT_DIR/scripts/ispy_web_server.py"
   "$ROOT_DIR/runtime/python/bin/python"
@@ -137,8 +137,8 @@ for f in "${REQUIRED_FILES[@]}"; do
   fi
 done
 
-if [[ ! -x "$ROOT_DIR/dictate" || ! -x "$ROOT_DIR/target/release/dictate" ]]; then
-  echo "dictate wrapper or release binary is not executable." >&2
+if [[ ! -x "$ROOT_DIR/riff" || ! -x "$ROOT_DIR/target/release/riff" ]]; then
+  echo "riff wrapper or release binary is not executable." >&2
   exit 1
 fi
 
@@ -147,9 +147,9 @@ STAGING_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/ispy-dist.XXXXXX")"
 STAGING_DIR="$STAGING_PARENT/$ARTIFACT_NAME"
 mkdir -p "$STAGING_DIR/target/release" "$STAGING_DIR/runtime"
 
-cp -a "$ROOT_DIR/dictate" "$STAGING_DIR/"
+cp -a "$ROOT_DIR/riff" "$STAGING_DIR/"
 cp -a "$ROOT_DIR/README.md" "$STAGING_DIR/"
-cp -a "$ROOT_DIR/target/release/dictate" "$STAGING_DIR/target/release/"
+cp -a "$ROOT_DIR/target/release/riff" "$STAGING_DIR/target/release/"
 cp -a "$ROOT_DIR/scripts" "$STAGING_DIR/"
 cp -a "$ROOT_DIR/runtime/python" "$STAGING_DIR/runtime/"
 
