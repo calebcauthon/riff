@@ -182,6 +182,18 @@ fn clip_preview(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn clip_reference_text(text: &str) -> String {
+    text.replace('\r', "\\r").replace('\n', "\\n")
+}
+
+fn clip_reference_line(clip: &ClipboardMeta) -> String {
+    format!(
+        "Clipboard {}: \"{}\"",
+        clip.clip_id,
+        clip_reference_text(&clip.text)
+    )
+}
+
 fn images_visually_equal(a: &Path, b: &Path) -> bool {
     let Ok(img_a) = image::open(a) else {
         return false;
@@ -325,20 +337,10 @@ pub(crate) fn build_note(
         }
     }
 
-    if !clips.is_empty() {
-        for clip in clips {
-            lines.push(format!(
-                "Clipboard {}: {}",
-                clip.clip_id,
-                clip_preview(&clip.text, 120)
-            ));
-        }
-        lines.push(String::new());
-    }
-
     lines.push("## Transcript".to_string());
     lines.push(String::new());
 
+    let mut has_source_refs = false;
     if !shots.is_empty() {
         let session_dir = Path::new(&state.session_dir);
         for shot in shots {
@@ -349,6 +351,17 @@ pub(crate) fn build_note(
                 abs_path.display()
             ));
         }
+        has_source_refs = true;
+    }
+
+    if !clips.is_empty() {
+        for clip in clips {
+            lines.push(clip_reference_line(clip));
+        }
+        has_source_refs = true;
+    }
+
+    if has_source_refs {
         lines.push(String::new());
     }
 
@@ -381,7 +394,7 @@ pub(crate) fn build_note(
             lines.push(format!(
                 "[Clipboard {}]: \"{}\" (t={}, chars={})",
                 clip.clip_id,
-                clip.text.replace('\n', "\\n"),
+                clip_reference_text(&clip.text),
                 format_hms(clip.audio_sec),
                 clip.text.chars().count()
             ));
@@ -412,22 +425,22 @@ fn html_escape(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn strip_leading_screenshot_path_block(text: &str) -> String {
+fn strip_leading_annotation_source_block(text: &str) -> String {
     let lines = text.lines().collect::<Vec<_>>();
     let mut idx = 0usize;
-    let mut saw_path_line = false;
+    let mut saw_source_line = false;
 
     while idx < lines.len() {
         let t = lines[idx].trim();
-        if is_screenshot_path_line(t) {
-            saw_path_line = true;
+        if is_annotation_source_line(t) {
+            saw_source_line = true;
             idx += 1;
             continue;
         }
         break;
     }
 
-    if !saw_path_line {
+    if !saw_source_line {
         return text.to_string();
     }
 
@@ -443,6 +456,20 @@ fn is_screenshot_path_line(line: &str) -> bool {
         return false;
     };
     path_part.starts_with('/') && is_annotation_marker_body(prefix)
+}
+
+fn is_clipboard_reference_line(line: &str) -> bool {
+    let Some((prefix, _)) = line.split_once(": ") else {
+        return false;
+    };
+    let Some(rest) = prefix.strip_prefix("Clipboard ") else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_annotation_source_line(line: &str) -> bool {
+    is_screenshot_path_line(line) || is_clipboard_reference_line(line)
 }
 
 pub(crate) fn build_html_note(
@@ -562,19 +589,22 @@ pub(crate) fn build_html_note(
     }
 
     let duration = format_duration_compact(audio_duration_sec);
-    let transcript_core = strip_leading_screenshot_path_block(transcript.trim());
+    let transcript_core = strip_leading_annotation_source_block(transcript.trim());
     let mut transcript_text = if transcript_core.trim().is_empty() {
         "_No transcript available._".to_string()
     } else {
         transcript_core.trim().to_string()
     };
-    if !shots.is_empty() {
-        let mut path_lines = String::new();
+    if !shots.is_empty() || !clips.is_empty() {
+        let mut source_lines = String::new();
         for shot in shots {
             let abs = session_dir.join(&shot.dest_rel_path);
-            path_lines.push_str(&format!("{}: {}\n", shot_marker_label(shot), abs.display()));
+            source_lines.push_str(&format!("{}: {}\n", shot_marker_label(shot), abs.display()));
         }
-        transcript_text = format!("{}\n\n{}", path_lines.trim_end(), transcript_text);
+        for clip in clips {
+            source_lines.push_str(&format!("{}\n", clip_reference_line(clip)));
+        }
+        transcript_text = format!("{}\n\n{}", source_lines.trim_end(), transcript_text);
     }
 
     format!(
@@ -1712,7 +1742,7 @@ pub(crate) fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, A
     } else {
         transcript_fallback
     };
-    let transcript_base = strip_leading_screenshot_path_block(&transcript_base);
+    let transcript_base = strip_leading_annotation_source_block(&transcript_base);
     let transcript_annotated =
         inject_annotation_markers(&transcript_base, &shots, &clips, audio_duration);
 
@@ -1751,6 +1781,7 @@ pub(crate) fn generate_sessions_index_html() -> Result<PathBuf, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::SessionState;
     use serde_json::json;
 
     fn sample_html() -> String {
@@ -1819,5 +1850,59 @@ mod tests {
         assert!(html.contains("window.__riffOpenExcalidraw"));
         assert!(html.contains("h(pkg.Excalidraw"));
         assert!(html.contains("@excalidraw/excalidraw@0.18.0"));
+    }
+
+    #[test]
+    fn strip_leading_annotation_source_block_removes_shot_and_clip_refs() {
+        let input = [
+            "TestApp Screenshot 1: /tmp/riff/sessions/abc/screenshots/shot-001.png",
+            "Clipboard 1: \"copied text\"",
+            "",
+            "Testing [TestApp Screenshot 1] and [Clipboard 1]",
+        ]
+        .join("\n");
+        let stripped = strip_leading_annotation_source_block(&input);
+        assert_eq!(stripped, "Testing [TestApp Screenshot 1] and [Clipboard 1]");
+    }
+
+    #[test]
+    fn build_note_puts_clipboard_references_in_transcript_section() {
+        let state = SessionState {
+            session_id: "20260413-151333".to_string(),
+            session_dir: "/tmp/riff/sessions/20260413-151333".to_string(),
+            screenshots_dir: "/tmp/riff/sessions/20260413-151333/screenshots".to_string(),
+            audio_path: "/tmp/riff/sessions/20260413-151333/audio.wav".to_string(),
+            events_path: "/tmp/riff/sessions/20260413-151333/events.jsonl".to_string(),
+            ffmpeg_log_path: "/tmp/riff/sessions/20260413-151333/ffmpeg.log".to_string(),
+            ffmpeg_pid: None,
+            started_at_iso: "2026-04-13T15:13:33Z".to_string(),
+            started_at_epoch: 0.0,
+            screenshot_source_dir: "/tmp/screens".to_string(),
+            audio_device: "Built-in Microphone".to_string(),
+            clipboard_watcher_pid: None,
+        };
+        let clips = vec![ClipboardMeta {
+            clip_id: 1,
+            text: "line one\nline two".to_string(),
+            audio_sec: 1.0,
+        }];
+        let note = build_note(
+            &state,
+            "2026-04-13T15:14:33Z",
+            &[],
+            &clips,
+            "Testing [Clipboard 1]",
+            &json!({"status": "ok", "method": "parakeet"}),
+            Some(20.0),
+        );
+        let transcript = extract_transcript_from_note(&note).expect("transcript section");
+        assert!(
+            transcript.contains("Clipboard 1: \"line one\\nline two\""),
+            "transcript missing clipboard reference line: {transcript}"
+        );
+        assert!(
+            transcript.contains("Testing [Clipboard 1]"),
+            "transcript missing marker body: {transcript}"
+        );
     }
 }
