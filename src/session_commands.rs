@@ -72,7 +72,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     let started_iso = now_iso();
 
     let requested_audio_device = if args.audio_device.eq_ignore_ascii_case("auto") {
-        env::var("ISPY_AUDIO_DEVICE").unwrap_or_else(|_| args.audio_device.clone())
+        env::var("RIFF_AUDIO_DEVICE").unwrap_or_else(|_| args.audio_device.clone())
     } else {
         args.audio_device.clone()
     };

@@ -4,9 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 
 pub fn root_dir() -> PathBuf {
-    env::var("ISPY_ROOT")
+    env::var("RIFF_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/ispy"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/riff"))
 }
 
 pub fn sessions_dir() -> PathBuf {

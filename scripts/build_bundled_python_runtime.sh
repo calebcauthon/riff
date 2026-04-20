@@ -19,7 +19,7 @@ ALLOW_NONRELOCATABLE=0
 
 usage() {
   cat <<EOF
-Build a full bundled Python runtime (not a venv) for ispy.
+Build a full bundled Python runtime (not a venv) for riff.
 
 Usage:
   $(basename "$0") [options]
@@ -130,10 +130,10 @@ TMP_DIR="$RUNTIME_PARENT/.${RUNTIME_NAME}.tmp"
 mkdir -p "$RUNTIME_PARENT"
 rm -rf "$TMP_DIR"
 
-echo "[ispy] Source python: $SOURCE_PYTHON"
-echo "[ispy] Source executable: $SOURCE_EXECUTABLE"
-echo "[ispy] Source prefix: $SOURCE_PREFIX"
-echo "[ispy] Building runtime at: $RUNTIME_DIR"
+echo "[riff] Source python: $SOURCE_PYTHON"
+echo "[riff] Source executable: $SOURCE_EXECUTABLE"
+echo "[riff] Source prefix: $SOURCE_PREFIX"
+echo "[riff] Building runtime at: $RUNTIME_DIR"
 
 rsync -a --delete "$SOURCE_PREFIX/" "$TMP_DIR/"
 
@@ -152,7 +152,7 @@ fi
 
 if [[ "$SKIP_INSTALL" -eq 0 ]]; then
   PY="$TMP_DIR/bin/python"
-  echo "[ispy] Installing runtime packages: $PACKAGES"
+  echo "[riff] Installing runtime packages: $PACKAGES"
 
   if ! "$PY" -m pip --version >/dev/null 2>&1; then
     "$PY" -m ensurepip --default-pip || true
@@ -188,9 +188,9 @@ if [[ "$BUILT_PREFIX" != "$RUNTIME_DIR"* ]]; then
     echo "  $0 --source-python \$HOME/.local/bin/python$PYTHON_VERSION" >&2
     exit 1
   fi
-  echo "[ispy] WARNING: runtime prefix is not relocatable: $BUILT_PREFIX"
+  echo "[riff] WARNING: runtime prefix is not relocatable: $BUILT_PREFIX"
 fi
 
-echo "[ispy] Bundled runtime ready: $BUILT_VERSION"
-echo "[ispy] Runtime path: $RUNTIME_DIR/bin/python"
-echo "[ispy] ispy will auto-use this runtime when ISPY_PYTHON_BIN is unset."
+echo "[riff] Bundled runtime ready: $BUILT_VERSION"
+echo "[riff] Runtime path: $RUNTIME_DIR/bin/python"
+echo "[riff] riff will auto-use this runtime when RIFF_PYTHON_BIN is unset."

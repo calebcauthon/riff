@@ -11,7 +11,7 @@ Workflow:
 On `stop`, riff:
 - stops audio recording
 - finds screenshots created during the session in your normal screenshot folder
-- copies them to session tmp storage (`/tmp/ispy/sessions/<session-id>/screenshots`)
+- copies them to session tmp storage (`/tmp/riff/sessions/<session-id>/screenshots`)
 - deletes the originals from your normal screenshot folder
 - captures copied clipboard text during the session
 - runs local transcription (Parakeet via Python script / warm local server)
@@ -24,7 +24,7 @@ On `stop`, riff:
 ## Files
 
 ```text
-/tmp/ispy/sessions/<session-id>/
+/tmp/riff/sessions/<session-id>/
   audio.wav
   events.jsonl
   ffmpeg.log
@@ -39,10 +39,10 @@ On `stop`, riff:
 Performance/observability logs:
 
 ```text
-/tmp/ispy/perf.jsonl                # structured start/stop phase timings
-/tmp/ispy/parakeet-server.log       # warm Parakeet server logs
-/tmp/ispy/web-server.log            # local HTML web server logs
-/tmp/ispy/toggle-hotkey.log         # hotkey toggle/copy/paste lifecycle
+/tmp/riff/perf.jsonl                # structured start/stop phase timings
+/tmp/riff/parakeet-server.log       # warm Parakeet server logs
+/tmp/riff/web-server.log            # local HTML web server logs
+/tmp/riff/toggle-hotkey.log         # hotkey toggle/copy/paste lifecycle
 ```
 
 ---
@@ -55,7 +55,7 @@ chmod +x riff
 ```
 
 `riff` is a wrapper script that builds/runs the Rust binary.
-If `ISPY_PYTHON_BIN` is not set, it auto-prefers:
+If `RIFF_PYTHON_BIN` is not set, it auto-prefers:
 1. `~/Code/riff/runtime/python/bin/python` (bundled runtime)
 2. `~/Code/riff/.venv/bin/python` (dev venv)
 3. `python3` from PATH
@@ -109,20 +109,20 @@ brew install python@3.12
 Set env vars (add to `~/.zshrc` if desired):
 
 ```bash
-export ISPY_PYTHON_BIN="$HOME/Code/riff/.venv/bin/python"
-export ISPY_PARAKEET_SCRIPT="$HOME/Code/riff/scripts/parakeet_transcribe.py"
-export ISPY_PARAKEET_MODEL="nvidia/parakeet-tdt-0.6b-v2"
+export RIFF_PYTHON_BIN="$HOME/Code/riff/.venv/bin/python"
+export RIFF_PARAKEET_SCRIPT="$HOME/Code/riff/scripts/parakeet_transcribe.py"
+export RIFF_PARAKEET_MODEL="nvidia/parakeet-tdt-0.6b-v2"
 # optional perf + warm server controls
-export ISPY_PARAKEET_SERVER=1
-export ISPY_PARAKEET_SERVER_URL="http://127.0.0.1:8765"
+export RIFF_PARAKEET_SERVER=1
+export RIFF_PARAKEET_SERVER_URL="http://127.0.0.1:8765"
 
 # optional local HTML server controls
-export ISPY_WEB_SERVER=1
-export ISPY_WEB_SERVER_URL="http://127.0.0.1:8766"
-export ISPY_WEB_SERVER_IDLE_TIMEOUT_SEC=1800
+export RIFF_WEB_SERVER=1
+export RIFF_WEB_SERVER_URL="http://127.0.0.1:8766"
+export RIFF_WEB_SERVER_IDLE_TIMEOUT_SEC=1800
 
 # optional clipboard monitor controls
-export ISPY_CLIPBOARD_MONITOR=1
+export RIFF_CLIPBOARD_MONITOR=1
 ```
 
 ---
@@ -154,7 +154,7 @@ cd ~/Code/riff
 ./scripts/create_distribution_artifact.sh
 ```
 
-This writes `dist/ispy-<platform>-<sha>-<timestamp>.tar.gz` plus a `.sha256` file.
+This writes `dist/riff-<platform>-<sha>-<timestamp>.tar.gz` plus a `.sha256` file.
 
 Package these paths together:
 
@@ -199,7 +199,7 @@ Flags:
 You can also set a fixed selector:
 
 ```bash
-export ISPY_AUDIO_DEVICE=":1"
+export RIFF_AUDIO_DEVICE=":1"
 ```
 
 ### Shot (capture directly into active session)
@@ -330,13 +330,13 @@ riff --json status
 Every start/stop writes structured timings to:
 
 ```bash
-cat /tmp/ispy/perf.jsonl
+cat /tmp/riff/perf.jsonl
 ```
 
 Tail live while testing hotkeys:
 
 ```bash
-tail -f /tmp/ispy/perf.jsonl
+tail -f /tmp/riff/perf.jsonl
 ```
 
 Focus on these fields:
@@ -351,7 +351,7 @@ Focus on these fields:
 If `transcription_perf.server_pid_alive` is `false`, inspect:
 
 ```bash
-tail -n 120 /tmp/ispy/parakeet-server.log
+tail -n 120 /tmp/riff/parakeet-server.log
 ```
 
 ---
@@ -365,12 +365,12 @@ By default, successful start/stop plays two different macOS sounds:
 Customize or disable:
 
 ```bash
-export ISPY_BEEP=1                 # default on (set 0 to disable)
-export ISPY_BEEP_START="Ping"     # name in /System/Library/Sounds or absolute path
-export ISPY_BEEP_STOP="Glass"     # name in /System/Library/Sounds or absolute path
-export ISPY_BEEP_START_COUNT=1     # 1..3 repeats
-export ISPY_BEEP_STOP_COUNT=1      # 1..3 repeats
-export ISPY_BEEP_GAP_SEC=0.08      # launch interval between repeats (0.00..1.00); lower values overlap beeps
+export RIFF_BEEP=1                 # default on (set 0 to disable)
+export RIFF_BEEP_START="Ping"     # name in /System/Library/Sounds or absolute path
+export RIFF_BEEP_STOP="Glass"     # name in /System/Library/Sounds or absolute path
+export RIFF_BEEP_START_COUNT=1     # 1..3 repeats
+export RIFF_BEEP_STOP_COUNT=1      # 1..3 repeats
+export RIFF_BEEP_GAP_SEC=0.08      # launch interval between repeats (0.00..1.00); lower values overlap beeps
 ```
 
 Interactive picker (preview + choose start/stop sounds):
@@ -402,7 +402,7 @@ Use Raycast, Alfred, Hammerspoon, Keyboard Maestro, etc. if you prefer a differe
 If you see dependency/import errors even after pip install, check your Python version:
 
 ```bash
-$ISPY_PYTHON_BIN -V
+$RIFF_PYTHON_BIN -V
 ```
 
 If it's `3.13+` (especially 3.14), recreate your environment with Python 3.12.

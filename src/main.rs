@@ -125,7 +125,7 @@ fn bool_env_enabled(name: &str, default: bool) -> bool {
 }
 
 fn clipboard_monitor_enabled() -> bool {
-    bool_env_enabled("ISPY_CLIPBOARD_MONITOR", true)
+    bool_env_enabled("RIFF_CLIPBOARD_MONITOR", true)
 }
 
 fn normalize_clipboard_text(raw: &str) -> String {
@@ -197,7 +197,7 @@ pub(crate) fn spawn_clipboard_watcher(
     cli: &Cli,
 ) -> Option<i32> {
     if !clipboard_monitor_enabled() {
-        print_verbose(cli, "Clipboard watcher disabled by ISPY_CLIPBOARD_MONITOR.");
+        print_verbose(cli, "Clipboard watcher disabled by RIFF_CLIPBOARD_MONITOR.");
         return None;
     }
     if !command_exists("pbpaste") {
@@ -265,9 +265,9 @@ fn resolve_sound_path(spec: &str) -> PathBuf {
 
 fn env_beep_count(kind: &str) -> u8 {
     let key = if kind == "start" {
-        "ISPY_BEEP_START_COUNT"
+        "RIFF_BEEP_START_COUNT"
     } else {
-        "ISPY_BEEP_STOP_COUNT"
+        "RIFF_BEEP_STOP_COUNT"
     };
 
     let parsed = env::var(key)
@@ -279,7 +279,7 @@ fn env_beep_count(kind: &str) -> u8 {
 }
 
 fn env_beep_gap_sec() -> f32 {
-    let parsed = env::var("ISPY_BEEP_GAP_SEC")
+    let parsed = env::var("RIFF_BEEP_GAP_SEC")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(0.08);
@@ -288,14 +288,14 @@ fn env_beep_gap_sec() -> f32 {
 }
 
 fn play_event_sound(kind: &str, cli: &Cli) {
-    if !bool_env_enabled("ISPY_BEEP", true) {
+    if !bool_env_enabled("RIFF_BEEP", true) {
         return;
     }
 
     let env_key = if kind == "start" {
-        "ISPY_BEEP_START"
+        "RIFF_BEEP_START"
     } else {
-        "ISPY_BEEP_STOP"
+        "RIFF_BEEP_STOP"
     };
     let default_sound = if kind == "start" { "Ping" } else { "Glass" };
     let sound_spec = env::var(env_key).unwrap_or_else(|_| default_sound.to_string());
@@ -310,7 +310,7 @@ fn play_event_sound(kind: &str, cli: &Cli) {
             .arg(
                 "count=\"$1\"; path=\"$2\"; gap=\"$3\"; i=1; pids=\"\"; while [ \"$i\" -le \"$count\" ]; do afplay \"$path\" >/dev/null 2>&1 & p=\"$!\"; pids=\"$pids $p\"; i=$((i+1)); [ \"$i\" -le \"$count\" ] && sleep \"$gap\"; done; for p in $pids; do wait \"$p\" 2>/dev/null || true; done",
             )
-            .arg("ispy-beep")
+            .arg("riff-beep")
             .arg(count.to_string())
             .arg(sound_path.as_os_str())
             .arg(format!("{:.2}", gap_sec))
@@ -1130,14 +1130,14 @@ pub(crate) fn get_audio_duration_sec(audio_path: &Path) -> Option<f64> {
 fn cmd_sounds(_cli: &Cli) -> Result<i32, AppError> {
     ensure_dirs()?;
 
-    let script_path = env::var("ISPY_SOUND_PICKER_SCRIPT")
+    let script_path = env::var("RIFF_SOUND_PICKER_SCRIPT")
         .ok()
         .map(PathBuf::from)
         .or_else(default_sound_picker_script)
         .ok_or_else(|| {
             app_error(
                 1,
-                "Could not find sound picker script. Expected scripts/pick_ispy_sounds.sh",
+                "Could not find sound picker script. Expected scripts/pick_riff_sounds.sh",
             )
         })?;
 

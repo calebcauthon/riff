@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Tiny local web server for ispy session pages.
+Tiny local web server for riff session pages.
 
-Serves /tmp/ispy (or configured root) over localhost and exits after idle timeout.
+Serves /tmp/riff (or configured root) over localhost and exits after idle timeout.
 
 Endpoints:
 - GET  /health        -> JSON health payload
@@ -30,8 +30,8 @@ from urllib.parse import urlparse
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="ispy local web server")
-    p.add_argument("--root", default=os.environ.get("ISPY_ROOT", "/tmp/ispy"), help="Directory to serve")
+    p = argparse.ArgumentParser(description="riff local web server")
+    p.add_argument("--root", default=os.environ.get("RIFF_ROOT", "/tmp/riff"), help="Directory to serve")
     p.add_argument("--host", default="127.0.0.1", help="Bind host")
     p.add_argument("--port", type=int, default=8766, help="Bind port")
     p.add_argument("--idle-timeout-sec", type=int, default=1800, help="Exit after this many idle seconds")
@@ -94,7 +94,7 @@ def main() -> int:
                     HTTPStatus.OK,
                     {
                         "ok": True,
-                        "service": "ispy-web",
+                        "service": "riff-web",
                         "root": str(root),
                         "idle_timeout_sec": args.idle_timeout_sec,
                         "idle_sec": round(idle_seconds(), 3),
@@ -149,8 +149,7 @@ def main() -> int:
                     return
 
                 riff_bin = (
-                    os.environ.get("ISPY_RIFF_BIN")
-                    or os.environ.get("ISPY_DICTATE_BIN")
+                    os.environ.get("RIFF_BIN")
                     or "riff"
                 )
                 cmd = [
@@ -276,7 +275,7 @@ def main() -> int:
         json.dumps(
             {
                 "ok": True,
-                "service": "ispy-web",
+                "service": "riff-web",
                 "url": f"http://{args.host}:{args.port}",
                 "root": str(root),
                 "idle_timeout_sec": args.idle_timeout_sec,
@@ -295,7 +294,7 @@ def main() -> int:
                     json.dumps(
                         {
                             "ok": True,
-                            "service": "ispy-web",
+                            "service": "riff-web",
                             "event": "idle-timeout-shutdown",
                             "idle_sec": round(idle_seconds(), 3),
                         }

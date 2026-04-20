@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# TUI picker for ISPY_BEEP_START / ISPY_BEEP_STOP
+# TUI picker for RIFF_BEEP_START / RIFF_BEEP_STOP
 # Controls:
 #   ↑/↓ or j/k  move selection
 #   p or space  preview selected sound
@@ -13,8 +13,8 @@ set -euo pipefail
 SYSTEM_DIR="/System/Library/Sounds"
 USER_DIR="$HOME/Library/Sounds"
 ZSHRC="$HOME/.zshrc"
-MARKER_START="# >>> ispy-beeps >>>"
-MARKER_END="# <<< ispy-beeps <<<"
+MARKER_START="# >>> riff-beeps >>>"
+MARKER_END="# <<< riff-beeps <<<"
 
 if ! command -v afplay >/dev/null 2>&1; then
   echo "Error: afplay not found (macOS required)." >&2
@@ -131,11 +131,11 @@ repeat_char() {
 
 load_existing_config() {
   local existing_start existing_stop existing_start_count existing_stop_count existing_gap
-  existing_start="${ISPY_BEEP_START:-}"
-  existing_stop="${ISPY_BEEP_STOP:-}"
-  existing_start_count="${ISPY_BEEP_START_COUNT:-}"
-  existing_stop_count="${ISPY_BEEP_STOP_COUNT:-}"
-  existing_gap="${ISPY_BEEP_GAP_SEC:-}"
+  existing_start="${RIFF_BEEP_START:-}"
+  existing_stop="${RIFF_BEEP_STOP:-}"
+  existing_start_count="${RIFF_BEEP_START_COUNT:-}"
+  existing_stop_count="${RIFF_BEEP_STOP_COUNT:-}"
+  existing_gap="${RIFF_BEEP_GAP_SEC:-}"
 
   if [[ ( -z "$existing_start" || -z "$existing_stop" || -z "$existing_start_count" || -z "$existing_stop_count" || -z "$existing_gap" ) && -f "$ZSHRC" ]]; then
     local block
@@ -146,19 +146,19 @@ load_existing_config() {
     ' "$ZSHRC" 2>/dev/null || true)"
 
     if [[ -z "$existing_start" ]]; then
-      existing_start="$(printf '%s\n' "$block" | awk -F'"' '/^export ISPY_BEEP_START=/{print $2; exit}')"
+      existing_start="$(printf '%s\n' "$block" | awk -F'"' '/^export RIFF_BEEP_START=/{print $2; exit}')"
     fi
     if [[ -z "$existing_stop" ]]; then
-      existing_stop="$(printf '%s\n' "$block" | awk -F'"' '/^export ISPY_BEEP_STOP=/{print $2; exit}')"
+      existing_stop="$(printf '%s\n' "$block" | awk -F'"' '/^export RIFF_BEEP_STOP=/{print $2; exit}')"
     fi
     if [[ -z "$existing_start_count" ]]; then
-      existing_start_count="$(printf '%s\n' "$block" | awk -F'=' '/^export ISPY_BEEP_START_COUNT=/{print $2; exit}')"
+      existing_start_count="$(printf '%s\n' "$block" | awk -F'=' '/^export RIFF_BEEP_START_COUNT=/{print $2; exit}')"
     fi
     if [[ -z "$existing_stop_count" ]]; then
-      existing_stop_count="$(printf '%s\n' "$block" | awk -F'=' '/^export ISPY_BEEP_STOP_COUNT=/{print $2; exit}')"
+      existing_stop_count="$(printf '%s\n' "$block" | awk -F'=' '/^export RIFF_BEEP_STOP_COUNT=/{print $2; exit}')"
     fi
     if [[ -z "$existing_gap" ]]; then
-      existing_gap="$(printf '%s\n' "$block" | awk -F'=' '/^export ISPY_BEEP_GAP_SEC=/{print $2; exit}')"
+      existing_gap="$(printf '%s\n' "$block" | awk -F'=' '/^export RIFF_BEEP_GAP_SEC=/{print $2; exit}')"
     fi
   fi
 
@@ -186,7 +186,7 @@ load_existing_config() {
 
 render() {
   printf '\033[2J\033[H'
-  echo "ispy sound picker"
+  echo "riff sound picker"
   echo
   echo "Controls: ↑/↓ or j/k | p/space play | 1 start(cycle 1..3) | 2 stop(cycle 1..3) | +/- gap | Esc/s save+exit | q quit"
   echo
@@ -304,12 +304,12 @@ write_zshrc_block() {
 
   cat >>"$tmp" <<EOF
 $MARKER_START
-export ISPY_BEEP=1
-export ISPY_BEEP_START="$start_sound"
-export ISPY_BEEP_STOP="$stop_sound"
-export ISPY_BEEP_START_COUNT=$start_n
-export ISPY_BEEP_STOP_COUNT=$stop_n
-export ISPY_BEEP_GAP_SEC="$gap"
+export RIFF_BEEP=1
+export RIFF_BEEP_START="$start_sound"
+export RIFF_BEEP_STOP="$stop_sound"
+export RIFF_BEEP_START_COUNT=$start_n
+export RIFF_BEEP_STOP_COUNT=$stop_n
+export RIFF_BEEP_GAP_SEC="$gap"
 $MARKER_END
 EOF
 
@@ -324,7 +324,7 @@ save_and_exit() {
   write_zshrc_block "$start_sound" "$stop_sound" "$start_count" "$stop_count" "$gap_sec"
 
   printf '\033[2J\033[H'
-  echo "Saved ispy beep config:"
+  echo "Saved riff beep config:"
   echo "  START: $start_sound x$start_count"
   echo "  STOP : $stop_sound x$stop_count"
   echo "  GAP  : ${gap_sec}s"

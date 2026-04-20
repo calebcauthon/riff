@@ -9,10 +9,10 @@ use tempfile::tempdir;
 
 fn cmd_with_root(root: &Path) -> Command {
     let mut cmd = Command::cargo_bin("riff").expect("riff binary should build");
-    cmd.env("ISPY_ROOT", root);
-    cmd.env("ISPY_BEEP", "0");
-    cmd.env("ISPY_WEB_SERVER", "0");
-    cmd.env("ISPY_PARAKEET_SERVER", "0");
+    cmd.env("RIFF_ROOT", root);
+    cmd.env("RIFF_BEEP", "0");
+    cmd.env("RIFF_WEB_SERVER", "0");
+    cmd.env("RIFF_PARAKEET_SERVER", "0");
     cmd
 }
 

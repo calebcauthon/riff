@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RIFF_BIN="${RIFF_BIN:-${DICTATE_BIN:-/Users/caleb/Code/riff/riff}}"
-LOG_ROOT="${ISPY_ROOT:-/tmp/ispy}"
+RIFF_BIN="${RIFF_BIN:-/Users/caleb/Code/riff/riff}"
+LOG_ROOT="${RIFF_ROOT:-/tmp/riff}"
 LOG_FILE="$LOG_ROOT/toggle-hotkey.log"
 
 mkdir -p "$LOG_ROOT"

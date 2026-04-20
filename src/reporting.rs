@@ -516,18 +516,18 @@ pub(crate) fn build_html_note(
                 ""
             };
             let use_button = if is_selected {
-                r#"<button class="ispy-btn tiny use-variant" disabled aria-disabled="true">In transcript</button>"#
+                r#"<button class="riff-btn tiny use-variant" disabled aria-disabled="true">In transcript</button>"#
                     .to_string()
             } else {
                 format!(
-                    r#"<button class="ispy-btn tiny use-variant" data-session-id="{session_id}" data-shot-id="{shot_id}" data-module="{module_id}">Use for transcript</button>"#,
+                    r#"<button class="riff-btn tiny use-variant" data-session-id="{session_id}" data-shot-id="{shot_id}" data-module="{module_id}">Use for transcript</button>"#,
                     session_id = html_escape(session_id),
                     shot_id = shot.shot_id,
                     module_id = variant.module_id,
                 )
             };
             variants_html.push_str(&format!(
-                r#"<figure class="variant{selected_class}" data-module="{module_id}" data-shot-id="{shot_id}"><div class="variant-head"><div class="variant-title"><figcaption>{module_name}</figcaption>{selected_badge}</div><div class="variant-actions">{use_button}<button class="ispy-btn tiny annotate-image" data-url="{url}" data-path="{path}">Annotate</button><button class="ispy-btn tiny copy-image" data-url="{url}" data-path="{path}">Copy image</button></div></div><div class="img-wrap"><a href="{url}" target="_blank" rel="noreferrer"><img src="{url}" alt="Screenshot {shot_id} - {module_name}" loading="lazy" /></a></div></figure>"#,
+                r#"<figure class="variant{selected_class}" data-module="{module_id}" data-shot-id="{shot_id}"><div class="variant-head"><div class="variant-title"><figcaption>{module_name}</figcaption>{selected_badge}</div><div class="variant-actions">{use_button}<button class="riff-btn tiny annotate-image" data-url="{url}" data-path="{path}">Annotate</button><button class="riff-btn tiny copy-image" data-url="{url}" data-path="{path}">Copy image</button></div></div><div class="img-wrap"><a href="{url}" target="_blank" rel="noreferrer"><img src="{url}" alt="Screenshot {shot_id} - {module_name}" loading="lazy" /></a></div></figure>"#,
                 selected_class = selected_class,
                 selected_badge = selected_badge,
                 use_button = use_button,
@@ -552,7 +552,7 @@ pub(crate) fn build_html_note(
     for clip in clips {
         let preview = clip_preview(&clip.text, 300);
         clip_cards.push_str(&format!(
-            r#"<div class="card"><div class="card-head"><strong>Clipboard {}</strong><button class="ispy-btn small copy-clip" data-text="{}">Copy text</button></div><div class="transcript">{}</div><div class="path">t={} · {} chars</div></div>"#,
+            r#"<div class="card"><div class="card-head"><strong>Clipboard {}</strong><button class="riff-btn small copy-clip" data-text="{}">Copy text</button></div><div class="transcript">{}</div><div class="path">t={} · {} chars</div></div>"#,
             clip.clip_id,
             html_escape(&clip.text),
             html_escape(&preview),
@@ -599,10 +599,10 @@ pub(crate) fn build_html_note(
     .nav a {{ color: #1d4ed8; text-decoration: none; font-weight: 600; }}
     .nav a:hover {{ text-decoration: underline; }}
     .status {{ font-size: 12px; color: #475569; }}
-    .ispy-btn {{ background: #111827; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; }}
-    .ispy-btn:hover {{ background: #1f2937; }}
-    .ispy-btn.small {{ padding: 6px 10px; font-size: 12px; }}
-    .ispy-btn.tiny {{ padding: 3px 8px; font-size: 11px; border-radius: 6px; }}
+    .riff-btn {{ background: #111827; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; }}
+    .riff-btn:hover {{ background: #1f2937; }}
+    .riff-btn.small {{ padding: 6px 10px; font-size: 12px; }}
+    .riff-btn.tiny {{ padding: 3px 8px; font-size: 11px; border-radius: 6px; }}
     .transcript {{ white-space: pre-wrap; line-height: 1.6; font-size: 15px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }}
     .shot-grid {{ display: grid; grid-template-columns: 1fr; gap: 12px; }}
@@ -646,7 +646,7 @@ pub(crate) fn build_html_note(
 
     <section class="meta">
       <div class="actions">
-        <button id="copyMarkdownBtn" class="ispy-btn">Copy markdown</button>
+        <button id="copyMarkdownBtn" class="riff-btn">Copy markdown</button>
         <span id="copyStatus" class="status"></span>
       </div>
       <ul>
@@ -663,7 +663,7 @@ pub(crate) fn build_html_note(
     <section class="panel">
       <div class="transcript-head">
         <h2 style="margin: 0;">Transcript</h2>
-        <button id="copyTranscriptBtn" class="ispy-btn tiny">Copy</button>
+        <button id="copyTranscriptBtn" class="riff-btn tiny">Copy</button>
       </div>
       <div class="transcript">{transcript_html}</div>
     </section>
@@ -683,11 +683,11 @@ pub(crate) fn build_html_note(
   <div id="annotatorModal" class="annotator-modal" aria-hidden="true">
     <div class="annotator-panel">
       <div class="annotator-toolbar">
-        <button id="annotatorSaveCloseBtn" class="ispy-btn small">Save and close</button>
-        <button id="annotatorDownloadBtn" class="ispy-btn small">Download annotated PNG</button>
+        <button id="annotatorSaveCloseBtn" class="riff-btn small">Save and close</button>
+        <button id="annotatorDownloadBtn" class="riff-btn small">Download annotated PNG</button>
         <span class="annotator-toolbar-spacer"></span>
         <span id="annotatorStatus" class="status"></span>
-        <button id="annotatorCloseBtn" class="ispy-btn small annotator-close-btn" aria-label="Close annotator" title="Close annotator">×</button>
+        <button id="annotatorCloseBtn" class="riff-btn small annotator-close-btn" aria-label="Close annotator" title="Close annotator">×</button>
       </div>
       <div class="annotator-stage">
         <div id="annotatorLoading" class="annotator-loading">Loading Excalidraw…</div>
@@ -714,8 +714,8 @@ pub(crate) fn build_html_note(
           loading.classList.remove('hidden');
           loading.textContent = 'Loading Excalidraw…';
         }}
-        if (typeof window.__ispyOpenExcalidraw === 'function') {{
-          window.__ispyOpenExcalidraw(url, path);
+        if (typeof window.__riffOpenExcalidraw === 'function') {{
+          window.__riffOpenExcalidraw(url, path);
         }} else if (loading) {{
           loading.textContent = 'Annotator runtime not ready yet. Please wait a second and click Annotate again.';
         }}
@@ -842,12 +842,12 @@ pub(crate) fn build_html_note(
     }});
 
     document.getElementById('annotatorSaveCloseBtn')?.addEventListener('click', async () => {{
-      if (typeof window.__ispySaveExcalidraw !== 'function') {{
+      if (typeof window.__riffSaveExcalidraw !== 'function') {{
         setAnnotatorStatus('Excalidraw not ready');
         return;
       }}
       try {{
-        await window.__ispySaveExcalidraw();
+        await window.__riffSaveExcalidraw();
         setAnnotatorStatus('Saved');
         closeAnnotator();
       }} catch (_err) {{
@@ -856,12 +856,12 @@ pub(crate) fn build_html_note(
     }});
 
     document.getElementById('annotatorDownloadBtn')?.addEventListener('click', async () => {{
-      if (typeof window.__ispyDownloadExcalidrawPng !== 'function') {{
+      if (typeof window.__riffDownloadExcalidrawPng !== 'function') {{
         setAnnotatorStatus('Excalidraw not ready');
         return;
       }}
       try {{
-        await window.__ispyDownloadExcalidrawPng();
+        await window.__riffDownloadExcalidrawPng();
         setAnnotatorStatus('Annotated PNG downloaded');
       }} catch (_err) {{
         setAnnotatorStatus('Could not export PNG');
@@ -937,14 +937,14 @@ pub(crate) fn build_html_note(
   </script>
   <script type="module">
     window.EXCALIDRAW_ASSET_PATH = 'https://esm.sh/@excalidraw/excalidraw@0.18.0/dist/dev/';
-    const EXCALIDRAW_CSS_ID = 'ispy-excalidraw-css';
+    const EXCALIDRAW_CSS_ID = 'riff-excalidraw-css';
     const EXCALIDRAW_CSS_URLS = [
       'https://cdn.jsdelivr.net/npm/@excalidraw/excalidraw@0.18.0/dist/prod/index.min.css',
       'https://unpkg.com/@excalidraw/excalidraw@0.18.0/dist/prod/index.min.css',
     ];
     const host = document.getElementById('annotatorHost');
     const annotatorLoading = document.getElementById('annotatorLoading');
-    const sceneStoragePrefix = 'ispy-excalidraw-scene-';
+    const sceneStoragePrefix = 'riff-excalidraw-scene-';
     let reactRoot = null;
     let excalidrawAPI = null;
     let excalidrawPkg = null;
@@ -1190,7 +1190,7 @@ pub(crate) fn build_html_note(
       );
     }}
 
-    window.__ispyOpenExcalidraw = async (url, path) => {{
+    window.__riffOpenExcalidraw = async (url, path) => {{
       try {{
         await renderAnnotator(url, path);
       }} catch (err) {{
@@ -1199,7 +1199,7 @@ pub(crate) fn build_html_note(
       }}
     }};
 
-    window.__ispySaveExcalidraw = async () => {{
+    window.__riffSaveExcalidraw = async () => {{
       if (!excalidrawAPI || !currentContext.path) throw new Error('Excalidraw not ready');
       const persistedAppState = sanitizeAppState(excalidrawAPI.getAppState());
       const payload = {{
@@ -1253,7 +1253,7 @@ pub(crate) fn build_html_note(
       refreshScreenshotPreview(currentContext.path, currentContext.url);
     }};
 
-    window.__ispyDownloadExcalidrawPng = async () => {{
+    window.__riffDownloadExcalidrawPng = async () => {{
       if (!excalidrawAPI || !excalidrawPkg) throw new Error('Excalidraw not ready');
       const blob = await excalidrawPkg.exportToBlob({{
         elements: excalidrawAPI.getSceneElements(),
@@ -1786,7 +1786,7 @@ mod tests {
             "hello world",
             &shots,
             &clips,
-            Path::new("/tmp/ispy/sessions/20260413-151333"),
+            Path::new("/tmp/riff/sessions/20260413-151333"),
             "../index.html",
         )
     }
@@ -1797,7 +1797,7 @@ mod tests {
         assert!(html.contains("annotate-image"));
         assert!(html.contains("data-url=\"screenshots/derived/shot-001__"));
         assert!(html.contains(
-            "data-path=\"/tmp/ispy/sessions/20260413-151333/screenshots/derived/shot-001__"
+            "data-path=\"/tmp/riff/sessions/20260413-151333/screenshots/derived/shot-001__"
         ));
     }
 
@@ -1805,7 +1805,7 @@ mod tests {
     fn save_and_close_writes_back_original_image_path() {
         let html = sample_html();
         assert!(html.contains("Save and close"));
-        assert!(html.contains("await window.__ispySaveExcalidraw();"));
+        assert!(html.contains("await window.__riffSaveExcalidraw();"));
         assert!(html.contains("closeAnnotator();"));
         assert!(html.contains("absPath: currentContext.path"));
         assert!(html.contains("refreshScreenshotPreview(currentContext.path, currentContext.url);"));
@@ -1816,7 +1816,7 @@ mod tests {
         let html = sample_html();
         assert!(html.contains("id=\"annotatorHost\""));
         assert!(html.contains("Loading Excalidraw"));
-        assert!(html.contains("window.__ispyOpenExcalidraw"));
+        assert!(html.contains("window.__riffOpenExcalidraw"));
         assert!(html.contains("h(pkg.Excalidraw"));
         assert!(html.contains("@excalidraw/excalidraw@0.18.0"));
     }

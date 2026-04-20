@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Local Parakeet transcription helper for ispy.
+Local Parakeet transcription helper for riff.
 
 One-shot mode:
   python scripts/parakeet_transcribe.py \
-    --audio /tmp/ispy/sessions/<id>/audio.wav \
-    --out-txt /tmp/ispy/sessions/<id>/transcript.txt \
+    --audio /tmp/riff/sessions/<id>/audio.wav \
+    --out-txt /tmp/riff/sessions/<id>/transcript.txt \
     --model nvidia/parakeet-tdt-0.6b-v2
 
 Server mode (keeps model loaded for faster subsequent transcriptions):
@@ -58,12 +58,12 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument(
         "--model",
-        default=os.environ.get("ISPY_PARAKEET_MODEL", "nvidia/parakeet-tdt-0.6b-v2"),
+        default=os.environ.get("RIFF_PARAKEET_MODEL", "nvidia/parakeet-tdt-0.6b-v2"),
         help="Parakeet model name (NeMo pretrained id)",
     )
     p.add_argument(
         "--device",
-        default=os.environ.get("ISPY_PARAKEET_DEVICE", "auto"),
+        default=os.environ.get("RIFF_PARAKEET_DEVICE", "auto"),
         choices=["auto", "cpu", "cuda"],
         help="Inference device",
     )

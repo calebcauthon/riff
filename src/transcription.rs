@@ -89,7 +89,7 @@ pub(crate) fn resolve_python_bin(explicit: Option<&str>) -> String {
         return bin.to_string();
     }
 
-    if let Some(bin) = env::var("ISPY_PYTHON_BIN")
+    if let Some(bin) = env::var("RIFF_PYTHON_BIN")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -109,7 +109,7 @@ pub(crate) fn resolve_parakeet_model(explicit: Option<&str>) -> String {
         return model.to_string();
     }
 
-    if let Some(model) = env::var("ISPY_PARAKEET_MODEL")
+    if let Some(model) = env::var("RIFF_PARAKEET_MODEL")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -125,7 +125,7 @@ pub(crate) fn resolve_parakeet_script(explicit: Option<&Path>) -> Option<PathBuf
         return Some(path.to_path_buf());
     }
 
-    if let Some(path) = env::var("ISPY_PARAKEET_SCRIPT")
+    if let Some(path) = env::var("RIFF_PARAKEET_SCRIPT")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -142,7 +142,7 @@ pub(crate) fn default_parakeet_script() -> Option<PathBuf> {
 }
 
 pub(crate) fn parakeet_server_enabled() -> bool {
-    env::var("ISPY_PARAKEET_SERVER")
+    env::var("RIFF_PARAKEET_SERVER")
         .map(|v| {
             !matches!(
                 v.to_ascii_lowercase().as_str(),
@@ -153,11 +153,11 @@ pub(crate) fn parakeet_server_enabled() -> bool {
 }
 
 fn parakeet_server_base_url() -> String {
-    env::var("ISPY_PARAKEET_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8765".to_string())
+    env::var("RIFF_PARAKEET_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8765".to_string())
 }
 
 fn parakeet_server_wait_ready_timeout_sec() -> u64 {
-    env::var("ISPY_PARAKEET_SERVER_WAIT_READY_SEC")
+    env::var("RIFF_PARAKEET_SERVER_WAIT_READY_SEC")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
@@ -320,7 +320,7 @@ pub(crate) fn ensure_parakeet_server(
 }
 
 fn web_server_enabled() -> bool {
-    env::var("ISPY_WEB_SERVER")
+    env::var("RIFF_WEB_SERVER")
         .map(|v| {
             !matches!(
                 v.to_ascii_lowercase().as_str(),
@@ -331,22 +331,22 @@ fn web_server_enabled() -> bool {
 }
 
 pub(crate) fn web_server_base_url() -> String {
-    env::var("ISPY_WEB_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8766".to_string())
+    env::var("RIFF_WEB_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8766".to_string())
 }
 
 fn web_server_idle_timeout_sec() -> u64 {
-    env::var("ISPY_WEB_SERVER_IDLE_TIMEOUT_SEC")
+    env::var("RIFF_WEB_SERVER_IDLE_TIMEOUT_SEC")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(1800)
 }
 
 fn default_web_server_script() -> Option<PathBuf> {
-    first_existing_relative(&["scripts/ispy_web_server.py"])
+    first_existing_relative(&["scripts/riff_web_server.py"])
 }
 
 pub(crate) fn default_sound_picker_script() -> Option<PathBuf> {
-    first_existing_relative(&["scripts/pick_ispy_sounds.sh"])
+    first_existing_relative(&["scripts/pick_riff_sounds.sh"])
 }
 
 fn web_server_health_url(base: &str) -> String {
@@ -451,8 +451,7 @@ fn spawn_web_server(python_bin: &str, script_path: &Path, cli: &Cli) -> Result<(
         .stderr(Stdio::from(log_file_err));
 
     if let Ok(exe) = env::current_exe() {
-        cmd.env("ISPY_RIFF_BIN", &exe);
-        cmd.env("ISPY_DICTATE_BIN", &exe);
+        cmd.env("RIFF_BIN", &exe);
     }
 
     let child = cmd
@@ -474,7 +473,7 @@ pub(crate) fn ensure_web_server(cli: &Cli, wait_ready: bool) -> bool {
     }
 
     let python_bin = resolve_python_bin(None);
-    let Some(script_path) = env::var("ISPY_WEB_SERVER_SCRIPT")
+    let Some(script_path) = env::var("RIFF_WEB_SERVER_SCRIPT")
         .ok()
         .map(PathBuf::from)
         .or_else(default_web_server_script)
@@ -647,7 +646,7 @@ pub(crate) fn run_transcription(
     let cmd_template = stop_args
         .transcribe_cmd
         .clone()
-        .or_else(|| env::var("ISPY_TRANSCRIBE_CMD").ok())
+        .or_else(|| env::var("RIFF_TRANSCRIBE_CMD").ok())
         .map(|v| v.trim().to_string())
         .filter(|s| !s.is_empty());
 
@@ -724,7 +723,7 @@ pub(crate) fn run_transcription(
             attach_perf(
                 json!({
                     "status": "skipped",
-                    "reason": "No transcription configured. Set --parakeet-script or ISPY_PARAKEET_SCRIPT, or use --transcribe-cmd."
+                    "reason": "No transcription configured. Set --parakeet-script or RIFF_PARAKEET_SCRIPT, or use --transcribe-cmd."
                 }),
                 perf,
                 perf_total,

@@ -22,14 +22,14 @@ KEEP_STAGING=0
 
 usage() {
   cat <<EOF
-Create a distributable ispy artifact tarball.
+Create a distributable riff artifact tarball.
 
 Usage:
   $(basename "$0") [options]
 
 Options:
   --output-dir <path>         Output directory (default: $ROOT_DIR/dist)
-  --name <artifact-name>      Artifact base name (default: ispy-<os>-<arch>-<short-sha>-<utcstamp>)
+  --name <artifact-name>      Artifact base name (default: riff-<os>-<arch>-<short-sha>-<utcstamp>)
   --skip-rust-build           Skip 'cargo build --release'
   --skip-runtime-build        Reuse existing runtime/python if present
   --python-version <ver>      Python version for runtime builder (default: 3.12)
@@ -96,11 +96,11 @@ ARCH="$(uname -m | tr '[:upper:]' '[:lower:]')"
 SHORT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo "nogit")"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 if [[ -z "$ARTIFACT_NAME" ]]; then
-  ARTIFACT_NAME="ispy-${OS}-${ARCH}-${SHORT_SHA}-${STAMP}"
+  ARTIFACT_NAME="riff-${OS}-${ARCH}-${SHORT_SHA}-${STAMP}"
 fi
 
 if [[ "$SKIP_RUST_BUILD" -eq 0 ]]; then
-  echo "[ispy] Building Rust release binary..."
+  echo "[riff] Building Rust release binary..."
   (cd "$ROOT_DIR" && cargo build --release)
 fi
 
@@ -116,7 +116,7 @@ if [[ "$SKIP_RUNTIME_BUILD" -eq 0 ]]; then
   if [[ "$ALLOW_NONRELOCATABLE" -eq 1 ]]; then
     RUNTIME_CMD+=(--allow-nonrelocatable)
   fi
-  echo "[ispy] Ensuring bundled runtime..."
+  echo "[riff] Ensuring bundled runtime..."
   "${RUNTIME_CMD[@]}"
 fi
 
@@ -125,7 +125,7 @@ REQUIRED_FILES=(
   "$ROOT_DIR/README.md"
   "$ROOT_DIR/target/release/riff"
   "$ROOT_DIR/scripts/parakeet_transcribe.py"
-  "$ROOT_DIR/scripts/ispy_web_server.py"
+  "$ROOT_DIR/scripts/riff_web_server.py"
   "$ROOT_DIR/runtime/python/bin/python"
 )
 
@@ -143,7 +143,7 @@ if [[ ! -x "$ROOT_DIR/riff" || ! -x "$ROOT_DIR/target/release/riff" ]]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
-STAGING_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/ispy-dist.XXXXXX")"
+STAGING_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/riff-dist.XXXXXX")"
 STAGING_DIR="$STAGING_PARENT/$ARTIFACT_NAME"
 mkdir -p "$STAGING_DIR/target/release" "$STAGING_DIR/runtime"
 
@@ -162,18 +162,18 @@ python_runtime=$("$ROOT_DIR/runtime/python/bin/python" -V 2>&1)
 EOF
 
 ARTIFACT_PATH="$OUTPUT_DIR/$ARTIFACT_NAME.tar.gz"
-echo "[ispy] Writing artifact: $ARTIFACT_PATH"
+echo "[riff] Writing artifact: $ARTIFACT_PATH"
 tar -C "$STAGING_PARENT" -czf "$ARTIFACT_PATH" "$ARTIFACT_NAME"
 
 if command -v shasum >/dev/null 2>&1; then
   shasum -a 256 "$ARTIFACT_PATH" > "$ARTIFACT_PATH.sha256"
-  echo "[ispy] Wrote checksum: $ARTIFACT_PATH.sha256"
+  echo "[riff] Wrote checksum: $ARTIFACT_PATH.sha256"
 fi
 
 if [[ "$KEEP_STAGING" -eq 1 ]]; then
-  echo "[ispy] Kept staging dir: $STAGING_PARENT"
+  echo "[riff] Kept staging dir: $STAGING_PARENT"
 else
   rm -rf "$STAGING_PARENT"
 fi
 
-echo "[ispy] Artifact ready: $ARTIFACT_PATH"
+echo "[riff] Artifact ready: $ARTIFACT_PATH"
