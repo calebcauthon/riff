@@ -24,7 +24,7 @@ mod transcription;
 use crate::cli::{Cli, Commands, HtmlArgs, ScreenshotUseArgs, WatchClipboardArgs};
 use crate::error::{app_error, AppError};
 use crate::history::{
-    cmd_copy, cmd_list, cmd_show, resolve_recent_session_dir, resolve_session_dir_by_id,
+    cmd_copy, cmd_list, cmd_send, cmd_show, resolve_recent_session_dir, resolve_session_dir_by_id,
 };
 use crate::models::{SessionState, ShotMeta};
 use crate::paths::{
@@ -764,10 +764,7 @@ pub(crate) fn write_pid_file(path: &Path, pid: i32) {
 fn load_active_state() -> Result<SessionState, AppError> {
     let path = active_state_file();
     if !path.exists() {
-        return Err(app_error(
-            4,
-            "No active session. Run 'riff start' first.",
-        ));
+        return Err(app_error(4, "No active session. Run 'riff start' first."));
     }
     read_json(&path)
 }
@@ -1519,6 +1516,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Status => cmd_status(cli),
         Commands::List(args) => cmd_list(cli, args),
         Commands::Copy(args) => cmd_copy(cli, args),
+        Commands::Send(args) => cmd_send(cli, args),
         Commands::Show(args) => cmd_show(cli, args),
         Commands::Html(args) => cmd_html(cli, args),
         Commands::ScreenshotUse(args) => cmd_screenshot_use(cli, args),

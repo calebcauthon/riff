@@ -81,6 +81,19 @@ exit 0
     );
 
     write_executable(
+        &dir.join("pbcopy"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${RIFF_TEST_PBCOPY_OUT:-}" ]]; then
+  cat >"$RIFF_TEST_PBCOPY_OUT"
+else
+  cat >/dev/null
+fi
+exit 0
+"#,
+    );
+
+    write_executable(
         &dir.join("ps"),
         r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -149,6 +162,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         ("list", "List recent sessions"),
         ("show", "Show note markdown for a session id"),
         ("copy", "Print transcript for a recent session index"),
+        ("send", "Copy transcript and paste into focused app"),
         ("html", "Open HTML report for a session id"),
         (
             "screenshot-use",
@@ -180,6 +194,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         "list",
         "show",
         "copy",
+        "send",
         "html",
         "screenshot-use",
         "sounds",
@@ -273,6 +288,55 @@ fn copy_prints_transcript_from_most_recent_session() {
         .success()
         .stdout(predicates::str::contains("new words here"))
         .stdout(predicates::str::contains("older words").not());
+}
+
+#[test]
+fn send_fails_when_transcript_not_available() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    make_session(
+        td.path(),
+        "20260413-013012",
+        "# Session\n\nNo transcript here\n",
+    );
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .arg("send")
+        .assert()
+        .failure()
+        .code(8)
+        .stderr(predicates::str::contains("No transcript found for session"));
+}
+
+#[test]
+fn send_copies_and_pastes_transcript_from_most_recent_session() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    make_session(
+        td.path(),
+        "20260413-013011",
+        "# Session\n\n## Transcript\nolder words\n",
+    );
+    make_session(
+        td.path(),
+        "20260413-013012",
+        "# Session\n\n## Transcript\nnew words here\n",
+    );
+
+    let pbcopy_out = td.path().join("pbcopy.out");
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_TEST_PBCOPY_OUT", &pbcopy_out)
+        .arg("send")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Sent transcript from session 20260413-013012 to focused app.",
+        ));
+
+    let copied = fs::read_to_string(&pbcopy_out).expect("pbcopy output should exist");
+    assert_eq!(copied, "new words here");
 }
 
 #[test]

@@ -1,13 +1,17 @@
-use crate::cli::{Cli, CopyArgs, ListArgs, ShowArgs};
+use crate::cli::{Cli, CopyArgs, ListArgs, SendArgs, ShowArgs};
 use crate::error::{app_error, AppError};
 use crate::models::SessionListRow;
 use crate::paths::{ensure_dirs, sessions_dir};
-use crate::{emit_json, get_audio_duration_sec, print_out, SUPPORTED_IMAGE_EXTS};
+use crate::{command_exists, emit_json, get_audio_duration_sec, print_out, SUPPORTED_IMAGE_EXTS};
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, Timelike, Utc};
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 pub(crate) fn read_jsonl_values(path: &Path) -> Vec<Value> {
     let Ok(text) = fs::read_to_string(path) else {
@@ -450,7 +454,15 @@ pub(crate) fn cmd_copy(_cli: &Cli, args: &CopyArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
 
     let requested_rank = args.n.unwrap_or(1);
-    let session_dir = resolve_recent_session_dir(requested_rank)?;
+    let (_, transcript) = load_recent_session_transcript(requested_rank)?;
+
+    // Intentionally raw stdout only, so this can be piped/copied easily.
+    println!("{transcript}");
+    Ok(0)
+}
+
+fn load_recent_session_transcript(rank: usize) -> Result<(PathBuf, String), AppError> {
+    let session_dir = resolve_recent_session_dir(rank)?;
     let note_path = session_dir.join("note.md");
 
     let transcript = if note_path.exists() {
@@ -477,15 +489,135 @@ pub(crate) fn cmd_copy(_cli: &Cli, args: &CopyArgs) -> Result<i32, AppError> {
         transcript
     };
 
-    if transcript.trim().is_empty() {
+    let transcript = transcript.trim().to_string();
+    if transcript.is_empty() {
         return Err(app_error(
             8,
             format!("No transcript found for session: {}", session_dir.display()),
         ));
     }
 
-    // Intentionally raw stdout only, so this can be piped/copied easily.
-    println!("{}", transcript.trim());
+    Ok((session_dir, transcript))
+}
+
+fn copy_text_to_pbcopy(text: &str) -> Result<(), AppError> {
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| app_error(1, format!("Failed to run pbcopy: {e}")))?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| app_error(1, "Failed to open pbcopy stdin"))?;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| app_error(1, format!("Failed writing transcript to pbcopy: {e}")))?;
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| app_error(1, format!("Failed waiting for pbcopy: {e}")))?;
+    if !status.success() {
+        return Err(app_error(
+            1,
+            format!("pbcopy exited with status {:?}", status.code()),
+        ));
+    }
+
+    Ok(())
+}
+
+fn paste_clipboard_to_focused_app() -> Result<(), AppError> {
+    let status = Command::new("osascript")
+        .args([
+            "-e",
+            "tell application \"System Events\" to keystroke \"v\" using command down",
+        ])
+        .status()
+        .map_err(|e| app_error(1, format!("Failed to run osascript for paste: {e}")))?;
+
+    if !status.success() {
+        return Err(app_error(
+            1,
+            format!("osascript paste failed with status {:?}", status.code()),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn cmd_send(cli: &Cli, args: &SendArgs) -> Result<i32, AppError> {
+    ensure_dirs()?;
+
+    let requested_rank = args.n.unwrap_or(1);
+    let (session_dir, transcript) = load_recent_session_transcript(requested_rank)?;
+    let session_id = session_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    if cli.dry_run {
+        print_out(
+            cli,
+            format!(
+                "[dry-run] Would send transcript from session {} ({} chars)",
+                session_id,
+                transcript.chars().count()
+            ),
+        );
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "send",
+                "session_id": session_id,
+                "rank": requested_rank,
+                "chars": transcript.chars().count(),
+                "dry_run": true
+            }),
+        );
+        return Ok(0);
+    }
+
+    if !command_exists("pbcopy") {
+        return Err(app_error(
+            7,
+            "pbcopy is unavailable; cannot send transcript",
+        ));
+    }
+    if !command_exists("osascript") {
+        return Err(app_error(
+            7,
+            "osascript is unavailable; cannot send transcript",
+        ));
+    }
+
+    copy_text_to_pbcopy(&transcript)?;
+    // Slight delay improves reliability before issuing Cmd+V to focused app.
+    thread::sleep(Duration::from_millis(80));
+    paste_clipboard_to_focused_app()?;
+
+    print_out(
+        cli,
+        format!(
+            "Sent transcript from session {} to focused app.",
+            session_id
+        ),
+    );
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": "send",
+            "session_id": session_id,
+            "rank": requested_rank,
+            "chars": transcript.chars().count(),
+            "dry_run": false
+        }),
+    );
+
     Ok(0)
 }
 

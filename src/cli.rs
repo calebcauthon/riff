@@ -38,6 +38,8 @@ pub enum Commands {
     Show(ShowArgs),
     /// Print transcript for a recent session index
     Copy(CopyArgs),
+    /// Copy transcript and paste into focused app
+    Send(SendArgs),
     /// Open HTML report for a session id
     Html(HtmlArgs),
     /// Set which derived image is used at the transcript screenshot path
@@ -86,6 +88,12 @@ pub struct ListArgs {
 #[derive(Args, Debug)]
 pub struct CopyArgs {
     /// Which recent session to output (1 = most recent)
+    pub n: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub struct SendArgs {
+    /// Which recent session to send (1 = most recent)
     pub n: Option<usize>,
 }
 

@@ -42,7 +42,7 @@ Performance/observability logs:
 /tmp/riff/perf.jsonl                # structured start/stop phase timings
 /tmp/riff/parakeet-server.log       # warm Parakeet server logs
 /tmp/riff/web-server.log            # local HTML web server logs
-/tmp/riff/toggle-hotkey.log         # hotkey toggle/copy/paste lifecycle
+/tmp/riff/toggle-hotkey.log         # hotkey toggle/stop/send lifecycle
 ```
 
 ---
@@ -217,6 +217,9 @@ This avoids delayed Desktop screenshot writes and floating thumbnail timing issu
 riff stop
 ```
 
+Stops recording and processes the session (transcription, note/html generation, screenshots, etc.).
+It does **not** send output to the focused app.
+
 Flags:
 - `--python-bin <path>` override python interpreter
 - `--parakeet-script <path>` override script path
@@ -276,6 +279,15 @@ Outputs only the transcript section to stdout (pipe to pbcopy, files, etc.):
 ```bash
 riff copy | pbcopy
 ```
+
+### Send transcript to focused app
+
+```bash
+riff send        # most recent (same as send 1)
+riff send 2      # 2nd most recent
+```
+
+Copies the transcript to clipboard and immediately pastes it into the currently focused app.
 
 ### Show full session markdown to stdout
 
@@ -391,7 +403,7 @@ Current skhd setup on this machine:
 
 Toggle behavior:
 - if inactive: starts dictation
-- if active: stops dictation, copies transcript to clipboard, and pastes into focused app
+- if active: stops dictation, then runs `riff send` to paste transcript into focused app
 
 Use Raycast, Alfred, Hammerspoon, Keyboard Maestro, etc. if you prefer a different launcher.
 
