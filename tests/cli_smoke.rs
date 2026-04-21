@@ -159,6 +159,10 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         ("start", "Start dictation session"),
         ("shot", "Capture screenshot into active session"),
         ("stop", "Stop dictation and transcribe"),
+        (
+            "toggle",
+            "Toggle dictation session (start if idle, stop if active)",
+        ),
         ("list", "List recent sessions"),
         ("show", "Show note markdown for a session id"),
         ("copy", "Print transcript for a recent session index"),
@@ -191,6 +195,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         "start",
         "shot",
         "stop",
+        "toggle",
         "list",
         "show",
         "copy",
@@ -209,6 +214,46 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         assert!(idx >= last, "command out of order: {name}\n{stdout}");
         last = idx;
     }
+}
+
+#[test]
+fn toggle_starts_when_idle_and_stops_when_active() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "toggle",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    cmd_with_root(td.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Active session:"));
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "toggle",
+            "--transcribe-cmd",
+            "printf 'toggle test\\n' > {out_txt}",
+        ])
+        .assert()
+        .success();
+
+    cmd_with_root(td.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No active session."));
 }
 
 #[test]

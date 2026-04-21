@@ -22,7 +22,9 @@ mod session_commands;
 mod shot_modules;
 mod transcription;
 
-use crate::cli::{Cli, Commands, HtmlArgs, ScreenshotUseArgs, WatchClipboardArgs};
+use crate::cli::{
+    Cli, Commands, HtmlArgs, ScreenshotUseArgs, StartArgs, StopArgs, ToggleArgs, WatchClipboardArgs,
+};
 use crate::error::{app_error, AppError};
 use crate::history::{
     cmd_copy, cmd_list, cmd_send, cmd_show, resolve_recent_session_dir, resolve_session_dir_by_id,
@@ -1302,11 +1304,33 @@ fn cmd_screenshot_use(cli: &Cli, args: &ScreenshotUseArgs) -> Result<i32, AppErr
     Ok(0)
 }
 
+fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
+    ensure_dirs()?;
+
+    let active = active_state_file().exists();
+    if active {
+        let stop_args = StopArgs {
+            transcribe_cmd: args.transcribe_cmd.clone(),
+            python_bin: args.python_bin.clone(),
+            parakeet_script: args.parakeet_script.clone(),
+            parakeet_model: args.parakeet_model.clone(),
+        };
+        cmd_stop(cli, &stop_args)
+    } else {
+        let start_args = StartArgs {
+            screenshot_dir: args.screenshot_dir.clone(),
+            audio_device: args.audio_device.clone(),
+        };
+        cmd_start(cli, &start_args)
+    }
+}
+
 fn run(cli: &Cli) -> Result<i32, AppError> {
     match &cli.command {
         Commands::Start(args) => cmd_start(cli, args),
         Commands::Shot => cmd_shot(cli),
         Commands::Stop(args) => cmd_stop(cli, args),
+        Commands::Toggle(args) => cmd_toggle(cli, args),
         Commands::Sounds => cmd_sounds(cli),
         Commands::Status => cmd_status(cli),
         Commands::List(args) => cmd_list(cli, args),

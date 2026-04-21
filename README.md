@@ -4,9 +4,9 @@ Minimal local dictation CLI for macOS.
 
 Workflow:
 
-1. `riff start`
+1. `riff start` (or `riff toggle` when idle)
 2. Take screenshots with `riff shot` (recommended) or normal `Cmd+Shift+4`
-3. `riff stop`
+3. `riff stop` (or `riff toggle` when active)
 
 On `stop`, riff:
 - stops audio recording
@@ -232,6 +232,18 @@ Flags:
 - `{out_txt}`
 - `{session_dir}`
 
+### Toggle (start if idle, stop if active)
+
+```bash
+riff toggle
+```
+
+Useful when you want one command instead of separate `start`/`stop`.
+
+Flags:
+- Start-path flags (used when idle): `--screenshot-dir`, `--audio-device`
+- Stop-path flags (used when active): `--python-bin`, `--parakeet-script`, `--parakeet-model`, `--transcribe-cmd`
+
 ### Sounds (interactive picker)
 
 ```bash
@@ -395,15 +407,35 @@ riff sounds
 
 ## Hotkeys
 
+Script-free option:
+
+```text
+alt - 0x2C : /Users/caleb/Code/riff/riff toggle
+```
+
 Current skhd setup on this machine:
-- `alt + /` (keycode `alt - 0x2C`) → toggle start/stop via `scripts/toggle_riff_and_paste.sh`
+- `alt + /` (keycode `alt - 0x2C`) → toggle start/stop via `scripts/toggle_riff.sh`
 - `cmd + alt + d` → fallback toggle
 - `cmd + s` → hard fallback toggle
 - `cmd + alt + 9` → `riff shot`
 
+Suggested skhd toggle keybind setup:
+
+```text
+# riff toggle: start if idle, stop if active
+alt - 0x2C : /Users/caleb/Code/riff/scripts/toggle_riff.sh
+
+# riff toggle + send: stop, then send transcript to focused app
+alt - 0x27 : /Users/caleb/Code/riff/scripts/toggle_riff_and_paste.sh
+
+# riff toggle + open html: stop, then open latest note.html
+alt - 0x29 : /Users/caleb/Code/riff/scripts/toggle_riff_and_open_html.sh
+```
+
 Toggle behavior:
-- if inactive: starts dictation
-- if active: stops dictation, then runs `riff send` to paste transcript into focused app
+- `scripts/toggle_riff.sh`: if inactive start; if active stop
+- `scripts/toggle_riff_and_paste.sh`: if inactive start; if active stop then send
+- `scripts/toggle_riff_and_open_html.sh`: if inactive start; if active stop then `open` latest `note.html`
 
 Use Raycast, Alfred, Hammerspoon, Keyboard Maestro, etc. if you prefer a different launcher.
 

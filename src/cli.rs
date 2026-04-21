@@ -31,6 +31,8 @@ pub enum Commands {
     Shot,
     /// Stop dictation and transcribe
     Stop(StopArgs),
+    /// Toggle dictation session (start if idle, stop if active)
+    Toggle(ToggleArgs),
 
     /// List recent sessions
     List(ListArgs),
@@ -75,6 +77,33 @@ pub struct StopArgs {
     #[arg(long)]
     pub parakeet_script: Option<PathBuf>,
 
+    #[arg(long)]
+    pub parakeet_model: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ToggleArgs {
+    /// Used when idle (start path): override screenshot source dir
+    #[arg(long)]
+    pub screenshot_dir: Option<PathBuf>,
+
+    /// Used when idle (start path): ffmpeg avfoundation selector
+    #[arg(long, default_value = "auto")]
+    pub audio_device: String,
+
+    /// Used when active (stop path): custom transcription command template
+    #[arg(long)]
+    pub transcribe_cmd: Option<String>,
+
+    /// Used when active (stop path): override python interpreter
+    #[arg(long)]
+    pub python_bin: Option<String>,
+
+    /// Used when active (stop path): override parakeet script path
+    #[arg(long)]
+    pub parakeet_script: Option<PathBuf>,
+
+    /// Used when active (stop path): override parakeet model name
     #[arg(long)]
     pub parakeet_model: Option<String>,
 }
