@@ -663,6 +663,67 @@ fn load_recent_session_transcript(rank: usize) -> Result<(PathBuf, String), AppE
     Ok((session_dir, transcript))
 }
 
+fn is_screenshot_label(label: &str) -> bool {
+    let t = label.trim();
+    if let Some(rest) = t.strip_prefix("Screenshot ") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    if let Some((prefix, suffix)) = t.rsplit_once(" Screenshot ") {
+        return !prefix.trim().is_empty()
+            && !suffix.is_empty()
+            && suffix.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+fn parse_screenshot_source_line(line: &str) -> Option<(String, String)> {
+    let (label, path) = line.split_once(": ")?;
+    if !is_screenshot_label(label) {
+        return None;
+    }
+    let path = path.trim();
+    if !(path.starts_with('/') || path.starts_with("http://") || path.starts_with("https://")) {
+        return None;
+    }
+    Some((label.to_string(), path.to_string()))
+}
+
+fn build_send_chunks(transcript: &str) -> Vec<String> {
+    if transcript.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::<String>::new();
+    let lines_with_newline = transcript.split_inclusive('\n').collect::<Vec<_>>();
+    let mut idx = 0usize;
+
+    while idx < lines_with_newline.len() {
+        let line_with_nl = lines_with_newline[idx];
+        let line = line_with_nl.strip_suffix('\n').unwrap_or(line_with_nl);
+        let Some((label, path)) = parse_screenshot_source_line(line) else {
+            break;
+        };
+
+        chunks.push(format!("{label}: "));
+        if line_with_nl.ends_with('\n') {
+            chunks.push(format!("{path}\n"));
+        } else {
+            chunks.push(path);
+        }
+        idx += 1;
+    }
+
+    let rest = lines_with_newline[idx..].join("");
+    if !rest.is_empty() {
+        chunks.push(rest);
+    }
+
+    if chunks.is_empty() {
+        chunks.push(transcript.to_string());
+    }
+    chunks
+}
+
 fn copy_text_to_pbcopy(text: &str) -> Result<(), AppError> {
     let mut child = Command::new("pbcopy")
         .stdin(Stdio::piped())
@@ -715,6 +776,7 @@ pub(crate) fn cmd_send(cli: &Cli, args: &SendArgs) -> Result<i32, AppError> {
 
     let requested_rank = args.n.unwrap_or(1);
     let (session_dir, transcript) = load_recent_session_transcript(requested_rank)?;
+    let chunks = build_send_chunks(&transcript);
     let session_id = session_dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -725,9 +787,10 @@ pub(crate) fn cmd_send(cli: &Cli, args: &SendArgs) -> Result<i32, AppError> {
         print_out(
             cli,
             format!(
-                "[dry-run] Would send transcript from session {} ({} chars)",
+                "[dry-run] Would send transcript from session {} ({} chars, {} chunk(s))",
                 session_id,
-                transcript.chars().count()
+                transcript.chars().count(),
+                chunks.len()
             ),
         );
         emit_json(
@@ -738,6 +801,7 @@ pub(crate) fn cmd_send(cli: &Cli, args: &SendArgs) -> Result<i32, AppError> {
                 "session_id": session_id,
                 "rank": requested_rank,
                 "chars": transcript.chars().count(),
+                "chunks": chunks.len(),
                 "dry_run": true
             }),
         );
@@ -757,10 +821,15 @@ pub(crate) fn cmd_send(cli: &Cli, args: &SendArgs) -> Result<i32, AppError> {
         ));
     }
 
-    copy_text_to_pbcopy(&transcript)?;
-    // Slight delay improves reliability before issuing Cmd+V to focused app.
-    thread::sleep(Duration::from_millis(80));
-    paste_clipboard_to_focused_app()?;
+    for (idx, chunk) in chunks.iter().enumerate() {
+        copy_text_to_pbcopy(chunk)?;
+        // Small delay improves reliability before issuing Cmd+V to focused app.
+        thread::sleep(Duration::from_millis(55));
+        paste_clipboard_to_focused_app()?;
+        if idx + 1 < chunks.len() {
+            thread::sleep(Duration::from_millis(45));
+        }
+    }
 
     print_out(
         cli,
@@ -777,6 +846,7 @@ pub(crate) fn cmd_send(cli: &Cli, args: &SendArgs) -> Result<i32, AppError> {
             "session_id": session_id,
             "rank": requested_rank,
             "chars": transcript.chars().count(),
+            "chunks": chunks.len(),
             "dry_run": false
         }),
     );
@@ -803,4 +873,43 @@ pub(crate) fn cmd_show(_cli: &Cli, args: &ShowArgs) -> Result<i32, AppError> {
     // Intentionally raw stdout only, so this can be piped or viewed directly.
     print!("{}", markdown);
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_send_chunks;
+
+    #[test]
+    fn send_chunks_split_screenshot_source_lines() {
+        let input = [
+            "ghostty Screenshot 1: /tmp/riff/sessions/20260420-183914/screenshots/shot-001.png",
+            "Terminal Screenshot 2: /tmp/riff/sessions/20260420-183914/screenshots/shot-002.png",
+            "",
+            "Testing [ghostty Screenshot 1] and [Terminal Screenshot 2].",
+        ]
+        .join("\n");
+
+        let chunks = build_send_chunks(&input);
+        assert_eq!(chunks[0], "ghostty Screenshot 1: ");
+        assert_eq!(
+            chunks[1],
+            "/tmp/riff/sessions/20260420-183914/screenshots/shot-001.png\n"
+        );
+        assert_eq!(chunks[2], "Terminal Screenshot 2: ");
+        assert_eq!(
+            chunks[3],
+            "/tmp/riff/sessions/20260420-183914/screenshots/shot-002.png\n"
+        );
+        assert_eq!(
+            chunks[4],
+            "\nTesting [ghostty Screenshot 1] and [Terminal Screenshot 2]."
+        );
+    }
+
+    #[test]
+    fn send_chunks_single_chunk_when_no_source_lines() {
+        let input = "just text without source preamble";
+        let chunks = build_send_chunks(input);
+        assert_eq!(chunks, vec![input.to_string()]);
+    }
 }
