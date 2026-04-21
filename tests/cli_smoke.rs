@@ -459,6 +459,17 @@ fn status_reports_no_active_session_when_idle() {
 }
 
 #[test]
+fn stop_reports_no_active_session_when_idle() {
+    let td = tempdir().expect("tempdir");
+
+    cmd_with_root(td.path())
+        .arg("stop")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No active session."));
+}
+
+#[test]
 fn status_reports_active_session_after_start() {
     let td = tempdir().expect("tempdir");
     let fake_bin = td.path().join("fake-bin");

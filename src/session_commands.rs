@@ -428,6 +428,20 @@ pub(crate) fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
 
 pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
+    if !active_state_file().exists() {
+        print_out(cli, "No active session.");
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "stop",
+                "active": false,
+                "message": "No active session."
+            }),
+        );
+        return Ok(0);
+    }
+
     let perf_total = Instant::now();
     let state = load_active_state()?;
 
