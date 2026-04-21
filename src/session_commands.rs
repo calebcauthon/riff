@@ -10,16 +10,16 @@ use crate::reporting::{
     inject_annotation_markers, load_shots_for_session, max_clipboard_id, max_shot_id,
     shots_from_events,
 };
+use crate::screenshots::{detect_screenshot_dir, file_mtime_epoch, move_session_screenshots};
 use crate::transcription::{
     ensure_parakeet_server, ensure_web_server, parakeet_server_enabled, resolve_parakeet_model,
     resolve_parakeet_script, resolve_python_bin, run_transcription,
 };
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
-    capture_process_stats, clear_active_state, command_exists, detect_screenshot_dir, emit_json,
-    file_mtime_epoch, get_audio_duration_sec, load_active_state, move_session_screenshots, now_iso,
-    play_event_sound, print_out, print_verbose, process_is_alive, read_json,
-    recorder_error_looks_like_invalid_audio_device, resolve_audio_device,
+    capture_process_stats, clear_active_state, command_exists, emit_json, get_audio_duration_sec,
+    load_active_state, now_iso, play_event_sound, print_out, print_verbose, process_is_alive,
+    read_json, recorder_error_looks_like_invalid_audio_device, resolve_audio_device,
     resolve_audio_device_uncached, round3, save_active_state, session_stamp,
     spawn_clipboard_watcher, spawn_recorder, stop_clipboard_watcher, stop_recorder, unix_now,
     write_json,
