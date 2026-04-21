@@ -1783,8 +1783,19 @@ mod tests {
     use super::*;
     use crate::models::SessionState;
     use serde_json::json;
+    use std::fs;
+    use tempfile::tempdir;
 
-    fn sample_html() -> String {
+    fn sample_html() -> (String, String) {
+        let td = tempdir().expect("tempdir");
+        let session_dir = td.path().join("20260413-151333");
+        let shots_dir = session_dir.join("screenshots");
+        fs::create_dir_all(&shots_dir).expect("create screenshots dir");
+        let shot_path = shots_dir.join("shot-001.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]))
+            .save(&shot_path)
+            .expect("write sample screenshot");
+
         let shots = vec![ShotMeta {
             shot_id: 1,
             dest_rel_path: "screenshots/shot-001.png".to_string(),
@@ -1804,7 +1815,7 @@ mod tests {
         }];
         let clips = vec![];
 
-        build_html_note(
+        let html = build_html_note(
             "20260413-151333",
             "2026-04-13T15:13:33Z",
             "2026-04-13T15:14:33Z",
@@ -1817,24 +1828,27 @@ mod tests {
             "hello world",
             &shots,
             &clips,
-            Path::new("/tmp/riff/sessions/20260413-151333"),
+            &session_dir,
             "../index.html",
-        )
+        );
+
+        (html, session_dir.display().to_string())
     }
 
     #[test]
     fn html_has_annotate_button_on_screenshot_cards() {
-        let html = sample_html();
+        let (html, session_dir) = sample_html();
         assert!(html.contains("annotate-image"));
         assert!(html.contains("data-url=\"screenshots/derived/shot-001__"));
-        assert!(html.contains(
-            "data-path=\"/tmp/riff/sessions/20260413-151333/screenshots/derived/shot-001__"
-        ));
+        assert!(html.contains(&format!(
+            "data-path=\"{}/screenshots/derived/shot-001__",
+            session_dir
+        )));
     }
 
     #[test]
     fn save_and_close_writes_back_original_image_path() {
-        let html = sample_html();
+        let (html, _) = sample_html();
         assert!(html.contains("Save and close"));
         assert!(html.contains("await window.__riffSaveExcalidraw();"));
         assert!(html.contains("closeAnnotator();"));
@@ -1844,7 +1858,7 @@ mod tests {
 
     #[test]
     fn html_includes_excalidraw_ui_container_and_loader() {
-        let html = sample_html();
+        let (html, _) = sample_html();
         assert!(html.contains("id=\"annotatorHost\""));
         assert!(html.contains("Loading Excalidraw"));
         assert!(html.contains("window.__riffOpenExcalidraw"));
