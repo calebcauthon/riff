@@ -407,35 +407,29 @@ riff sounds
 
 ## Hotkeys
 
-Script-free option:
-
-```text
-alt - 0x2C : /Users/caleb/Code/riff/riff toggle
-```
-
 Current skhd setup on this machine:
-- `alt + /` (keycode `alt - 0x2C`) → toggle start/stop via `scripts/toggle_riff.sh`
+- `alt + /` (keycode `alt - 0x2C`) → toggle start/stop via `riff toggle`
 - `cmd + alt + d` → fallback toggle
 - `cmd + s` → hard fallback toggle
 - `cmd + alt + 9` → `riff shot`
 
-Suggested skhd toggle keybind setup:
+Suggested skhd keybind setup (native commands + inline env):
 
 ```text
 # riff toggle: start if idle, stop if active
-alt - 0x2C : /Users/caleb/Code/riff/scripts/toggle_riff.sh
+alt - 0x2C : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2 $HOME/Code/riff/target/release/riff --quiet toggle >> /tmp/riff/toggle-hotkey.log 2>&1
 
 # riff toggle + send: stop, then send transcript to focused app
-alt - 0x27 : /Users/caleb/Code/riff/scripts/toggle_riff_and_paste.sh
+alt - 0x27 : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2 $HOME/Code/riff/target/release/riff --quiet toggle && env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2 $HOME/Code/riff/target/release/riff --quiet send >> /tmp/riff/toggle-hotkey.log 2>&1
 
 # riff toggle + open html: stop, then open latest note.html
-alt - 0x29 : /Users/caleb/Code/riff/scripts/toggle_riff_and_open_html.sh
+alt - 0x29 : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2 $HOME/Code/riff/target/release/riff --quiet toggle && env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2 $HOME/Code/riff/target/release/riff --quiet html >> /tmp/riff/toggle-hotkey.log 2>&1
 ```
 
 Toggle behavior:
-- `scripts/toggle_riff.sh`: if inactive start; if active stop
-- `scripts/toggle_riff_and_paste.sh`: if inactive start; if active stop then send
-- `scripts/toggle_riff_and_open_html.sh`: if inactive start; if active stop then `open` latest `note.html`
+- `0x2C`: if inactive start; if active stop
+- `0x27`: if inactive start; if active stop then send
+- `0x29`: if inactive start; if active stop then open HTML
 
 Use Raycast, Alfred, Hammerspoon, Keyboard Maestro, etc. if you prefer a different launcher.
 

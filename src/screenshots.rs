@@ -79,7 +79,7 @@ fn expand_tilde(path: &Path) -> PathBuf {
 fn home_dir() -> PathBuf {
     env::var("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/Users/unknown"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
 }
 
 pub(crate) fn file_mtime_epoch(path: &Path) -> Option<f64> {
