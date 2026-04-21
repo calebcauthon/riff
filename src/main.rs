@@ -27,7 +27,8 @@ use crate::cli::{
 };
 use crate::error::{app_error, AppError};
 use crate::history::{
-    cmd_copy, cmd_list, cmd_send, cmd_show, resolve_recent_session_dir, resolve_session_dir_by_id,
+    cmd_copy, cmd_list, cmd_perf, cmd_send, cmd_show, resolve_recent_session_dir,
+    resolve_session_dir_by_id,
 };
 use crate::models::SessionState;
 use crate::paths::{
@@ -1305,8 +1306,6 @@ fn cmd_screenshot_use(cli: &Cli, args: &ScreenshotUseArgs) -> Result<i32, AppErr
 }
 
 fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
-    ensure_dirs()?;
-
     let active = active_state_file().exists();
     if active {
         let stop_args = StopArgs {
@@ -1333,6 +1332,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Toggle(args) => cmd_toggle(cli, args),
         Commands::Sounds => cmd_sounds(cli),
         Commands::Status => cmd_status(cli),
+        Commands::Perf(args) => cmd_perf(cli, args),
         Commands::List(args) => cmd_list(cli, args),
         Commands::Copy(args) => cmd_copy(cli, args),
         Commands::Send(args) => cmd_send(cli, args),

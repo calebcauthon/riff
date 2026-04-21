@@ -1,7 +1,7 @@
-use crate::cli::{Cli, CopyArgs, ListArgs, SendArgs, ShowArgs};
+use crate::cli::{Cli, CopyArgs, ListArgs, PerfArgs, SendArgs, ShowArgs};
 use crate::error::{app_error, AppError};
 use crate::models::SessionListRow;
-use crate::paths::{ensure_dirs, sessions_dir};
+use crate::paths::{ensure_dirs, perf_log_file, sessions_dir};
 use crate::{command_exists, emit_json, get_audio_duration_sec, print_out, SUPPORTED_IMAGE_EXTS};
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, Timelike, Utc};
 use serde_json::{json, Value};
@@ -318,6 +318,169 @@ fn render_sessions_table(rows: &[SessionListRow]) -> String {
 
     lines.push(sep);
     lines.join("\n")
+}
+
+fn percentile(sorted_values: &[f64], p: f64) -> f64 {
+    if sorted_values.is_empty() {
+        return 0.0;
+    }
+    let clamped = p.clamp(0.0, 1.0);
+    let idx = ((sorted_values.len().saturating_sub(1) as f64) * clamped).round() as usize;
+    sorted_values[idx]
+}
+
+fn compute_total_stats(events: &[Value], action: &str) -> Value {
+    let mut totals = events
+        .iter()
+        .filter(|e| e.get("action").and_then(|v| v.as_str()) == Some(action))
+        .filter_map(|e| e.get("total_ms").and_then(|v| v.as_f64()))
+        .collect::<Vec<_>>();
+    if totals.is_empty() {
+        return json!({
+            "count": 0,
+            "avg_ms": Value::Null,
+            "p50_ms": Value::Null,
+            "p95_ms": Value::Null
+        });
+    }
+    totals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let count = totals.len();
+    let sum = totals.iter().sum::<f64>();
+    let avg = sum / (count as f64);
+    let p50 = percentile(&totals, 0.50);
+    let p95 = percentile(&totals, 0.95);
+    json!({
+        "count": count,
+        "avg_ms": avg,
+        "p50_ms": p50,
+        "p95_ms": p95
+    })
+}
+
+fn dominant_phase(event: &Value) -> Option<(String, f64)> {
+    let phases = event.get("phases")?.as_object()?;
+    let mut best: Option<(String, f64)> = None;
+    for (k, v) in phases {
+        let Some(ms) = v.as_f64() else {
+            continue;
+        };
+        match &best {
+            Some((_, best_ms)) if ms <= *best_ms => {}
+            _ => best = Some((k.clone(), ms)),
+        }
+    }
+    best
+}
+
+pub(crate) fn cmd_perf(cli: &Cli, args: &PerfArgs) -> Result<i32, AppError> {
+    ensure_dirs()?;
+    let requested = args.n.unwrap_or(40).clamp(1, 5000);
+    let events = read_jsonl_values(&perf_log_file());
+    if events.is_empty() {
+        print_out(cli, "No perf records found.");
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "count": 0,
+                "recent": [],
+                "summary": {
+                    "start": {"count": 0},
+                    "stop": {"count": 0}
+                }
+            }),
+        );
+        return Ok(0);
+    }
+
+    let perf_events = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.get("action").and_then(|v| v.as_str()),
+                Some("start") | Some("stop")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut recent = perf_events
+        .iter()
+        .rev()
+        .take(requested)
+        .cloned()
+        .collect::<Vec<_>>();
+    recent.reverse();
+
+    if !cli.quiet {
+        let start_summary = compute_total_stats(&perf_events, "start");
+        let stop_summary = compute_total_stats(&perf_events, "stop");
+        let fmt = |v: Option<f64>| -> String {
+            v.map(|n| format!("{:.1}", n))
+                .unwrap_or_else(|| "-".to_string())
+        };
+        print_out(
+            cli,
+            format!(
+                "start: count={} avg={}ms p50={}ms p95={}ms",
+                start_summary
+                    .get("count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                fmt(start_summary.get("avg_ms").and_then(|v| v.as_f64())),
+                fmt(start_summary.get("p50_ms").and_then(|v| v.as_f64())),
+                fmt(start_summary.get("p95_ms").and_then(|v| v.as_f64())),
+            ),
+        );
+        print_out(
+            cli,
+            format!(
+                "stop:  count={} avg={}ms p50={}ms p95={}ms",
+                stop_summary
+                    .get("count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                fmt(stop_summary.get("avg_ms").and_then(|v| v.as_f64())),
+                fmt(stop_summary.get("p50_ms").and_then(|v| v.as_f64())),
+                fmt(stop_summary.get("p95_ms").and_then(|v| v.as_f64())),
+            ),
+        );
+        print_out(cli, "recent:");
+        for event in &recent {
+            let ts = event.get("ts").and_then(|v| v.as_str()).unwrap_or("-");
+            let action = event.get("action").and_then(|v| v.as_str()).unwrap_or("-");
+            let total = event
+                .get("total_ms")
+                .and_then(|v| v.as_f64())
+                .map(|n| format!("{:.1}", n))
+                .unwrap_or_else(|| "-".to_string());
+            let dominant = dominant_phase(event)
+                .map(|(name, ms)| format!("{}={:.1}ms", name, ms))
+                .unwrap_or_else(|| "-".to_string());
+            print_out(
+                cli,
+                format!(
+                    "  {} {} total={}ms dominant={}",
+                    ts, action, total, dominant
+                ),
+            );
+        }
+    }
+
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "count": perf_events.len(),
+            "recent": recent,
+            "summary": {
+                "start": compute_total_stats(&perf_events, "start"),
+                "stop": compute_total_stats(&perf_events, "stop")
+            }
+        }),
+    );
+
+    Ok(0)
 }
 
 pub(crate) fn collect_recent_session_dirs(limit: usize) -> Result<Vec<PathBuf>, AppError> {

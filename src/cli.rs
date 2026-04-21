@@ -51,6 +51,8 @@ pub enum Commands {
     Sounds,
     /// Show active session status
     Status,
+    /// Show startup/shutdown timing summary from perf log
+    Perf(PerfArgs),
     #[command(hide = true, name = "watch-clipboard")]
     WatchClipboard(WatchClipboardArgs),
     /// Kill background helper servers (web + parakeet)
@@ -136,6 +138,12 @@ pub struct ShowArgs {
 pub struct HtmlArgs {
     /// Session id (for example: 20260413-013011); defaults to most recent when omitted
     pub session_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct PerfArgs {
+    /// Number of recent perf records to inspect
+    pub n: Option<usize>,
 }
 
 #[derive(Args, Debug)]

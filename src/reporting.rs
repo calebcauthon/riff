@@ -10,6 +10,7 @@ use crate::shot_modules::{build_shot_output_variants, ShotOutputVariant};
 use crate::SUPPORTED_IMAGE_EXTS;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1771,7 +1772,12 @@ pub(crate) fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, A
 }
 
 pub(crate) fn generate_sessions_index_html() -> Result<PathBuf, AppError> {
-    let rows = collect_recent_session_rows(5000)?;
+    let limit = env::var("RIFF_SESSIONS_INDEX_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(500)
+        .clamp(1, 5000);
+    let rows = collect_recent_session_rows(limit)?;
     let html = build_sessions_index_html(&rows);
     let html_path = sessions_dir().join("index.html");
     fs::write(&html_path, html)

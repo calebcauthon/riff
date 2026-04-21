@@ -174,6 +174,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         ),
         ("sounds", "Pick start/stop sounds and beep timing"),
         ("status", "Show active session status"),
+        ("perf", "Show startup/shutdown timing summary from perf log"),
         (
             "kill-server",
             "Kill background helper servers (web + parakeet)",
@@ -204,6 +205,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         "screenshot-use",
         "sounds",
         "status",
+        "perf",
         "kill-server",
     ];
     let mut last = 0usize;
@@ -265,6 +267,17 @@ fn list_on_empty_root_reports_no_sessions() {
         .assert()
         .success()
         .stdout(predicates::str::contains("No sessions found."));
+}
+
+#[test]
+fn perf_reports_no_records_when_empty() {
+    let td = tempdir().expect("tempdir");
+
+    cmd_with_root(td.path())
+        .arg("perf")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No perf records found."));
 }
 
 #[test]

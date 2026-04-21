@@ -267,6 +267,15 @@ Picker controls:
 riff status
 ```
 
+### Perf (startup/shutdown timing summary)
+
+```bash
+riff perf        # recent 40 records
+riff perf 100    # recent 100 records
+```
+
+Summarizes `start`/`stop` timings from `/tmp/riff/perf.jsonl` (count, avg, p50, p95) and shows recent entries with dominant phase.
+
 ### List recent sessions
 
 ```bash
@@ -367,6 +376,8 @@ Focus on these fields:
 - start: `phases.spawn_recorder_ms`
 - stop: `phases.transcribe_ms` (usually the biggest)
 - stop: `phases.web_server_ms` (local HTML server startup/health)
+- stop: `phases.generate_index_ms` (sessions index rebuild cost)
+- stop: `phases.write_note_html_ms` (note/html file write cost)
 - stop: `transcription_perf.execution_path` (`parakeet`, `custom_command`, etc.)
 - stop: `transcription_perf.server_ensure_ms` (time spent waiting for Parakeet server readiness)
 - stop: `transcription_perf.python_transcribe_ms` (one-shot fallback cost when server isn’t used)
@@ -376,6 +387,12 @@ If `transcription_perf.server_pid_alive` is `false`, inspect:
 
 ```bash
 tail -n 120 /tmp/riff/parakeet-server.log
+```
+
+Index generation tuning:
+
+```bash
+export RIFF_SESSIONS_INDEX_LIMIT=500   # default 500, range 1..5000
 ```
 
 ---

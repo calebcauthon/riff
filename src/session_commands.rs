@@ -209,6 +209,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     }
 
     let mut prewarm_ms = 0.0;
+    let t_state_watcher = Instant::now();
     // Warm the Parakeet server in the background so stop is faster.
     if parakeet_server_enabled() {
         let t_prewarm = Instant::now();
@@ -219,6 +220,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         }
         prewarm_ms = t_prewarm.elapsed().as_secs_f64() * 1000.0;
     }
+    let save_state_and_clipboard_ms = t_state_watcher.elapsed().as_secs_f64() * 1000.0;
 
     let start_total_ms = perf_total.elapsed().as_secs_f64() * 1000.0;
     append_perf_event(json!({
@@ -230,6 +232,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "detect_screenshot_dir_ms": round3(screenshot_dir_ms),
             "resolve_audio_device_ms": round3(audio_device_ms),
             "spawn_recorder_ms": round3(spawn_recorder_ms),
+            "state_and_clipboard_ms": round3(save_state_and_clipboard_ms),
             "parakeet_prewarm_ms": round3(prewarm_ms)
         },
         "audio_device_retry": audio_device_retry
@@ -438,6 +441,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let mut stop_recorder_ms = 0.0;
     let mut write_ms = 0.0;
     let mut web_server_ms = 0.0;
+    let mut write_note_html_ms = 0.0;
+    let mut append_stop_event_ms = 0.0;
+    let mut write_last_session_ms = 0.0;
+    let mut generate_index_ms = 0.0;
+    let mut clear_state_ms = 0.0;
 
     if !cli.dry_run {
         if let Some(pid) = state.clipboard_watcher_pid {
@@ -538,6 +546,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     } else {
         let t_write = Instant::now();
 
+        let t_write_note_html = Instant::now();
         fs::write(&note_path, format!("{}\n", note_md)).map_err(|e| {
             app_error(
                 1,
@@ -551,7 +560,9 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 format!("Failed to write HTML note {}: {e}", html_path.display()),
             )
         })?;
+        write_note_html_ms = t_write_note_html.elapsed().as_secs_f64() * 1000.0;
 
+        let t_append_stop_event = Instant::now();
         append_jsonl(
             &events_path,
             &json!({
@@ -567,7 +578,9 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "transcription": transcription_meta,
             }),
         )?;
+        append_stop_event_ms = t_append_stop_event.elapsed().as_secs_f64() * 1000.0;
 
+        let t_last_session = Instant::now();
         write_json(
             &last_session_file(),
             &json!({
@@ -580,10 +593,15 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "clipboard_captures": clips.len(),
             }),
         )?;
+        write_last_session_ms = t_last_session.elapsed().as_secs_f64() * 1000.0;
 
+        let t_index = Instant::now();
         let _ = generate_sessions_index_html()?;
+        generate_index_ms = t_index.elapsed().as_secs_f64() * 1000.0;
 
+        let t_clear_state = Instant::now();
         clear_active_state()?;
+        clear_state_ms = t_clear_state.elapsed().as_secs_f64() * 1000.0;
 
         write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
 
@@ -608,6 +626,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "transcribe_ms": round3(transcribe_ms),
             "render_ms": round3(render_ms),
             "write_ms": round3(write_ms),
+            "write_note_html_ms": round3(write_note_html_ms),
+            "append_stop_event_ms": round3(append_stop_event_ms),
+            "write_last_session_ms": round3(write_last_session_ms),
+            "generate_index_ms": round3(generate_index_ms),
+            "clear_state_ms": round3(clear_state_ms),
             "web_server_ms": round3(web_server_ms)
         },
         "transcription_perf": transcription_perf,
@@ -666,6 +689,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "transcribe_ms": round3(transcribe_ms),
                 "render_ms": round3(render_ms),
                 "write_ms": round3(write_ms),
+                "write_note_html_ms": round3(write_note_html_ms),
+                "append_stop_event_ms": round3(append_stop_event_ms),
+                "write_last_session_ms": round3(write_last_session_ms),
+                "generate_index_ms": round3(generate_index_ms),
+                "clear_state_ms": round3(clear_state_ms),
                 "web_server_ms": round3(web_server_ms)
             },
             "transcription": transcription_meta,
