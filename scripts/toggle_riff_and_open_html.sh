@@ -3,7 +3,8 @@ set -euo pipefail
 
 RIFF_BIN="${RIFF_BIN:-/Users/caleb/Code/riff/riff}"
 LOG_ROOT="${RIFF_ROOT:-/tmp/riff}"
-LOG_FILE="$LOG_ROOT/toggle-send-paste-hotkey.log"
+LOG_FILE="$LOG_ROOT/toggle-open-html-hotkey.log"
+SESSIONS_DIR="$LOG_ROOT/sessions"
 
 mkdir -p "$LOG_ROOT"
 
@@ -23,14 +24,9 @@ is_active() {
   "$RIFF_BIN" --json --quiet status 2>/dev/null | grep -q '"active": true'
 }
 
-paste_text() {
-  local text="$1"
-  # Use osascript to type the text into the active application
-  osascript -e "tell application \"System Events\" to keystroke \"$text\"" 2>/dev/null || {
-    # Fallback: copy to clipboard
-    echo -n "$text" | pbcopy
-    log "paste: copied to clipboard (osascript failed)"
-  }
+latest_session_id() {
+  [[ -d "$SESSIONS_DIR" ]] || return 1
+  ls -1 "$SESSIONS_DIR" 2>/dev/null | sort | tail -n 1
 }
 
 if is_active; then
@@ -40,21 +36,23 @@ if is_active; then
   t1=$(now_ms)
   log "toggle: stop completed in $((t1 - t0))ms"
 
-  log "toggle: sending..."
-  if output=$("$RIFF_BIN" --quiet send 2>>"$LOG_FILE"); then
-    t2=$(now_ms)
-    log "toggle: send completed in $((t2 - t1))ms"
-    log "toggle: output=$output"
-    
-    # Paste/type the result
-    if [[ -n "$output" ]]; then
-      paste_text "$output"
-      log "toggle: pasted output"
+  if sid="$(latest_session_id)" && [[ -n "$sid" ]]; then
+    html_path="$SESSIONS_DIR/$sid/note.html"
+    if [[ -f "$html_path" ]]; then
+      if open "$html_path" >>"$LOG_FILE" 2>&1; then
+        t2=$(now_ms)
+        log "toggle: opened html in $((t2 - t1))ms"
+        log "toggle: stop+open total $((t2 - t0))ms"
+      else
+        log "toggle: open failed for $html_path"
+        exit 1
+      fi
+    else
+      log "toggle: html file missing at $html_path"
+      exit 1
     fi
-    
-    log "toggle: stop+send+paste total $((t2 - t0))ms"
   else
-    log "toggle: send failed"
+    log "toggle: could not resolve latest session id"
     exit 1
   fi
 else
