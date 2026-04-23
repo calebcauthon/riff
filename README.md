@@ -125,6 +125,23 @@ export RIFF_WEB_SERVER_IDLE_TIMEOUT_SEC=1800
 export RIFF_CLIPBOARD_MONITOR=1
 ```
 
+Or use an optional global `~/.riffrc` file (loaded automatically by `target/release/riff`):
+
+```bash
+cat > ~/.riffrc <<'EOF'
+export RIFF_PYTHON_BIN="$HOME/Code/riff/.venv/bin/python"
+export RIFF_PARAKEET_SCRIPT="$HOME/Code/riff/scripts/parakeet_transcribe.py"
+export RIFF_PARAKEET_MODEL="nvidia/parakeet-tdt-0.6b-v2"
+export RIFF_PARAKEET_SERVER=1
+EOF
+```
+
+Notes:
+- `~/.riffrc` is optional.
+- Existing process env vars still win (for one-off overrides).
+- Only `RIFF_*` keys are loaded from `~/.riffrc`.
+- Use `RIFF_RC_FILE=/path/to/file` to point riff at a different rc file.
+
 ---
 
 ## Bundled private Python runtime (recommended for distribution)

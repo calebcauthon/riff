@@ -37,7 +37,10 @@ use crate::paths::{
     perf_log_file, web_server_pid_file,
 };
 use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
-use crate::session_commands::{cmd_chunk, cmd_pause, cmd_shot, cmd_start, cmd_stop, cmd_unpause};
+use crate::session_commands::{
+    cmd_chunk, cmd_pause, cmd_shot, cmd_start, cmd_start_silent, cmd_stop, cmd_stop_silent,
+    cmd_unpause,
+};
 use crate::transcription::{
     default_parakeet_script, default_sound_picker_script, ensure_web_server,
     resolve_parakeet_model, resolve_parakeet_script, resolve_python_bin, touch_web_server,
@@ -77,6 +80,127 @@ pub(crate) fn emit_json(cli: &Cli, payload: &Value) {
             "{}",
             serde_json::to_string_pretty(payload).unwrap_or_else(|_| "{}".to_string())
         );
+    }
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn expand_env_refs(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j] != b'}' {
+                j += 1;
+            }
+            if j < bytes.len() {
+                let key = &value[(i + 2)..j];
+                if !key.is_empty() && is_valid_env_key(key) {
+                    if let Ok(v) = env::var(key) {
+                        out.push_str(&v);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+        } else if i + 1 < bytes.len() {
+            let c = bytes[i + 1] as char;
+            if c == '_' || c.is_ascii_alphabetic() {
+                let mut j = i + 2;
+                while j < bytes.len() {
+                    let cj = bytes[j] as char;
+                    if cj == '_' || cj.is_ascii_alphanumeric() {
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let key = &value[(i + 1)..j];
+                if let Ok(v) = env::var(key) {
+                    out.push_str(&v);
+                }
+                i = j;
+                continue;
+            }
+        }
+
+        out.push('$');
+        i += 1;
+    }
+    out
+}
+
+fn parse_riffrc_assignment(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+
+    let body = if let Some(rest) = trimmed.strip_prefix("export ") {
+        rest.trim_start()
+    } else {
+        trimmed
+    };
+    let (key_raw, value_raw) = body.split_once('=')?;
+    let key = key_raw.trim();
+    if !is_valid_env_key(key) {
+        return None;
+    }
+
+    let value = value_raw.trim();
+    let unquoted = if value.len() >= 2 {
+        if (value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\''))
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        }
+    } else {
+        value
+    };
+
+    Some((key.to_string(), expand_env_refs(unquoted)))
+}
+
+fn riffrc_path() -> Option<PathBuf> {
+    if let Some(custom) = env::var_os("RIFF_RC_FILE") {
+        return Some(PathBuf::from(custom));
+    }
+    env::var_os("HOME").map(|h| PathBuf::from(h).join(".riffrc"))
+}
+
+fn load_riffrc_defaults() {
+    let Some(path) = riffrc_path() else {
+        return;
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return;
+    };
+    for line in raw.lines() {
+        if let Some((key, value)) = parse_riffrc_assignment(line) {
+            if !key.starts_with("RIFF_") {
+                continue;
+            }
+            if env::var_os(&key).is_none() {
+                env::set_var(key, value);
+            }
+        }
     }
 }
 
@@ -2071,7 +2195,7 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
         dry_run: false,
         command: Commands::Status,
     };
-    cmd_start(&internal_cli, &start_args)?;
+    cmd_start_silent(&internal_cli, &start_args)?;
     let new_state = load_active_state()?;
     let split_to_running_ms = split_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -2082,7 +2206,7 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
         parakeet_script: None,
         parakeet_model: None,
     };
-    let finalize_result = cmd_stop(&internal_cli, &stop_args);
+    let finalize_result = cmd_stop_silent(&internal_cli, &stop_args);
     let restore_result = save_active_state(&new_state);
     if let Err(e) = restore_result {
         return Err(app_error(
@@ -2169,6 +2293,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
 }
 
 fn main() {
+    load_riffrc_defaults();
     let cli = Cli::parse();
     let exit = match run(&cli) {
         Ok(code) => code,
@@ -2190,4 +2315,35 @@ fn main() {
         }
     };
     std::process::exit(exit);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expand_env_refs, parse_riffrc_assignment};
+
+    #[test]
+    fn parse_riffrc_accepts_export_and_quotes() {
+        let parsed = parse_riffrc_assignment(
+            r#"export RIFF_PARAKEET_SCRIPT="/Users/test/Code/riff/scripts/parakeet_transcribe.py""#,
+        )
+        .expect("parse export");
+        assert_eq!(parsed.0, "RIFF_PARAKEET_SCRIPT");
+        assert_eq!(
+            parsed.1,
+            "/Users/test/Code/riff/scripts/parakeet_transcribe.py"
+        );
+    }
+
+    #[test]
+    fn parse_riffrc_rejects_invalid_key() {
+        assert!(parse_riffrc_assignment("1BAD_KEY=value").is_none());
+        assert!(parse_riffrc_assignment("export =value").is_none());
+    }
+
+    #[test]
+    fn expand_env_refs_handles_home_style_tokens() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let expanded = expand_env_refs("${HOME}/Code/riff:$HOME/bin");
+        assert_eq!(expanded, format!("{home}/Code/riff:{home}/bin"));
+    }
 }

@@ -512,6 +512,14 @@ fn process_manual_chunk(
 }
 
 pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
+    cmd_start_inner(cli, args, true)
+}
+
+pub(crate) fn cmd_start_silent(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
+    cmd_start_inner(cli, args, false)
+}
+
+fn cmd_start_inner(cli: &Cli, args: &StartArgs, play_sound: bool) -> Result<i32, AppError> {
     ensure_dirs()?;
     let perf_total = Instant::now();
 
@@ -719,7 +727,9 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         "transcription_watcher_pid": state.transcription_watcher_pid
     }));
 
-    play_event_sound("start", cli);
+    if play_sound {
+        play_event_sound("start", cli);
+    }
 
     print_out(
         cli,
@@ -1186,6 +1196,14 @@ pub(crate) fn cmd_unpause(cli: &Cli) -> Result<i32, AppError> {
 }
 
 pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
+    cmd_stop_inner(cli, args, true)
+}
+
+pub(crate) fn cmd_stop_silent(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
+    cmd_stop_inner(cli, args, false)
+}
+
+fn cmd_stop_inner(cli: &Cli, args: &StopArgs, play_sound: bool) -> Result<i32, AppError> {
     ensure_dirs()?;
     if !active_state_file().exists() {
         print_out(cli, "No active session.");
@@ -1485,7 +1503,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         "transcription_status": transcription_meta.get("status").and_then(|v| v.as_str())
     }));
 
-    if !cli.dry_run {
+    if !cli.dry_run && play_sound {
         play_event_sound("stop", cli);
     }
 
