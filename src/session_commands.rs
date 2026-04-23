@@ -12,8 +12,8 @@ use crate::reporting::{
 };
 use crate::screenshots::{detect_screenshot_dir, file_mtime_epoch, move_session_screenshots};
 use crate::transcription::{
-    ensure_web_server, resolve_parakeet_model, resolve_parakeet_script, resolve_python_bin,
-    run_transcription,
+    ensure_parakeet_server, ensure_web_server, parakeet_server_enabled, resolve_parakeet_model,
+    resolve_parakeet_script, resolve_python_bin, run_transcription,
 };
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
@@ -195,6 +195,96 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
         format!("Running chunk transcription (one-shot): {cmd_for_log}"),
     );
 
+    let mut server_error: Option<Value> = None;
+    if parakeet_server_enabled() && command_exists("curl") {
+        ensure_parakeet_server(&python_bin, &script_path, &model, cli, true);
+        let base_url =
+            env::var("RIFF_PARAKEET_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8765".into());
+        let payload = json!({
+            "audio": chunk_audio,
+            "out_txt": chunk_out_txt,
+            "model": model,
+            "batch_size": 1
+        })
+        .to_string();
+        let server_out = Command::new("curl")
+            .args([
+                "-sS",
+                "--fail",
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "--data",
+                &payload,
+            ])
+            .arg(format!("{}/transcribe", base_url.trim_end_matches('/')))
+            .output();
+
+        match server_out {
+            Ok(out) if out.status.success() => {
+                let body = String::from_utf8_lossy(&out.stdout).to_string();
+                match serde_json::from_str::<Value>(&body) {
+                    Ok(parsed) if parsed.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
+                        let txt = parsed
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        if !txt.is_empty() && !chunk_out_txt.exists() {
+                            let _ = fs::write(chunk_out_txt, format!("{txt}\n"));
+                        }
+                        return (
+                            txt,
+                            json!({
+                                "status": "ok",
+                                "method": "parakeet_server",
+                                "server": base_url,
+                                "model": model,
+                                "elapsed_sec": parsed.get("elapsed_sec").and_then(|v| v.as_f64()),
+                            }),
+                        );
+                    }
+                    Ok(parsed) => {
+                        server_error = Some(json!({
+                            "status": "error",
+                            "method": "parakeet_server",
+                            "server": base_url,
+                            "response": parsed,
+                        }));
+                    }
+                    Err(e) => {
+                        server_error = Some(json!({
+                            "status": "error",
+                            "method": "parakeet_server",
+                            "server": base_url,
+                            "reason": format!("invalid JSON response: {e}"),
+                            "body": body,
+                        }));
+                    }
+                }
+            }
+            Ok(out) => {
+                server_error = Some(json!({
+                    "status": "error",
+                    "method": "parakeet_server",
+                    "server": base_url,
+                    "returncode": out.status.code(),
+                    "stderr": String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                    "stdout": String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                }));
+            }
+            Err(e) => {
+                server_error = Some(json!({
+                    "status": "error",
+                    "method": "parakeet_server",
+                    "reason": format!("curl failed: {e}"),
+                }));
+            }
+        }
+    }
+
     let output = Command::new(&python_bin)
         .arg(&script_path)
         .arg("--audio")
@@ -212,34 +302,47 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
             } else {
                 String::from_utf8_lossy(&out.stdout).to_string()
             };
-            (
-                txt.trim().to_string(),
-                json!({
-                    "status": "ok",
-                    "method": "parakeet_python",
-                    "model": model,
-                    "script": script_path.display().to_string(),
-                }),
-            )
+            let mut meta = json!({
+                "status": "ok",
+                "method": "parakeet_python",
+                "model": model,
+                "script": script_path.display().to_string(),
+            });
+            if let Some(err) = server_error {
+                if let Some(obj) = meta.as_object_mut() {
+                    obj.insert("server_fallback".to_string(), err);
+                }
+            }
+            (txt.trim().to_string(), meta)
         }
-        Ok(out) => (
-            String::new(),
-            json!({
+        Ok(out) => {
+            let mut meta = json!({
                 "status": "error",
                 "method": "parakeet_python",
                 "returncode": out.status.code(),
                 "stderr": String::from_utf8_lossy(&out.stderr).trim().to_string(),
                 "stdout": String::from_utf8_lossy(&out.stdout).trim().to_string(),
-            }),
-        ),
-        Err(e) => (
-            String::new(),
-            json!({
+            });
+            if let Some(err) = server_error {
+                if let Some(obj) = meta.as_object_mut() {
+                    obj.insert("server_fallback".to_string(), err);
+                }
+            }
+            (String::new(), meta)
+        }
+        Err(e) => {
+            let mut meta = json!({
                 "status": "error",
                 "method": "parakeet_python",
                 "reason": format!("Failed to run python transcription: {e}"),
-            }),
-        ),
+            });
+            if let Some(err) = server_error {
+                if let Some(obj) = meta.as_object_mut() {
+                    obj.insert("server_fallback".to_string(), err);
+                }
+            }
+            (String::new(), meta)
+        }
     }
 }
 
@@ -1117,8 +1220,10 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let mut generate_index_ms = 0.0;
     let mut clear_state_ms = 0.0;
     let mut transcription_wait_ms = 0.0;
+    let mut stop_flush_ms = 0.0;
     let mut transcription_forced_stop = false;
     let mut stop_flush_meta = Value::Null;
+    let mut use_chunked_transcript = false;
     let use_custom_transcribe = args
         .transcribe_cmd
         .as_ref()
@@ -1166,13 +1271,26 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         }
 
         if !use_custom_transcribe {
-            stop_flush_meta = match process_manual_chunk(&mut state, cli, "stop_flush", None) {
-                Ok(meta) => meta,
-                Err(e) => json!({
-                    "status": "error",
-                    "reason": e.message,
-                }),
-            };
+            let should_flush_manual_chunk = state.transcription_watcher_pid.is_some()
+                || state.transcription_cursor_sec > 0.05
+                || state.transcription_paused;
+            if should_flush_manual_chunk {
+                use_chunked_transcript = true;
+                let t_stop_flush = Instant::now();
+                stop_flush_meta = match process_manual_chunk(&mut state, cli, "stop_flush", None) {
+                    Ok(meta) => meta,
+                    Err(e) => json!({
+                        "status": "error",
+                        "reason": e.message,
+                    }),
+                };
+                stop_flush_ms = t_stop_flush.elapsed().as_secs_f64() * 1000.0;
+            } else {
+                stop_flush_meta = json!({
+                    "status": "skipped",
+                    "reason": "full_transcribe_on_stop",
+                });
+            }
         }
         state.transcription_paused = false;
         state.transcription_pause_started_sec = None;
@@ -1210,10 +1328,12 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let t_transcribe = Instant::now();
     let (transcript_raw, mut transcription_meta) = if use_custom_transcribe {
         run_transcription(&state, &session_dir, args, cli)
-    } else {
+    } else if use_chunked_transcript {
         load_chunked_transcript(&session_dir, &events_path)
+    } else {
+        run_transcription(&state, &session_dir, args, cli)
     };
-    if !use_custom_transcribe {
+    if !use_custom_transcribe && use_chunked_transcript {
         if let Some(obj) = transcription_meta.as_object_mut() {
             obj.insert(
                 "forced_watcher_stop".to_string(),
@@ -1357,7 +1477,8 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "generate_index_ms": round3(generate_index_ms),
             "clear_state_ms": round3(clear_state_ms),
             "web_server_ms": round3(web_server_ms),
-            "transcription_watcher_wait_ms": round3(transcription_wait_ms)
+            "transcription_watcher_wait_ms": round3(transcription_wait_ms),
+            "stop_flush_ms": round3(stop_flush_ms)
         },
         "transcription_perf": transcription_perf,
         "transcription_method": transcription_meta.get("method").and_then(|v| v.as_str()),
@@ -1421,7 +1542,8 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "generate_index_ms": round3(generate_index_ms),
                 "clear_state_ms": round3(clear_state_ms),
                 "web_server_ms": round3(web_server_ms),
-                "transcription_watcher_wait_ms": round3(transcription_wait_ms)
+                "transcription_watcher_wait_ms": round3(transcription_wait_ms),
+                "stop_flush_ms": round3(stop_flush_ms)
             },
             "transcription": transcription_meta,
             "transcription_watcher_forced_stop": transcription_forced_stop,

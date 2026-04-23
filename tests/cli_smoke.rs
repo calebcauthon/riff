@@ -554,6 +554,56 @@ fn stop_reports_no_active_session_when_idle() {
 }
 
 #[test]
+fn stop_without_chunking_skips_stop_flush_chunk_event() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args(["--json", "--quiet", "stop"])
+        .output()
+        .expect("run stop --json");
+    assert!(out.status.success(), "stop should succeed");
+
+    let payload: Value = serde_json::from_slice(&out.stdout).expect("parse stop json");
+    assert_ne!(
+        payload
+            .get("transcription")
+            .and_then(|v| v.get("method"))
+            .and_then(|v| v.as_str()),
+        Some("manual_chunked"),
+        "stop without chunking should not use manual_chunked path: {payload}"
+    );
+
+    let session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .expect("session_id in stop payload");
+    let events_raw = fs::read_to_string(
+        td.path()
+            .join("sessions")
+            .join(session_id)
+            .join("events.jsonl"),
+    )
+    .expect("read session events");
+    assert!(
+        !events_raw.contains(r#""type":"transcript_chunk""#),
+        "stop without chunking should not append transcript_chunk event:\n{events_raw}"
+    );
+}
+
+#[test]
 fn status_reports_active_session_after_start() {
     let td = tempdir().expect("tempdir");
     let fake_bin = td.path().join("fake-bin");
