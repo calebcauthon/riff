@@ -5,6 +5,8 @@ use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn cmd_with_root(root: &Path) -> Command {
@@ -98,6 +100,17 @@ exit 0
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '12.3 4.5 67890 01:23 R /Applications/TestApp.app/Contents/MacOS/TestApp --demo\n'
+exit 0
+"#,
+    );
+
+    write_executable(
+        &dir.join("afplay"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${RIFF_TEST_AFPLAY_OUT:-}" ]]; then
+  printf 'afplay %s\n' "$*" >> "$RIFF_TEST_AFPLAY_OUT"
+fi
 exit 0
 "#,
     );
@@ -201,6 +214,14 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
             "Set which derived image is used at the transcript screenshot path",
         ),
         ("sounds", "Pick start/stop sounds and beep timing"),
+        (
+            "silence",
+            "Disable beeps globally (writes RIFF_BEEP=0 to rc file)",
+        ),
+        (
+            "loud",
+            "Enable beeps globally (writes RIFF_BEEP=1 to rc file)",
+        ),
         ("status", "Show active session status"),
         ("perf", "Show startup/shutdown timing summary from perf log"),
         (
@@ -238,6 +259,8 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         "html",
         "screenshot-use",
         "sounds",
+        "silence",
+        "loud",
         "status",
         "perf",
         "kill-server",
@@ -250,6 +273,55 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         assert!(idx >= last, "command out of order: {name}\n{stdout}");
         last = idx;
     }
+}
+
+#[test]
+fn silence_and_loud_update_riffrc_beep_setting() {
+    let td = tempdir().expect("tempdir");
+    let rc_path = td.path().join("riffrc");
+    fs::write(
+        &rc_path,
+        "export RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2\nexport RIFF_BEEP=1\n",
+    )
+    .expect("write initial rc");
+
+    cmd_with_root(td.path())
+        .env("RIFF_RC_FILE", &rc_path)
+        .arg("silence")
+        .assert()
+        .success();
+    let after_silence = fs::read_to_string(&rc_path).expect("read rc after silence");
+    assert!(
+        after_silence.contains("export RIFF_BEEP=0"),
+        "silence should set RIFF_BEEP=0:\n{after_silence}"
+    );
+    assert_eq!(
+        after_silence
+            .lines()
+            .filter(|l| l.trim_start().starts_with("export RIFF_BEEP="))
+            .count(),
+        1,
+        "silence should keep exactly one RIFF_BEEP line:\n{after_silence}"
+    );
+
+    cmd_with_root(td.path())
+        .env("RIFF_RC_FILE", &rc_path)
+        .arg("loud")
+        .assert()
+        .success();
+    let after_loud = fs::read_to_string(&rc_path).expect("read rc after loud");
+    assert!(
+        after_loud.contains("export RIFF_BEEP=1"),
+        "loud should set RIFF_BEEP=1:\n{after_loud}"
+    );
+    assert_eq!(
+        after_loud
+            .lines()
+            .filter(|l| l.trim_start().starts_with("export RIFF_BEEP="))
+            .count(),
+        1,
+        "loud should keep exactly one RIFF_BEEP line:\n{after_loud}"
+    );
 }
 
 #[test]
@@ -572,6 +644,53 @@ fn stop_reports_no_active_session_when_idle() {
         .assert()
         .success()
         .stdout(predicates::str::contains("No active session."));
+}
+
+#[test]
+fn no_beeps_flag_supersedes_global_beep_env() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+    let fake_sound = td.path().join("beep.aiff");
+    fs::write(&fake_sound, "beep").expect("write fake sound");
+    let afplay_log = td.path().join("afplay.log");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_BEEP", "1")
+        .env("RIFF_BEEP_START", &fake_sound)
+        .env("RIFF_BEEP_STOP", &fake_sound)
+        .env("RIFF_TEST_AFPLAY_OUT", &afplay_log)
+        .args([
+            "--no-beeps",
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_BEEP", "1")
+        .env("RIFF_BEEP_START", &fake_sound)
+        .env("RIFF_BEEP_STOP", &fake_sound)
+        .env("RIFF_TEST_AFPLAY_OUT", &afplay_log)
+        .args([
+            "--no-beeps",
+            "stop",
+            "--transcribe-cmd",
+            "printf '' > {out_txt}",
+        ])
+        .assert()
+        .success();
+
+    thread::sleep(Duration::from_millis(120));
+    let afplay_output = fs::read_to_string(&afplay_log).unwrap_or_default();
+    assert!(
+        afplay_output.trim().is_empty(),
+        "--no-beeps should suppress beeps even when RIFF_BEEP=1; got:\n{afplay_output}"
+    );
 }
 
 #[test]

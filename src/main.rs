@@ -37,10 +37,7 @@ use crate::paths::{
     perf_log_file, web_server_pid_file,
 };
 use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
-use crate::session_commands::{
-    cmd_chunk, cmd_pause, cmd_shot, cmd_start, cmd_start_silent, cmd_stop, cmd_stop_silent,
-    cmd_unpause,
-};
+use crate::session_commands::{cmd_chunk, cmd_pause, cmd_shot, cmd_start, cmd_stop, cmd_unpause};
 use crate::transcription::{
     default_parakeet_script, default_sound_picker_script, ensure_web_server,
     resolve_parakeet_model, resolve_parakeet_script, resolve_python_bin, touch_web_server,
@@ -206,6 +203,43 @@ fn load_riffrc_defaults() {
             }
         }
     }
+}
+
+fn upsert_riffrc_export(key: &str, value: &str) -> Result<PathBuf, AppError> {
+    let Some(path) = riffrc_path() else {
+        return Err(app_error(
+            1,
+            "Cannot resolve rc path. Set HOME or RIFF_RC_FILE.",
+        ));
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| app_error(1, format!("Failed to create {}: {e}", parent.display())))?;
+    }
+
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
+    let mut replaced = false;
+    for line in &mut lines {
+        if let Some((parsed_key, _)) = parse_riffrc_assignment(line) {
+            if parsed_key == key {
+                *line = format!("export {key}={value}");
+                replaced = true;
+                break;
+            }
+        }
+    }
+    if !replaced {
+        lines.push(format!("export {key}={value}"));
+    }
+
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    fs::write(&path, out)
+        .map_err(|e| app_error(1, format!("Failed to write {}: {e}", path.display())))?;
+    Ok(path)
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, AppError> {
@@ -836,6 +870,9 @@ fn env_beep_gap_sec() -> f32 {
 }
 
 fn play_event_sound(kind: &str, cli: &Cli) {
+    if cli.no_beeps {
+        return;
+    }
     if !bool_env_enabled("RIFF_BEEP", true) {
         return;
     }
@@ -1519,6 +1556,60 @@ fn cmd_sounds(_cli: &Cli) -> Result<i32, AppError> {
     Ok(0)
 }
 
+fn set_global_beep_enabled(cli: &Cli, enabled: bool) -> Result<i32, AppError> {
+    let value = if enabled { "1" } else { "0" };
+    if cli.dry_run {
+        let path = riffrc_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.riffrc".to_string());
+        print_out(
+            cli,
+            format!("[dry-run] Would write export RIFF_BEEP={value} to {path}"),
+        );
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "beeps_enabled": enabled,
+                "riffrc": path,
+                "dry_run": true
+            }),
+        );
+        return Ok(0);
+    }
+
+    let path = upsert_riffrc_export("RIFF_BEEP", value)?;
+    env::set_var("RIFF_BEEP", value);
+    let action = if enabled { "loud" } else { "silence" };
+    print_out(
+        cli,
+        format!(
+            "Global beeps {}.\nrc_file: {}",
+            if enabled { "enabled" } else { "disabled" },
+            path.display()
+        ),
+    );
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": action,
+            "beeps_enabled": enabled,
+            "riffrc": path,
+            "dry_run": false
+        }),
+    );
+    Ok(0)
+}
+
+fn cmd_silence(cli: &Cli) -> Result<i32, AppError> {
+    set_global_beep_enabled(cli, false)
+}
+
+fn cmd_loud(cli: &Cli) -> Result<i32, AppError> {
+    set_global_beep_enabled(cli, true)
+}
+
 fn latest_transcription_watcher_event(events_path: &Path) -> Option<Value> {
     let text = fs::read_to_string(events_path).ok()?;
     for line in text.lines().rev() {
@@ -2197,9 +2288,10 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
         quiet: true,
         json: false,
         dry_run: false,
+        no_beeps: true,
         command: Commands::Status,
     };
-    cmd_start_silent(&internal_cli, &start_args)?;
+    cmd_start(&internal_cli, &start_args)?;
     let new_state = load_active_state()?;
     let split_to_running_ms = split_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -2210,7 +2302,7 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
         parakeet_script: None,
         parakeet_model: None,
     };
-    let finalize_result = cmd_stop_silent(&internal_cli, &stop_args);
+    let finalize_result = cmd_stop(&internal_cli, &stop_args);
     let restore_result = save_active_state(&new_state);
     if let Err(e) = restore_result {
         return Err(app_error(
@@ -2283,6 +2375,8 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Unpause => cmd_unpause(cli),
         Commands::TogglePause => cmd_toggle_pause(cli),
         Commands::Sounds => cmd_sounds(cli),
+        Commands::Silence => cmd_silence(cli),
+        Commands::Loud => cmd_loud(cli),
         Commands::Status => cmd_status(cli),
         Commands::Perf(args) => cmd_perf(cli, args),
         Commands::List(args) => cmd_list(cli, args),

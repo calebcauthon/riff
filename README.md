@@ -282,6 +282,13 @@ Picker controls:
 - `Esc` (or `s`) save + exit
 - `q` quit without saving
 
+### Silence / Loud (global beep toggle)
+
+```bash
+riff silence   # writes RIFF_BEEP=0 to ~/.riffrc (or RIFF_RC_FILE)
+riff loud      # writes RIFF_BEEP=1 to ~/.riffrc (or RIFF_RC_FILE)
+```
+
 ### Status
 
 ```bash
@@ -364,10 +371,13 @@ Behavior:
 
 ## Global flags
 
-- `--verbose`
-- `--quiet`
-- `--json`
-- `--dry-run`
+- `--verbose` prints extra diagnostic lines (`[verbose] ...`) for troubleshooting.
+- `--quiet` suppresses normal human-readable command output (good for hotkeys/automation).
+  - If you also pass `--json`, JSON output still prints.
+- `--json` prints structured JSON payloads for command results.
+- `--dry-run` shows what would happen without making changes.
+- `--no-beeps` disables start/stop beeps for this command invocation only.
+  - This supersedes global sound settings (`RIFF_BEEP`, `riff silence`, `riff loud`).
 
 Examples:
 

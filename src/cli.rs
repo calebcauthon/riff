@@ -21,6 +21,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub dry_run: bool,
 
+    /// Disable start/stop beep sounds for this invocation
+    #[arg(long = "no-beeps", global = true)]
+    pub no_beeps: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -63,6 +67,10 @@ pub enum Commands {
 
     /// Pick start/stop sounds and beep timing
     Sounds,
+    /// Disable beeps globally (writes RIFF_BEEP=0 to rc file)
+    Silence,
+    /// Enable beeps globally (writes RIFF_BEEP=1 to rc file)
+    Loud,
     /// Show active session status
     Status,
     /// Show startup/shutdown timing summary from perf log
