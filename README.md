@@ -321,6 +321,7 @@ Shows a terminal table with:
 ```bash
 riff copy        # most recent (same as copy 1)
 riff copy 3      # 3rd most recent
+riff copy --verbose   # full session dump (frontmatter + transcript + raw session files)
 ```
 
 Outputs only the transcript section to stdout (pipe to pbcopy, files, etc.):
@@ -328,6 +329,11 @@ Outputs only the transcript section to stdout (pipe to pbcopy, files, etc.):
 ```bash
 riff copy | pbcopy
 ```
+
+`copy --verbose` switches to a full stdout export for that session:
+- YAML frontmatter (session id, timing/counters, file inventory, screenshot paths)
+- transcript body
+- raw `note.md`, `transcript.txt`, `events.jsonl`, and `ffmpeg.log` blocks
 
 ### Send transcript to focused app
 
@@ -372,6 +378,7 @@ Behavior:
 ## Global flags
 
 - `--verbose` prints extra diagnostic lines (`[verbose] ...`) for troubleshooting.
+  - For `riff copy`, `--verbose` instead prints a full frontmatter session dump to stdout.
 - `--quiet` suppresses normal human-readable command output (good for hotkeys/automation).
   - If you also pass `--json`, JSON output still prints.
 - `--json` prints structured JSON payloads for command results.

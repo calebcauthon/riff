@@ -526,6 +526,52 @@ fn copy_prints_transcript_from_most_recent_session() {
 }
 
 #[test]
+fn copy_verbose_prints_frontmatter_and_session_payload() {
+    let td = tempdir().expect("tempdir");
+    let session_id = "20260413-013012";
+    make_session(
+        td.path(),
+        session_id,
+        "# Session\n\n## Transcript\nnew words here\n",
+    );
+    let session_dir = td.path().join("sessions").join(session_id);
+    fs::write(session_dir.join("transcript.txt"), "new words here\n").expect("write transcript");
+    fs::write(
+        session_dir.join("events.jsonl"),
+        [
+            r#"{"ts":"2026-04-13T01:30:12.000Z","type":"session_started"}"#,
+            r#"{"ts":"2026-04-13T01:31:00.000Z","type":"clipboard_copied","clip_id":1,"audio_sec":3.2,"text":"clipboard text"}"#,
+            r#"{"ts":"2026-04-13T01:31:22.000Z","type":"session_stopped","audio_duration_sec":10.5}"#,
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .expect("write events");
+    fs::write(session_dir.join("ffmpeg.log"), "ffmpeg details\n").expect("write ffmpeg log");
+    fs::write(session_dir.join("audio.wav"), b"RIFF").expect("write audio placeholder");
+    fs::create_dir_all(session_dir.join("screenshots")).expect("create screenshots");
+    fs::write(
+        session_dir.join("screenshots").join("shot-001.png"),
+        b"\x89PNG\r\n\x1a\n",
+    )
+    .expect("write screenshot");
+
+    cmd_with_root(td.path())
+        .args(["copy", "--verbose"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "---\nsession_id: \"20260413-013012\"",
+        ))
+        .stdout(predicates::str::contains("files:\n  note_md:"))
+        .stdout(predicates::str::contains("screenshot_files:\n  - "))
+        .stdout(predicates::str::contains("## Transcript"))
+        .stdout(predicates::str::contains("new words here"))
+        .stdout(predicates::str::contains("## Events JSONL (events.jsonl)"))
+        .stdout(predicates::str::contains("\"type\":\"session_started\""));
+}
+
+#[test]
 fn send_fails_when_transcript_not_available() {
     let td = tempdir().expect("tempdir");
     let fake_bin = td.path().join("fake-bin");

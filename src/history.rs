@@ -3,7 +3,7 @@ use crate::error::{app_error, AppError};
 use crate::models::SessionListRow;
 use crate::paths::{ensure_dirs, perf_log_file, sessions_dir};
 use crate::{command_exists, emit_json, get_audio_duration_sec, print_out, SUPPORTED_IMAGE_EXTS};
-use chrono::{DateTime, Datelike, Local, NaiveDateTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDateTime, SecondsFormat, Timelike, Utc};
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
@@ -613,15 +613,231 @@ pub(crate) fn cmd_list(cli: &Cli, args: &ListArgs) -> Result<i32, AppError> {
     Ok(0)
 }
 
-pub(crate) fn cmd_copy(_cli: &Cli, args: &CopyArgs) -> Result<i32, AppError> {
+pub(crate) fn cmd_copy(cli: &Cli, args: &CopyArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
 
     let requested_rank = args.n.unwrap_or(1);
+    if cli.verbose {
+        let session_dir = resolve_recent_session_dir(requested_rank)?;
+        let verbose_dump = render_verbose_copy_output(&session_dir, requested_rank)?;
+        // Intentionally raw stdout only, so this can be piped/copied easily.
+        print!("{verbose_dump}");
+        return Ok(0);
+    }
+
     let (_, transcript) = load_recent_session_transcript(requested_rank)?;
 
     // Intentionally raw stdout only, so this can be piped/copied easily.
     println!("{transcript}");
     Ok(0)
+}
+
+fn yaml_quote(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn read_optional_text(path: &Path) -> Result<Option<String>, AppError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path)
+        .map_err(|e| app_error(1, format!("Failed to read {}: {e}", path.display())))?;
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+fn append_fenced_block(out: &mut String, title: &str, lang: &str, body: &str) {
+    out.push_str("## ");
+    out.push_str(title);
+    out.push_str("\n\n");
+    out.push_str("````");
+    out.push_str(lang);
+    out.push('\n');
+    out.push_str(body);
+    if !body.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("````\n\n");
+}
+
+fn collect_session_image_paths(session_dir: &Path) -> Vec<PathBuf> {
+    let screenshots_dir = session_dir.join("screenshots");
+    let Ok(entries) = fs::read_dir(screenshots_dir) else {
+        return Vec::new();
+    };
+
+    let mut paths = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .map(|ext| SUPPORTED_IMAGE_EXTS.contains(&ext.as_str()))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+fn render_verbose_copy_output(session_dir: &Path, rank: usize) -> Result<String, AppError> {
+    let session_id = session_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+
+    let note_md_path = session_dir.join("note.md");
+    let note_html_path = session_dir.join("note.html");
+    let transcript_txt_path = session_dir.join("transcript.txt");
+    let events_path = session_dir.join("events.jsonl");
+    let audio_path = session_dir.join("audio.wav");
+    let ffmpeg_log_path = session_dir.join("ffmpeg.log");
+    let screenshots_dir = session_dir.join("screenshots");
+
+    let note_md_text = read_optional_text(&note_md_path)?;
+    let transcript_txt = read_optional_text(&transcript_txt_path)?;
+    let events_jsonl = read_optional_text(&events_path)?;
+    let ffmpeg_log = read_optional_text(&ffmpeg_log_path)?;
+    let transcript = read_transcript_text_for_session(session_dir)
+        .trim()
+        .to_string();
+
+    let events = read_jsonl_values(&events_path);
+    let started_at = session_started_iso(&events);
+    let stopped_at = events
+        .iter()
+        .rev()
+        .find(|e| e.get("type").and_then(|v| v.as_str()) == Some("session_stopped"))
+        .and_then(|e| e.get("ts").and_then(|v| v.as_str()))
+        .map(|s| s.to_string());
+    let audio_duration_sec = session_duration_seconds(&events, session_dir);
+    let screenshot_paths = collect_session_image_paths(session_dir);
+    let clipboard_count = events
+        .iter()
+        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("clipboard_copied"))
+        .count();
+
+    let file_entries = vec![
+        ("note_md", note_md_path),
+        ("note_html", note_html_path),
+        ("transcript_txt", transcript_txt_path),
+        ("events_jsonl", events_path),
+        ("audio_wav", audio_path),
+        ("ffmpeg_log", ffmpeg_log_path),
+        ("screenshots_dir", screenshots_dir),
+    ];
+
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(&format!("session_id: {}\n", yaml_quote(&session_id)));
+    out.push_str(&format!("rank: {rank}\n"));
+    out.push_str(&format!("generated_at: {}\n", yaml_quote(&generated_at)));
+    out.push_str(&format!(
+        "session_dir: {}\n",
+        yaml_quote(&session_dir.display().to_string())
+    ));
+    out.push_str(&format!(
+        "started_at: {}\n",
+        started_at
+            .as_deref()
+            .map(yaml_quote)
+            .unwrap_or_else(|| "null".to_string())
+    ));
+    out.push_str(&format!(
+        "stopped_at: {}\n",
+        stopped_at
+            .as_deref()
+            .map(yaml_quote)
+            .unwrap_or_else(|| "null".to_string())
+    ));
+    out.push_str(&format!(
+        "audio_duration_sec: {}\n",
+        audio_duration_sec
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    ));
+    out.push_str(&format!("event_count: {}\n", events.len()));
+    out.push_str(&format!("screenshot_count: {}\n", screenshot_paths.len()));
+    out.push_str(&format!("clipboard_count: {}\n", clipboard_count));
+    out.push_str(&format!(
+        "transcript_chars: {}\n",
+        transcript.chars().count()
+    ));
+    out.push_str(&format!(
+        "transcript_words: {}\n",
+        transcript.split_whitespace().count()
+    ));
+    out.push_str("files:\n");
+    for (label, path) in &file_entries {
+        let metadata = fs::metadata(path).ok();
+        let exists = metadata.is_some();
+        let size_bytes = metadata
+            .as_ref()
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "null".to_string());
+        out.push_str(&format!("  {}:\n", label));
+        out.push_str(&format!(
+            "    path: {}\n",
+            yaml_quote(&path.display().to_string())
+        ));
+        out.push_str(&format!(
+            "    exists: {}\n",
+            if exists { "true" } else { "false" }
+        ));
+        out.push_str(&format!("    size_bytes: {}\n", size_bytes));
+    }
+    out.push_str("screenshot_files:\n");
+    if screenshot_paths.is_empty() {
+        out.push_str("  []\n");
+    } else {
+        for path in &screenshot_paths {
+            out.push_str(&format!(
+                "  - {}\n",
+                yaml_quote(&path.display().to_string())
+            ));
+        }
+    }
+    out.push_str("---\n\n");
+
+    out.push_str("## Transcript\n\n");
+    if transcript.is_empty() {
+        out.push_str("_No transcript available._\n\n");
+    } else {
+        out.push_str(&transcript);
+        out.push_str("\n\n");
+    }
+
+    append_fenced_block(
+        &mut out,
+        "Note Markdown (note.md)",
+        "markdown",
+        note_md_text.as_deref().unwrap_or(""),
+    );
+    append_fenced_block(
+        &mut out,
+        "Transcript Text (transcript.txt)",
+        "text",
+        transcript_txt.as_deref().unwrap_or(""),
+    );
+    append_fenced_block(
+        &mut out,
+        "Events JSONL (events.jsonl)",
+        "jsonl",
+        events_jsonl.as_deref().unwrap_or(""),
+    );
+    append_fenced_block(
+        &mut out,
+        "Recorder Log (ffmpeg.log)",
+        "text",
+        ffmpeg_log.as_deref().unwrap_or(""),
+    );
+
+    Ok(out)
 }
 
 fn load_recent_session_transcript(rank: usize) -> Result<(PathBuf, String), AppError> {
