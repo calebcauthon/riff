@@ -33,6 +33,14 @@ pub enum Commands {
     Stop(StopArgs),
     /// Toggle dictation session (start if idle, stop if active)
     Toggle(ToggleArgs),
+    /// Show running live session status
+    Live(LiveArgs),
+    /// Transcribe audio captured so far and keep recording
+    Chunk,
+    /// Pause transcription capture while continuing to record audio
+    Pause,
+    /// Resume transcription capture after pause
+    Unpause,
 
     /// List recent sessions
     List(ListArgs),
@@ -108,6 +116,17 @@ pub struct ToggleArgs {
     /// Used when active (stop path): override parakeet model name
     #[arg(long)]
     pub parakeet_model: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct LiveArgs {
+    /// Refresh interval in milliseconds
+    #[arg(long, default_value_t = 1000)]
+    pub poll_ms: u64,
+
+    /// Print one snapshot and exit
+    #[arg(long, default_value_t = false)]
+    pub once: bool,
 }
 
 #[derive(Args, Debug)]

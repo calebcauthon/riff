@@ -15,6 +15,14 @@ pub struct SessionState {
     pub audio_device: String,
     #[serde(default)]
     pub clipboard_watcher_pid: Option<i32>,
+    #[serde(default)]
+    pub transcription_watcher_pid: Option<i32>,
+    #[serde(default)]
+    pub transcription_cursor_sec: f64,
+    #[serde(default)]
+    pub transcription_paused: bool,
+    #[serde(default)]
+    pub transcription_pause_started_sec: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

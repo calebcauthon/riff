@@ -23,7 +23,8 @@ mod shot_modules;
 mod transcription;
 
 use crate::cli::{
-    Cli, Commands, HtmlArgs, ScreenshotUseArgs, StartArgs, StopArgs, ToggleArgs, WatchClipboardArgs,
+    Cli, Commands, HtmlArgs, LiveArgs, ScreenshotUseArgs, StartArgs, StopArgs, ToggleArgs,
+    WatchClipboardArgs,
 };
 use crate::error::{app_error, AppError};
 use crate::history::{
@@ -36,13 +37,19 @@ use crate::paths::{
     perf_log_file, web_server_pid_file,
 };
 use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
-use crate::session_commands::{cmd_shot, cmd_start, cmd_stop};
+use crate::session_commands::{cmd_chunk, cmd_pause, cmd_shot, cmd_start, cmd_stop, cmd_unpause};
 use crate::transcription::{
-    default_sound_picker_script, ensure_web_server, touch_web_server, web_server_base_url,
+    default_parakeet_script, default_sound_picker_script, ensure_web_server,
+    resolve_parakeet_model, resolve_parakeet_script, resolve_python_bin, touch_web_server,
+    web_server_base_url,
 };
 
 pub(crate) const SUPPORTED_IMAGE_EXTS: &[&str] =
     &["png", "jpg", "jpeg", "webp", "tif", "tiff", "heic", "heif"];
+
+fn build_id() -> &'static str {
+    option_env!("RIFF_BUILD_ID").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
@@ -251,6 +258,415 @@ pub(crate) fn stop_clipboard_watcher(pid: i32, cli: &Cli) {
     print_verbose(
         cli,
         format!("Clipboard watcher pid={pid} was force-stopped."),
+    );
+}
+
+fn transcription_worker_enabled() -> bool {
+    bool_env_enabled("RIFF_LIVE_TRANSCRIBE", false)
+}
+
+fn env_f64(name: &str, default: f64, min: f64, max: f64) -> f64 {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|v| v.clamp(min, max))
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v.clamp(min, max))
+        .unwrap_or(default)
+}
+
+fn env_optional_chunk_max_sec() -> Option<f64> {
+    let raw = env::var("RIFF_CHUNK_MAX_SEC")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    if raw <= 0.0 {
+        None
+    } else {
+        Some(raw.clamp(5.0, 300.0))
+    }
+}
+
+fn python_major_minor(bin: &str) -> Option<(u32, u32)> {
+    let out = Command::new(bin)
+        .arg("-c")
+        .arg("import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let (major, minor) = raw.split_once('.')?;
+    Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?))
+}
+
+fn python_supported_for_parakeet(bin: &str) -> bool {
+    matches!(
+        python_major_minor(bin),
+        Some((3, 10)) | Some((3, 11)) | Some((3, 12))
+    )
+}
+
+fn python_has_parakeet_deps(bin: &str) -> bool {
+    let out = Command::new(bin)
+        .arg("-c")
+        .arg("import torch; import nemo.collections.asr.models")
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
+fn resolve_watcher_python_bin() -> (Option<String>, Vec<String>) {
+    let mut candidates = Vec::<String>::new();
+    let primary = resolve_python_bin(None);
+    candidates.push(primary);
+    for alt in ["python3.12", "python3.11", "python3.10"] {
+        if !candidates.iter().any(|c| c == alt) {
+            candidates.push(alt.to_string());
+        }
+    }
+
+    let mut considered = Vec::<String>::new();
+    for candidate in &candidates {
+        if !command_exists(candidate) {
+            continue;
+        }
+        let supported = python_supported_for_parakeet(candidate);
+        let deps_ok = if supported {
+            python_has_parakeet_deps(candidate)
+        } else {
+            false
+        };
+        let version = python_major_minor(candidate)
+            .map(|(maj, min)| format!("{maj}.{min}"))
+            .unwrap_or_else(|| "unknown".to_string());
+        considered.push(format!(
+            "{}@{}{}{}",
+            candidate,
+            version,
+            if supported { "" } else { " (unsupported)" },
+            if supported && !deps_ok {
+                " (deps-missing)"
+            } else {
+                ""
+            }
+        ));
+        if supported && deps_ok {
+            return (Some(candidate.clone()), considered);
+        }
+    }
+    (None, considered)
+}
+
+fn append_transcription_watcher_event(state: &SessionState, payload: Value) {
+    let mut event = json!({
+        "ts": now_iso(),
+        "session_id": state.session_id,
+    });
+    if let (Some(base), Some(extra)) = (event.as_object_mut(), payload.as_object()) {
+        for (k, v) in extra {
+            base.insert(k.clone(), v.clone());
+        }
+    }
+    let _ = append_jsonl(Path::new(&state.events_path), &event);
+}
+
+pub(crate) fn spawn_transcription_watcher(state: &SessionState, cli: &Cli) -> Option<i32> {
+    if !transcription_worker_enabled() {
+        print_verbose(
+            cli,
+            "Transcription watcher disabled by RIFF_LIVE_TRANSCRIBE.",
+        );
+        append_transcription_watcher_event(
+            state,
+            json!({
+                "type": "transcription_watcher_not_started",
+                "reason": "disabled_by_env",
+            }),
+        );
+        return None;
+    }
+    if env::var("RIFF_TRANSCRIBE_CMD")
+        .ok()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        print_verbose(
+            cli,
+            "Transcription watcher not started because RIFF_TRANSCRIBE_CMD is set.",
+        );
+        append_transcription_watcher_event(
+            state,
+            json!({
+                "type": "transcription_watcher_not_started",
+                "reason": "custom_transcribe_cmd_enabled",
+            }),
+        );
+        return None;
+    }
+
+    let (python_bin, python_candidates) = resolve_watcher_python_bin();
+    let Some(python_bin) = python_bin else {
+        print_verbose(
+            cli,
+            "Transcription watcher not started because no supported python (3.10-3.12) was found.",
+        );
+        append_transcription_watcher_event(
+            state,
+            json!({
+                "type": "transcription_watcher_not_started",
+                "reason": "python_incompatible_or_unavailable_or_missing_parakeet_deps",
+                "python_candidates": python_candidates,
+            }),
+        );
+        return None;
+    };
+
+    let local_script = default_parakeet_script();
+    let resolved_script = resolve_parakeet_script(None);
+    let local_script_for_event = local_script.clone();
+    let resolved_script_for_event = resolved_script.clone();
+    let mut candidates = Vec::<PathBuf>::new();
+    if let Some(path) = local_script {
+        candidates.push(path);
+    }
+    if let Some(path) = resolved_script {
+        if !candidates.iter().any(|p| p == &path) {
+            candidates.push(path);
+        }
+    }
+    let supports_watch_mode = |path: &Path| -> bool {
+        fs::read_to_string(path)
+            .map(|src| src.contains("--watch-audio"))
+            .unwrap_or(false)
+    };
+    let script_path = match candidates
+        .into_iter()
+        .find(|path| path.exists() && supports_watch_mode(path))
+    {
+        Some(path) => path,
+        None => {
+            print_verbose(
+                cli,
+                "Transcription watcher not started because no watch-capable parakeet script was found.",
+            );
+            append_transcription_watcher_event(
+                state,
+                json!({
+                    "type": "transcription_watcher_not_started",
+                    "reason": "no_watch_capable_script",
+                    "local_script": local_script_for_event.map(|p| p.display().to_string()),
+                    "resolved_script": resolved_script_for_event.map(|p| p.display().to_string()),
+                }),
+            );
+            return None;
+        }
+    };
+
+    let session_dir = PathBuf::from(&state.session_dir);
+    let log_path = session_dir.join("transcription-watcher.log");
+    let log_file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(f) => f,
+        Err(e) => {
+            append_transcription_watcher_event(
+                state,
+                json!({
+                    "type": "transcription_watcher_not_started",
+                    "reason": "open_log_failed",
+                    "log_path": log_path,
+                    "error": e.to_string(),
+                }),
+            );
+            return None;
+        }
+    };
+    let log_file_err = match log_file.try_clone() {
+        Ok(f) => f,
+        Err(e) => {
+            append_transcription_watcher_event(
+                state,
+                json!({
+                    "type": "transcription_watcher_not_started",
+                    "reason": "clone_log_handle_failed",
+                    "log_path": log_path,
+                    "error": e.to_string(),
+                }),
+            );
+            return None;
+        }
+    };
+
+    let min_chunk_sec = env_f64("RIFF_CHUNK_MIN_SEC", 12.0, 3.0, 120.0);
+    let max_chunk_sec = env_optional_chunk_max_sec();
+    let silence_sec = env_f64("RIFF_CHUNK_SILENCE_SEC", 1.2, 0.2, 10.0);
+    let silence_db = env_f64("RIFF_CHUNK_SILENCE_DB", -33.0, -90.0, -5.0);
+    let poll_ms = env_u64("RIFF_CHUNK_POLL_MS", 800, 200, 5000);
+    let model = resolve_parakeet_model(None);
+
+    let watcher_args = vec![
+        script_path.display().to_string(),
+        "--watch-audio".to_string(),
+        "--audio".to_string(),
+        state.audio_path.clone(),
+        "--out-txt".to_string(),
+        session_dir.join("transcript.txt").display().to_string(),
+        "--events-path".to_string(),
+        state.events_path.clone(),
+        "--session-id".to_string(),
+        state.session_id.clone(),
+        "--started-at-epoch".to_string(),
+        state.started_at_epoch.to_string(),
+        "--model".to_string(),
+        model.clone(),
+        "--min-chunk-sec".to_string(),
+        format!("{min_chunk_sec:.3}"),
+        "--max-chunk-sec".to_string(),
+        format!("{:.3}", max_chunk_sec.unwrap_or(0.0)),
+        "--silence-sec".to_string(),
+        format!("{silence_sec:.3}"),
+        "--silence-db".to_string(),
+        format!("{silence_db:.3}"),
+        "--poll-ms".to_string(),
+        poll_ms.to_string(),
+        "--quiet".to_string(),
+    ];
+    let command_preview = format!(
+        "{} {}",
+        shell_escape(&python_bin),
+        watcher_args
+            .iter()
+            .map(|a| shell_escape(a))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
+    let mut cmd = Command::new(&python_bin);
+    cmd.args(&watcher_args[0..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_err));
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            append_transcription_watcher_event(
+                state,
+                json!({
+                    "type": "transcription_watcher_not_started",
+                    "reason": "spawn_failed",
+                    "error": e.to_string(),
+                    "python_bin": python_bin,
+                    "python_candidates": python_candidates,
+                    "script_path": script_path,
+                    "log_path": log_path,
+                    "command_preview": command_preview,
+                }),
+            );
+            return None;
+        }
+    };
+    thread::sleep(Duration::from_millis(120));
+    if child.try_wait().ok().flatten().is_some() {
+        print_verbose(
+            cli,
+            format!(
+                "Transcription watcher exited immediately; see {}",
+                log_path.display()
+            ),
+        );
+        append_transcription_watcher_event(
+            state,
+            json!({
+                "type": "transcription_watcher_exited_early",
+                "reason": "exited_within_startup_window",
+                "python_bin": python_bin,
+                "python_candidates": python_candidates,
+                "script_path": script_path,
+                "log_path": log_path,
+                "command_preview": command_preview,
+            }),
+        );
+        return None;
+    }
+
+    let pid = child.id() as i32;
+    append_transcription_watcher_event(
+        state,
+        json!({
+            "type": "transcription_watcher_started",
+            "pid": pid,
+            "python_bin": python_bin,
+            "python_candidates": python_candidates,
+            "script_path": script_path,
+            "log_path": log_path,
+            "command_preview": command_preview,
+        }),
+    );
+    print_verbose(
+        cli,
+        format!(
+            "Transcription watcher started with pid={pid}, log={}",
+            log_path.display()
+        ),
+    );
+    Some(pid)
+}
+
+pub(crate) fn wait_for_transcription_watcher(
+    pid: i32,
+    timeout: Duration,
+    cli: &Cli,
+) -> (bool, f64) {
+    let started = SystemTime::now();
+    while SystemTime::now()
+        .duration_since(started)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        < timeout
+    {
+        if !process_is_alive(pid) {
+            let waited_ms = SystemTime::now()
+                .duration_since(started)
+                .unwrap_or_else(|_| Duration::from_secs(0))
+                .as_secs_f64()
+                * 1000.0;
+            return (true, waited_ms);
+        }
+        thread::sleep(Duration::from_millis(80));
+    }
+    let waited_ms = SystemTime::now()
+        .duration_since(started)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs_f64()
+        * 1000.0;
+    print_verbose(
+        cli,
+        format!("Transcription watcher pid={pid} still alive after wait timeout."),
+    );
+    (false, waited_ms)
+}
+
+pub(crate) fn stop_transcription_watcher(pid: i32, cli: &Cli) {
+    if !process_is_alive(pid) {
+        return;
+    }
+    let _ = send_signal(pid, libc::SIGTERM);
+    let deadline = SystemTime::now() + Duration::from_millis(1200);
+    while SystemTime::now() < deadline {
+        if !process_is_alive(pid) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(40));
+    }
+    let _ = send_signal(pid, libc::SIGKILL);
+    print_verbose(
+        cli,
+        format!("Transcription watcher pid={pid} was force-stopped."),
     );
 }
 
@@ -857,6 +1273,30 @@ fn stop_recorder(pid: i32, cli: &Cli) -> Result<(), AppError> {
     Ok(())
 }
 
+pub(crate) fn pause_recorder_capture(pid: i32, cli: &Cli) -> Result<(), AppError> {
+    if !process_is_alive(pid) {
+        return Err(app_error(
+            1,
+            format!("Recorder pid={pid} is not alive; cannot pause."),
+        ));
+    }
+    print_verbose(cli, format!("Pausing recorder pid={pid} with SIGSTOP"));
+    send_signal(pid, libc::SIGSTOP)
+        .map_err(|e| app_error(1, format!("Failed to SIGSTOP recorder pid={pid}: {e}")))
+}
+
+pub(crate) fn resume_recorder_capture(pid: i32, cli: &Cli) -> Result<(), AppError> {
+    if !process_is_alive(pid) {
+        return Err(app_error(
+            1,
+            format!("Recorder pid={pid} is not alive; cannot resume."),
+        ));
+    }
+    print_verbose(cli, format!("Resuming recorder pid={pid} with SIGCONT"));
+    send_signal(pid, libc::SIGCONT)
+        .map_err(|e| app_error(1, format!("Failed to SIGCONT recorder pid={pid}: {e}")))
+}
+
 fn unix_now() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -951,12 +1391,44 @@ fn cmd_sounds(_cli: &Cli) -> Result<i32, AppError> {
     Ok(0)
 }
 
+fn latest_transcription_watcher_event(events_path: &Path) -> Option<Value> {
+    let text = fs::read_to_string(events_path).ok()?;
+    for line in text.lines().rev() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(t) else {
+            continue;
+        };
+        let et = v.get("type").and_then(|x| x.as_str()).unwrap_or_default();
+        if matches!(
+            et,
+            "transcription_watcher_started"
+                | "transcription_watcher_not_started"
+                | "transcription_watcher_exited_early"
+                | "transcription_worker_stopped"
+                | "transcript_probe"
+                | "transcript_chunk"
+        ) {
+            return Some(v);
+        }
+    }
+    None
+}
+
 fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
     ensure_dirs()?;
     let active = active_state_file();
     if !active.exists() {
-        print_out(cli, "No active session.");
-        emit_json(cli, &json!({ "active": false }));
+        print_out(cli, format!("No active session.\nbuild_id: {}", build_id()));
+        emit_json(
+            cli,
+            &json!({
+                "active": false,
+                "build_id": build_id()
+            }),
+        );
         return Ok(0);
     }
 
@@ -965,11 +1437,38 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
     let alive = pid.map(process_is_alive).unwrap_or(false);
     let watcher_pid = state.clipboard_watcher_pid;
     let watcher_alive = watcher_pid.map(process_is_alive).unwrap_or(false);
+    let transcription_watcher_pid = state.transcription_watcher_pid;
+    let transcription_watcher_alive = transcription_watcher_pid
+        .map(process_is_alive)
+        .unwrap_or(false);
+    let watcher_event = latest_transcription_watcher_event(Path::new(&state.events_path));
+    let watcher_event_type = watcher_event
+        .as_ref()
+        .and_then(|v| v.get("type").and_then(|x| x.as_str()))
+        .map(|s| s.to_string());
+    let watcher_reason = watcher_event
+        .as_ref()
+        .and_then(|v| v.get("reason").and_then(|x| x.as_str()))
+        .map(|s| s.to_string());
+    let watcher_log_path = watcher_event
+        .as_ref()
+        .and_then(|v| v.get("log_path").and_then(|x| x.as_str()))
+        .map(|s| s.to_string());
+    let watcher_command_preview = watcher_event
+        .as_ref()
+        .and_then(|v| v.get("command_preview").and_then(|x| x.as_str()))
+        .map(|s| s.to_string());
+    let pause_since = state.transcription_pause_started_sec;
+    let paused_for_sec = if state.transcription_paused {
+        pause_since.map(|t| (unix_now() - t).max(0.0))
+    } else {
+        None
+    };
 
     print_out(
         cli,
         format!(
-            "Active session: {}\nsession_dir: {}\nffmpeg_pid: {} (alive={})\nclipboard_watcher_pid: {} (alive={})",
+            "Active session: {}\nsession_dir: {}\nffmpeg_pid: {} (alive={})\nclipboard_watcher_pid: {} (alive={})\ntranscription_watcher_pid: {} (alive={})\ntranscription_watcher_event: {}{}\ntranscription_watcher_log: {}\ntranscription_cursor_sec: {:.3}\ntranscription_paused: {}{}\nbuild_id: {}",
             state.session_id,
             state.session_dir,
             pid.map(|p| p.to_string())
@@ -979,7 +1478,23 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
             watcher_pid
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "none".to_string()),
-            watcher_alive
+            watcher_alive,
+            transcription_watcher_pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            transcription_watcher_alive,
+            watcher_event_type.as_deref().unwrap_or("none"),
+            watcher_reason
+                .as_deref()
+                .map(|r| format!(" (reason={r})"))
+                .unwrap_or_default(),
+            watcher_log_path.as_deref().unwrap_or("none"),
+            state.transcription_cursor_sec,
+            state.transcription_paused,
+            paused_for_sec
+                .map(|sec| format!(" (paused_for={}s)", round3(sec)))
+                .unwrap_or_default(),
+            build_id()
         ),
     );
 
@@ -994,8 +1509,177 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
             "ffmpeg_alive": alive,
             "clipboard_watcher_pid": watcher_pid,
             "clipboard_watcher_alive": watcher_alive,
+            "transcription_watcher_pid": transcription_watcher_pid,
+            "transcription_watcher_alive": transcription_watcher_alive,
+            "transcription_watcher_last_event": watcher_event_type,
+            "transcription_watcher_last_reason": watcher_reason,
+            "transcription_watcher_log_path": watcher_log_path,
+            "transcription_watcher_command_preview": watcher_command_preview,
+            "transcription_cursor_sec": round3(state.transcription_cursor_sec),
+            "transcription_paused": state.transcription_paused,
+            "transcription_pause_started_sec": pause_since.map(round3),
+            "transcription_paused_for_sec": paused_for_sec.map(round3),
+            "build_id": build_id(),
         }),
     );
+
+    Ok(0)
+}
+
+fn format_hms_compact(seconds: f64) -> String {
+    let sec = seconds.max(0.0).round() as i64;
+    let h = sec / 3600;
+    let m = (sec % 3600) / 60;
+    let s = sec % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+struct LiveChunkStats {
+    total: usize,
+    ok: usize,
+    skipped: usize,
+    error: usize,
+}
+
+fn live_chunk_stats(events: &[Value]) -> LiveChunkStats {
+    let mut stats = LiveChunkStats::default();
+    for e in events {
+        if e.get("type").and_then(|v| v.as_str()) != Some("transcript_chunk") {
+            continue;
+        }
+        stats.total = stats.total.saturating_add(1);
+        match e.get("status").and_then(|v| v.as_str()) {
+            Some("ok") => stats.ok = stats.ok.saturating_add(1),
+            Some("skipped") => stats.skipped = stats.skipped.saturating_add(1),
+            Some("error") => stats.error = stats.error.saturating_add(1),
+            _ => {}
+        }
+    }
+    stats
+}
+
+fn live_snapshot(state: &SessionState) -> (f64, usize, usize, LiveChunkStats, String) {
+    let elapsed = (unix_now() - state.started_at_epoch).max(0.0);
+    let events = history::read_jsonl_values(Path::new(&state.events_path));
+    let screenshots = reporting::shots_from_events(&events).len();
+    let chunks = live_chunk_stats(&events);
+    let transcript_path = Path::new(&state.session_dir).join("transcript.txt");
+    let transcript = fs::read_to_string(transcript_path).unwrap_or_default();
+    let words = transcript.split_whitespace().count();
+    (elapsed, screenshots, words, chunks, transcript)
+}
+
+fn cmd_live(cli: &Cli, args: &LiveArgs) -> Result<i32, AppError> {
+    ensure_dirs()?;
+    let active = active_state_file();
+    if !active.exists() {
+        print_out(cli, "No active session.");
+        emit_json(
+            cli,
+            &json!({
+                "active": false
+            }),
+        );
+        return Ok(0);
+    }
+
+    let poll_ms = args.poll_ms.max(200);
+    let mut printed_banner = false;
+    let mut last_transcript = String::new();
+    loop {
+        if !active.exists() {
+            if !args.once {
+                println!();
+                print_out(cli, "Session ended.");
+            }
+            break;
+        }
+
+        let state: SessionState = read_json(&active)?;
+        let (elapsed, screenshots, words, chunks, transcript) = live_snapshot(&state);
+        if !printed_banner && !args.once {
+            print_out(
+                cli,
+                "Manual chunking enabled: run `riff chunk` to process captured audio.",
+            );
+            print_out(
+                cli,
+                "Use `riff pause` / `riff unpause` to skip transcription windows.",
+            );
+            print_out(cli, format!("Session: {}", state.session_id));
+            printed_banner = true;
+        }
+        let listen_state = if state.transcription_paused {
+            let paused_for = state
+                .transcription_pause_started_sec
+                .map(|t| (unix_now() - t).max(0.0))
+                .unwrap_or(0.0);
+            format!("Paused {}", format_hms_compact(paused_for))
+        } else {
+            "Listening".to_string()
+        };
+        let line = format!(
+            "LIVE • {} • {} screenshots • {} words • chunks {} (ok {}, skipped {}, err {}) • {}",
+            format_hms_compact(elapsed),
+            screenshots,
+            words,
+            chunks.total,
+            chunks.ok,
+            chunks.skipped,
+            chunks.error,
+            listen_state
+        );
+
+        let transcript_trimmed = transcript.trim().to_string();
+        let new_words = if transcript_trimmed.starts_with(&last_transcript) {
+            transcript_trimmed[last_transcript.len()..]
+                .trim()
+                .to_string()
+        } else if transcript_trimmed != last_transcript {
+            transcript_trimmed.clone()
+        } else {
+            String::new()
+        };
+
+        if args.once {
+            print_out(cli, "Manual chunking enabled.");
+            print_out(cli, &line);
+            if !transcript_trimmed.is_empty() {
+                print_out(cli, format!("Transcript: {}", transcript_trimmed));
+            }
+            emit_json(
+                cli,
+                &json!({
+                    "active": true,
+                    "session_id": state.session_id,
+                    "elapsed_sec": round3(elapsed),
+                    "screenshots": screenshots,
+                    "words": words,
+                    "chunks_total": chunks.total,
+                    "chunks_ok": chunks.ok,
+                    "chunks_skipped": chunks.skipped,
+                    "chunks_error": chunks.error,
+                    "transcription_cursor_sec": round3(state.transcription_cursor_sec),
+                    "transcription_paused": state.transcription_paused,
+                    "transcription_pause_started_sec": state.transcription_pause_started_sec.map(round3),
+                    "transcript_text": transcript_trimmed,
+                }),
+            );
+            break;
+        }
+
+        if !cli.quiet {
+            print!("\r{line}\x1b[K");
+            let _ = io::stdout().flush();
+            if !new_words.is_empty() {
+                print!("\r\x1b[K\nTranscript: {}\n", new_words);
+                let _ = io::stdout().flush();
+            }
+        }
+        last_transcript = transcript_trimmed;
+        thread::sleep(Duration::from_millis(poll_ms));
+    }
 
     Ok(0)
 }
@@ -1330,6 +2014,10 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Shot => cmd_shot(cli),
         Commands::Stop(args) => cmd_stop(cli, args),
         Commands::Toggle(args) => cmd_toggle(cli, args),
+        Commands::Live(args) => cmd_live(cli, args),
+        Commands::Chunk => cmd_chunk(cli),
+        Commands::Pause => cmd_pause(cli),
+        Commands::Unpause => cmd_unpause(cli),
         Commands::Sounds => cmd_sounds(cli),
         Commands::Status => cmd_status(cli),
         Commands::Perf(args) => cmd_perf(cli, args),

@@ -12,25 +12,401 @@ use crate::reporting::{
 };
 use crate::screenshots::{detect_screenshot_dir, file_mtime_epoch, move_session_screenshots};
 use crate::transcription::{
-    ensure_parakeet_server, ensure_web_server, parakeet_server_enabled, resolve_parakeet_model,
-    resolve_parakeet_script, resolve_python_bin, run_transcription,
+    ensure_web_server, resolve_parakeet_model, resolve_parakeet_script, resolve_python_bin,
+    run_transcription,
 };
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
     capture_process_stats, clear_active_state, command_exists, emit_json, get_audio_duration_sec,
-    load_active_state, now_iso, play_event_sound, print_out, print_verbose, process_is_alive,
-    read_json, recorder_error_looks_like_invalid_audio_device, resolve_audio_device,
-    resolve_audio_device_uncached, round3, save_active_state, session_stamp,
-    spawn_clipboard_watcher, spawn_recorder, stop_clipboard_watcher, stop_recorder, unix_now,
-    write_json,
+    load_active_state, now_iso, pause_recorder_capture, play_event_sound, print_out, print_verbose,
+    process_is_alive, read_json, recorder_error_looks_like_invalid_audio_device,
+    resolve_audio_device, resolve_audio_device_uncached, resume_recorder_capture, round3,
+    save_active_state, session_stamp, spawn_clipboard_watcher, spawn_recorder,
+    spawn_transcription_watcher, stop_clipboard_watcher, stop_recorder, stop_transcription_watcher,
+    unix_now, wait_for_transcription_watcher, write_json,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
+
+fn load_chunked_transcript(session_dir: &Path, events_path: &Path) -> (String, Value) {
+    let transcript_path = session_dir.join("transcript.txt");
+    let transcript_raw = fs::read_to_string(&transcript_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let events = read_jsonl_values(events_path);
+    let mut chunk_count = 0usize;
+    let mut chunk_seconds = 0.0f64;
+    let mut chunk_mode = "manual";
+    let mut stopping_seen = false;
+    let mut stop_reason = String::new();
+    let mut status_counts: HashMap<String, usize> = HashMap::new();
+
+    for e in &events {
+        let et = e.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        if et == "session_stopping" {
+            stopping_seen = true;
+        }
+        if et != "transcript_chunk" {
+            continue;
+        }
+        chunk_count = chunk_count.saturating_add(1);
+        let start_sec = e.get("start_sec").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let end_sec = e
+            .get("end_sec")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(start_sec);
+        chunk_seconds += (end_sec - start_sec).max(0.0);
+
+        if let Some(mode) = e.get("mode").and_then(|v| v.as_str()) {
+            chunk_mode = mode;
+        }
+        if let Some(reason) = e.get("reason").and_then(|v| v.as_str()) {
+            stop_reason = reason.to_string();
+        }
+        if let Some(status) = e.get("status").and_then(|v| v.as_str()) {
+            *status_counts.entry(status.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let ok_chunks = status_counts.get("ok").copied().unwrap_or(0);
+    let skipped_chunks = status_counts.get("skipped").copied().unwrap_or(0);
+    let errored_chunks = status_counts.get("error").copied().unwrap_or(0);
+    let status = if transcript_raw.is_empty() && chunk_count == 0 {
+        "empty"
+    } else if errored_chunks > 0 && ok_chunks == 0 {
+        "error"
+    } else {
+        "ok"
+    };
+
+    (
+        transcript_raw,
+        json!({
+            "status": status,
+            "method": "manual_chunked",
+            "mode": chunk_mode,
+            "chunks": chunk_count,
+            "chunks_ok": ok_chunks,
+            "chunks_skipped": skipped_chunks,
+            "chunks_error": errored_chunks,
+            "chunk_audio_sec": round3(chunk_seconds),
+            "stopping_seen": stopping_seen,
+            "stop_reason": if stop_reason.is_empty() { Value::Null } else { Value::String(stop_reason) }
+        }),
+    )
+}
+
+fn audio_elapsed_sec(state: &SessionState) -> f64 {
+    get_audio_duration_sec(Path::new(&state.audio_path))
+        .unwrap_or_else(|| (unix_now() - state.started_at_epoch).max(0.0))
+}
+
+fn next_transcript_chunk_id(events: &[Value]) -> usize {
+    events
+        .iter()
+        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("transcript_chunk"))
+        .filter_map(|e| e.get("id").and_then(|v| v.as_u64()))
+        .max()
+        .unwrap_or(0) as usize
+        + 1
+}
+
+fn merge_manual_chunk_text(existing: &str, chunk: &str) -> String {
+    let left = existing.trim();
+    let right = chunk.trim();
+    if right.is_empty() {
+        return left.to_string();
+    }
+    if left.is_empty() {
+        return right.to_string();
+    }
+    format!("{left}\n\n{right}")
+}
+
+fn extract_audio_segment(
+    source_audio: &Path,
+    start_sec: f64,
+    end_sec: f64,
+    target_audio: &Path,
+) -> Result<(), AppError> {
+    if end_sec <= start_sec {
+        return Err(app_error(
+            1,
+            "Invalid chunk boundary: end <= start for audio segment extract.",
+        ));
+    }
+    let duration = (end_sec - start_sec).max(0.0);
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .arg("-ss")
+        .arg(format!("{start_sec:.3}"))
+        .arg("-t")
+        .arg(format!("{duration:.3}"))
+        .arg("-i")
+        .arg(source_audio)
+        .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
+        .arg(target_audio)
+        .output()
+        .map_err(|e| app_error(1, format!("Failed to run ffmpeg for chunk extract: {e}")))?;
+    if !output.status.success() || !target_audio.exists() {
+        return Err(app_error(
+            1,
+            format!(
+                "ffmpeg chunk extract failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -> (String, Value) {
+    let script = resolve_parakeet_script(None);
+    let Some(script_path) = script else {
+        return (
+            String::new(),
+            json!({
+                "status": "skipped",
+                "reason": "No transcription configured. Set RIFF_PARAKEET_SCRIPT or use --parakeet-script."
+            }),
+        );
+    };
+
+    let python_bin = resolve_python_bin(None);
+    let model = resolve_parakeet_model(None);
+    let cmd_for_log = format!(
+        "{} {} --audio {} --out-txt {} --model {}",
+        python_bin,
+        script_path.display(),
+        chunk_audio.display(),
+        chunk_out_txt.display(),
+        model
+    );
+    print_verbose(
+        cli,
+        format!("Running chunk transcription (one-shot): {cmd_for_log}"),
+    );
+
+    let output = Command::new(&python_bin)
+        .arg(&script_path)
+        .arg("--audio")
+        .arg(chunk_audio)
+        .arg("--out-txt")
+        .arg(chunk_out_txt)
+        .arg("--model")
+        .arg(&model)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let txt = if chunk_out_txt.exists() {
+                fs::read_to_string(chunk_out_txt).unwrap_or_default()
+            } else {
+                String::from_utf8_lossy(&out.stdout).to_string()
+            };
+            (
+                txt.trim().to_string(),
+                json!({
+                    "status": "ok",
+                    "method": "parakeet_python",
+                    "model": model,
+                    "script": script_path.display().to_string(),
+                }),
+            )
+        }
+        Ok(out) => (
+            String::new(),
+            json!({
+                "status": "error",
+                "method": "parakeet_python",
+                "returncode": out.status.code(),
+                "stderr": String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                "stdout": String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            }),
+        ),
+        Err(e) => (
+            String::new(),
+            json!({
+                "status": "error",
+                "method": "parakeet_python",
+                "reason": format!("Failed to run python transcription: {e}"),
+            }),
+        ),
+    }
+}
+
+fn process_manual_chunk(
+    state: &mut SessionState,
+    cli: &Cli,
+    reason: &str,
+    forced_end_sec: Option<f64>,
+) -> Result<Value, AppError> {
+    let session_dir = PathBuf::from(&state.session_dir);
+    let events_path = PathBuf::from(&state.events_path);
+    let source_audio = PathBuf::from(&state.audio_path);
+    if !source_audio.exists() {
+        return Ok(json!({
+            "status": "skipped",
+            "reason": format!("Audio file not found: {}", source_audio.display()),
+        }));
+    }
+    if !command_exists("ffmpeg") {
+        return Ok(json!({
+            "status": "error",
+            "reason": "ffmpeg is required for chunking but was not found in PATH.",
+        }));
+    }
+
+    let events = read_jsonl_values(&events_path);
+    let chunk_id = next_transcript_chunk_id(&events);
+    let start_sec = state.transcription_cursor_sec.max(0.0);
+    let effective_end_sec = forced_end_sec.unwrap_or_else(|| audio_elapsed_sec(state));
+
+    if effective_end_sec <= start_sec + 0.05 {
+        append_jsonl(
+            &events_path,
+            &json!({
+                "ts": now_iso(),
+                "type": "transcript_chunk",
+                "id": chunk_id,
+                "mode": "manual",
+                "status": "skipped",
+                "reason": "no_new_audio",
+                "requested_reason": reason,
+                "start_sec": round3(start_sec),
+                "end_sec": round3(effective_end_sec),
+            }),
+        )?;
+        return Ok(json!({
+            "status": "skipped",
+            "reason": "no_new_audio",
+            "start_sec": round3(start_sec),
+            "end_sec": round3(effective_end_sec),
+            "chunk_id": chunk_id
+        }));
+    }
+
+    let scratch_audio = session_dir.join(".chunk-manual.wav");
+    let scratch_txt = session_dir.join(".chunk-manual.txt");
+    let _ = fs::remove_file(&scratch_audio);
+    let _ = fs::remove_file(&scratch_txt);
+
+    if let Err(e) =
+        extract_audio_segment(&source_audio, start_sec, effective_end_sec, &scratch_audio)
+    {
+        append_jsonl(
+            &events_path,
+            &json!({
+                "ts": now_iso(),
+                "type": "transcript_chunk",
+                "id": chunk_id,
+                "mode": "manual",
+                "status": "error",
+                "reason": "segment_extract_failed",
+                "requested_reason": reason,
+                "start_sec": round3(start_sec),
+                "end_sec": round3(effective_end_sec),
+                "error": e.message,
+            }),
+        )?;
+        return Ok(json!({
+            "status": "error",
+            "reason": "segment_extract_failed",
+            "start_sec": round3(start_sec),
+            "end_sec": round3(effective_end_sec),
+            "chunk_id": chunk_id
+        }));
+    }
+
+    let (chunk_text, transcribe_meta) = transcribe_chunk_audio(&scratch_audio, &scratch_txt, cli);
+    let _ = fs::remove_file(&scratch_audio);
+    let _ = fs::remove_file(&scratch_txt);
+    let transcribe_status = transcribe_meta
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("error");
+
+    if transcribe_status != "ok" {
+        append_jsonl(
+            &events_path,
+            &json!({
+                "ts": now_iso(),
+                "type": "transcript_chunk",
+                "id": chunk_id,
+                "mode": "manual",
+                "status": "error",
+                "reason": "transcribe_failed",
+                "requested_reason": reason,
+                "start_sec": round3(start_sec),
+                "end_sec": round3(effective_end_sec),
+                "transcription": transcribe_meta,
+            }),
+        )?;
+        return Ok(json!({
+            "status": "error",
+            "reason": "transcribe_failed",
+            "start_sec": round3(start_sec),
+            "end_sec": round3(effective_end_sec),
+            "chunk_id": chunk_id,
+            "transcription": transcribe_meta
+        }));
+    }
+
+    let transcript_path = session_dir.join("transcript.txt");
+    let trimmed = chunk_text.trim().to_string();
+    let final_status = if trimmed.is_empty() { "skipped" } else { "ok" };
+    if !trimmed.is_empty() {
+        let existing = fs::read_to_string(&transcript_path).unwrap_or_default();
+        let merged = merge_manual_chunk_text(&existing, &trimmed);
+        fs::write(&transcript_path, format!("{merged}\n")).map_err(|e| {
+            app_error(
+                1,
+                format!(
+                    "Failed to write merged transcript {}: {e}",
+                    transcript_path.display()
+                ),
+            )
+        })?;
+    }
+    state.transcription_cursor_sec = effective_end_sec.max(state.transcription_cursor_sec);
+
+    append_jsonl(
+        &events_path,
+        &json!({
+            "ts": now_iso(),
+            "type": "transcript_chunk",
+            "id": chunk_id,
+            "mode": "manual",
+            "status": final_status,
+            "reason": if final_status == "ok" { "manual_chunk" } else { "empty_transcript" },
+            "requested_reason": reason,
+            "start_sec": round3(start_sec),
+            "end_sec": round3(effective_end_sec),
+            "chars": trimmed.len(),
+            "words": trimmed.split_whitespace().count(),
+            "transcription": transcribe_meta,
+        }),
+    )?;
+
+    Ok(json!({
+        "status": final_status,
+        "reason": reason,
+        "start_sec": round3(start_sec),
+        "end_sec": round3(effective_end_sec),
+        "chunk_id": chunk_id,
+        "chars": trimmed.len(),
+        "words": trimmed.split_whitespace().count(),
+        "transcription": transcribe_meta
+    }))
+}
 
 pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
@@ -41,6 +417,9 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         let existing: SessionState = read_json(&active_path)?;
         if let Some(pid) = existing.clipboard_watcher_pid {
             stop_clipboard_watcher(pid, cli);
+        }
+        if let Some(pid) = existing.transcription_watcher_pid {
+            stop_transcription_watcher(pid, cli);
         }
         if let Some(pid) = existing.ffmpeg_pid {
             if process_is_alive(pid) {
@@ -182,7 +561,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
 
     let spawn_recorder_ms = t_spawn_recorder.elapsed().as_secs_f64() * 1000.0;
 
-    let state = SessionState {
+    let mut state = SessionState {
         session_id: session_id.clone(),
         session_dir: session_dir.display().to_string(),
         screenshots_dir: screenshots_dir.display().to_string(),
@@ -195,6 +574,10 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         screenshot_source_dir: screenshot_dir.display().to_string(),
         audio_device: resolved_audio_device.clone(),
         clipboard_watcher_pid: None,
+        transcription_watcher_pid: None,
+        transcription_cursor_sec: 0.0,
+        transcription_paused: false,
+        transcription_pause_started_sec: None,
     };
 
     save_active_state(&state)?;
@@ -203,22 +586,16 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     if let Some(watcher_pid) =
         spawn_clipboard_watcher(&state, max_clipboard_id(&existing_clips), cli)
     {
-        let mut updated = state;
-        updated.clipboard_watcher_pid = Some(watcher_pid);
-        save_active_state(&updated)?;
+        state.clipboard_watcher_pid = Some(watcher_pid);
+        save_active_state(&state)?;
     }
 
-    let mut prewarm_ms = 0.0;
+    let mut transcription_watcher_spawned = false;
     let t_state_watcher = Instant::now();
-    // Warm the Parakeet server in the background so stop is faster.
-    if parakeet_server_enabled() {
-        let t_prewarm = Instant::now();
-        if let Some(script_path) = resolve_parakeet_script(None) {
-            let python_bin = resolve_python_bin(None);
-            let model = resolve_parakeet_model(None);
-            ensure_parakeet_server(&python_bin, &script_path, &model, cli, false);
-        }
-        prewarm_ms = t_prewarm.elapsed().as_secs_f64() * 1000.0;
+    if let Some(pid) = spawn_transcription_watcher(&state, cli) {
+        state.transcription_watcher_pid = Some(pid);
+        transcription_watcher_spawned = true;
+        save_active_state(&state)?;
     }
     let save_state_and_clipboard_ms = t_state_watcher.elapsed().as_secs_f64() * 1000.0;
 
@@ -232,10 +609,11 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "detect_screenshot_dir_ms": round3(screenshot_dir_ms),
             "resolve_audio_device_ms": round3(audio_device_ms),
             "spawn_recorder_ms": round3(spawn_recorder_ms),
-            "state_and_clipboard_ms": round3(save_state_and_clipboard_ms),
-            "parakeet_prewarm_ms": round3(prewarm_ms)
+            "state_and_watchers_ms": round3(save_state_and_clipboard_ms)
         },
-        "audio_device_retry": audio_device_retry
+        "audio_device_retry": audio_device_retry,
+        "transcription_watcher_spawned": transcription_watcher_spawned,
+        "transcription_watcher_pid": state.transcription_watcher_pid
     }));
 
     play_event_sound("start", cli);
@@ -266,6 +644,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "audio_device": resolved_audio_device,
             "audio_device_retry": audio_device_retry,
             "ffmpeg_pid": ffmpeg_pid,
+            "transcription_watcher_pid": state.transcription_watcher_pid,
             "startup_ms": round3(start_total_ms),
             "dry_run": false,
             "state_saved": true
@@ -426,6 +805,283 @@ pub(crate) fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
     Ok(0)
 }
 
+pub(crate) fn cmd_chunk(cli: &Cli) -> Result<i32, AppError> {
+    ensure_dirs()?;
+    if !active_state_file().exists() {
+        print_out(cli, "No active session.");
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "chunk",
+                "active": false,
+                "message": "No active session."
+            }),
+        );
+        return Ok(0);
+    }
+
+    let mut state = load_active_state()?;
+    if cli.dry_run {
+        let now_sec = audio_elapsed_sec(&state);
+        print_out(
+            cli,
+            format!(
+                "[dry-run] Would transcribe chunk from {:.3}s to {:.3}s",
+                state.transcription_cursor_sec, now_sec
+            ),
+        );
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "chunk",
+                "session_id": state.session_id,
+                "start_sec": round3(state.transcription_cursor_sec),
+                "end_sec": round3(now_sec),
+                "dry_run": true
+            }),
+        );
+        return Ok(0);
+    }
+
+    let result = process_manual_chunk(&mut state, cli, "manual", None)?;
+    save_active_state(&state)?;
+
+    let status = result
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let start_sec = result
+        .get("start_sec")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let end_sec = result
+        .get("end_sec")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(start_sec);
+    let words = result.get("words").and_then(|v| v.as_u64()).unwrap_or(0);
+    print_out(
+        cli,
+        format!(
+            "Chunk {} [{}]: {:.3}s -> {:.3}s ({} words)",
+            result.get("chunk_id").and_then(|v| v.as_u64()).unwrap_or(0),
+            status,
+            start_sec,
+            end_sec,
+            words
+        ),
+    );
+
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": "chunk",
+            "session_id": state.session_id,
+            "chunk": result
+        }),
+    );
+    Ok(0)
+}
+
+pub(crate) fn cmd_pause(cli: &Cli) -> Result<i32, AppError> {
+    ensure_dirs()?;
+    if !active_state_file().exists() {
+        print_out(cli, "No active session.");
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "pause",
+                "active": false,
+                "message": "No active session."
+            }),
+        );
+        return Ok(0);
+    }
+
+    let mut state = load_active_state()?;
+    if state.transcription_paused {
+        print_out(cli, "Already paused.");
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "pause",
+                "session_id": state.session_id,
+                "already_paused": true
+            }),
+        );
+        return Ok(0);
+    }
+
+    let Some(ffmpeg_pid) = state.ffmpeg_pid else {
+        return Err(app_error(
+            1,
+            "Active session has no recorder pid; cannot pause.",
+        ));
+    };
+    if !process_is_alive(ffmpeg_pid) {
+        return Err(app_error(
+            1,
+            format!("Recorder pid={ffmpeg_pid} is not alive; cannot pause."),
+        ));
+    }
+
+    if !cli.dry_run {
+        pause_recorder_capture(ffmpeg_pid, cli)?;
+        thread::sleep(Duration::from_millis(60));
+    }
+    let pause_at_sec = audio_elapsed_sec(&state);
+    let paused_at_epoch = unix_now();
+    let flush = if cli.dry_run {
+        json!({
+            "status": "dry_run",
+            "start_sec": round3(state.transcription_cursor_sec),
+            "end_sec": round3(pause_at_sec)
+        })
+    } else {
+        process_manual_chunk(&mut state, cli, "pause_flush", Some(pause_at_sec))?
+    };
+
+    state.transcription_paused = true;
+    state.transcription_pause_started_sec = Some(paused_at_epoch);
+    if !cli.dry_run {
+        append_jsonl(
+            Path::new(&state.events_path),
+            &json!({
+                "ts": now_iso(),
+                "type": "session_paused",
+                "session_id": state.session_id,
+                "audioSec": round3(pause_at_sec),
+                "cursor_sec": round3(state.transcription_cursor_sec),
+                "ffmpeg_pid": ffmpeg_pid,
+                "paused_at_epoch": round3(paused_at_epoch),
+            }),
+        )?;
+        save_active_state(&state)?;
+    }
+
+    print_out(
+        cli,
+        format!(
+            "Paused recording at {:.3}s (cursor {:.3}s)",
+            pause_at_sec, state.transcription_cursor_sec
+        ),
+    );
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": "pause",
+            "session_id": state.session_id,
+            "paused": true,
+            "pause_at_sec": round3(pause_at_sec),
+            "cursor_sec": round3(state.transcription_cursor_sec),
+            "ffmpeg_pid": ffmpeg_pid,
+            "flush": flush,
+            "dry_run": cli.dry_run
+        }),
+    );
+    Ok(0)
+}
+
+pub(crate) fn cmd_unpause(cli: &Cli) -> Result<i32, AppError> {
+    ensure_dirs()?;
+    if !active_state_file().exists() {
+        print_out(cli, "No active session.");
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "unpause",
+                "active": false,
+                "message": "No active session."
+            }),
+        );
+        return Ok(0);
+    }
+
+    let mut state = load_active_state()?;
+    if !state.transcription_paused {
+        print_out(cli, "Not paused.");
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "unpause",
+                "session_id": state.session_id,
+                "was_paused": false
+            }),
+        );
+        return Ok(0);
+    }
+
+    let Some(ffmpeg_pid) = state.ffmpeg_pid else {
+        return Err(app_error(
+            1,
+            "Active session has no recorder pid; cannot unpause.",
+        ));
+    };
+    if !process_is_alive(ffmpeg_pid) {
+        return Err(app_error(
+            1,
+            format!("Recorder pid={ffmpeg_pid} is not alive; cannot unpause."),
+        ));
+    }
+
+    let pause_started_sec = state
+        .transcription_pause_started_sec
+        .unwrap_or_else(unix_now);
+    if !cli.dry_run {
+        resume_recorder_capture(ffmpeg_pid, cli)?;
+    }
+    let unpause_at_sec = audio_elapsed_sec(&state);
+    let paused_sec = (unix_now() - pause_started_sec).max(0.0);
+    state.transcription_paused = false;
+    state.transcription_pause_started_sec = None;
+
+    if !cli.dry_run {
+        append_jsonl(
+            Path::new(&state.events_path),
+            &json!({
+                "ts": now_iso(),
+                "type": "session_unpaused",
+                "session_id": state.session_id,
+                "audioSec": round3(unpause_at_sec),
+                "paused_sec": round3(paused_sec),
+                "cursor_sec": round3(state.transcription_cursor_sec),
+                "ffmpeg_pid": ffmpeg_pid,
+            }),
+        )?;
+        save_active_state(&state)?;
+    }
+
+    print_out(
+        cli,
+        format!(
+            "Resumed recording at {:.3}s (paused {:.3}s wall-clock)",
+            unpause_at_sec, paused_sec
+        ),
+    );
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": "unpause",
+            "session_id": state.session_id,
+            "paused": false,
+            "unpause_at_sec": round3(unpause_at_sec),
+            "paused_sec": round3(paused_sec),
+            "cursor_sec": round3(state.transcription_cursor_sec),
+            "ffmpeg_pid": ffmpeg_pid,
+            "dry_run": cli.dry_run
+        }),
+    );
+    Ok(0)
+}
+
 pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
     if !active_state_file().exists() {
@@ -443,7 +1099,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     }
 
     let perf_total = Instant::now();
-    let state = load_active_state()?;
+    let mut state = load_active_state()?;
 
     let session_dir = PathBuf::from(&state.session_dir);
     let screenshots_dir = PathBuf::from(&state.screenshots_dir);
@@ -460,6 +1116,18 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let mut write_last_session_ms = 0.0;
     let mut generate_index_ms = 0.0;
     let mut clear_state_ms = 0.0;
+    let mut transcription_wait_ms = 0.0;
+    let mut transcription_forced_stop = false;
+    let mut stop_flush_meta = Value::Null;
+    let use_custom_transcribe = args
+        .transcribe_cmd
+        .as_ref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+        || env::var("RIFF_TRANSCRIBE_CMD")
+            .ok()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
 
     if !cli.dry_run {
         if let Some(pid) = state.clipboard_watcher_pid {
@@ -478,10 +1146,36 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     if !cli.dry_run {
         let t_stop_recorder = Instant::now();
         if let Some(pid) = state.ffmpeg_pid {
+            if state.transcription_paused && process_is_alive(pid) {
+                let _ = resume_recorder_capture(pid, cli);
+                thread::sleep(Duration::from_millis(20));
+            }
             stop_recorder(pid, cli)?;
             thread::sleep(Duration::from_millis(120));
         }
         stop_recorder_ms = t_stop_recorder.elapsed().as_secs_f64() * 1000.0;
+
+        if let Some(pid) = state.transcription_watcher_pid {
+            let (finished, waited_ms) =
+                wait_for_transcription_watcher(pid, Duration::from_secs(12), cli);
+            transcription_wait_ms = waited_ms;
+            if !finished {
+                transcription_forced_stop = true;
+                stop_transcription_watcher(pid, cli);
+            }
+        }
+
+        if !use_custom_transcribe {
+            stop_flush_meta = match process_manual_chunk(&mut state, cli, "stop_flush", None) {
+                Ok(meta) => meta,
+                Err(e) => json!({
+                    "status": "error",
+                    "reason": e.message,
+                }),
+            };
+        }
+        state.transcription_paused = false;
+        state.transcription_pause_started_sec = None;
     }
 
     let source_dir = PathBuf::from(&state.screenshot_source_dir);
@@ -514,7 +1208,24 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let move_screenshots_ms = t_move_screens.elapsed().as_secs_f64() * 1000.0;
 
     let t_transcribe = Instant::now();
-    let (transcript_raw, transcription_meta) = run_transcription(&state, &session_dir, args, cli);
+    let (transcript_raw, mut transcription_meta) = if use_custom_transcribe {
+        run_transcription(&state, &session_dir, args, cli)
+    } else {
+        load_chunked_transcript(&session_dir, &events_path)
+    };
+    if !use_custom_transcribe {
+        if let Some(obj) = transcription_meta.as_object_mut() {
+            obj.insert(
+                "forced_watcher_stop".to_string(),
+                json!(transcription_forced_stop),
+            );
+            obj.insert(
+                "watcher_wait_ms".to_string(),
+                json!(round3(transcription_wait_ms)),
+            );
+            obj.insert("stop_flush".to_string(), stop_flush_meta.clone());
+        }
+    }
     let transcribe_ms = t_transcribe.elapsed().as_secs_f64() * 1000.0;
 
     let audio_duration = get_audio_duration_sec(Path::new(&state.audio_path));
@@ -645,7 +1356,8 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "write_last_session_ms": round3(write_last_session_ms),
             "generate_index_ms": round3(generate_index_ms),
             "clear_state_ms": round3(clear_state_ms),
-            "web_server_ms": round3(web_server_ms)
+            "web_server_ms": round3(web_server_ms),
+            "transcription_watcher_wait_ms": round3(transcription_wait_ms)
         },
         "transcription_perf": transcription_perf,
         "transcription_method": transcription_meta.get("method").and_then(|v| v.as_str()),
@@ -708,12 +1420,31 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "write_last_session_ms": round3(write_last_session_ms),
                 "generate_index_ms": round3(generate_index_ms),
                 "clear_state_ms": round3(clear_state_ms),
-                "web_server_ms": round3(web_server_ms)
+                "web_server_ms": round3(web_server_ms),
+                "transcription_watcher_wait_ms": round3(transcription_wait_ms)
             },
             "transcription": transcription_meta,
+            "transcription_watcher_forced_stop": transcription_forced_stop,
             "dry_run": cli.dry_run,
         }),
     );
 
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_manual_chunk_text;
+
+    #[test]
+    fn merge_manual_chunk_text_uses_double_newline_separator() {
+        let merged = merge_manual_chunk_text("first chunk", "second chunk");
+        assert_eq!(merged, "first chunk\n\nsecond chunk");
+    }
+
+    #[test]
+    fn merge_manual_chunk_text_trims_outer_whitespace() {
+        let merged = merge_manual_chunk_text("  first  ", "  second  ");
+        assert_eq!(merged, "first\n\nsecond");
+    }
 }

@@ -1900,6 +1900,10 @@ mod tests {
             screenshot_source_dir: "/tmp/screens".to_string(),
             audio_device: "Built-in Microphone".to_string(),
             clipboard_watcher_pid: None,
+            transcription_watcher_pid: None,
+            transcription_cursor_sec: 0.0,
+            transcription_paused: false,
+            transcription_pause_started_sec: None,
         };
         let clips = vec![ClipboardMeta {
             clip_id: 1,
