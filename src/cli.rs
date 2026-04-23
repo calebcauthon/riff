@@ -41,6 +41,8 @@ pub enum Commands {
     Pause,
     /// Resume transcription capture after pause
     Unpause,
+    /// Toggle transcription pause state (pause if listening, unpause if paused)
+    TogglePause,
 
     /// List recent sessions
     List(ListArgs),

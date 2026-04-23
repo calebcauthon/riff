@@ -173,6 +173,10 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
             "Pause transcription capture while continuing to record audio",
         ),
         ("unpause", "Resume transcription capture after pause"),
+        (
+            "toggle-pause",
+            "Toggle transcription pause state (pause if listening, unpause if paused)",
+        ),
         ("list", "List recent sessions"),
         ("show", "Show note markdown for a session id"),
         ("copy", "Print transcript for a recent session index"),
@@ -211,6 +215,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         "chunk",
         "pause",
         "unpause",
+        "toggle-pause",
         "list",
         "show",
         "copy",

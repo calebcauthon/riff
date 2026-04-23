@@ -2008,6 +2008,20 @@ fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
     }
 }
 
+fn cmd_toggle_pause(cli: &Cli) -> Result<i32, AppError> {
+    ensure_dirs()?;
+    let active = active_state_file();
+    if !active.exists() {
+        return cmd_pause(cli);
+    }
+    let state: SessionState = read_json(&active)?;
+    if state.transcription_paused {
+        cmd_unpause(cli)
+    } else {
+        cmd_pause(cli)
+    }
+}
+
 fn run(cli: &Cli) -> Result<i32, AppError> {
     match &cli.command {
         Commands::Start(args) => cmd_start(cli, args),
@@ -2018,6 +2032,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Chunk => cmd_chunk(cli),
         Commands::Pause => cmd_pause(cli),
         Commands::Unpause => cmd_unpause(cli),
+        Commands::TogglePause => cmd_toggle_pause(cli),
         Commands::Sounds => cmd_sounds(cli),
         Commands::Status => cmd_status(cli),
         Commands::Perf(args) => cmd_perf(cli, args),
