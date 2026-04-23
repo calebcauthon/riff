@@ -9,7 +9,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod cli;
 mod error;
@@ -2008,6 +2008,126 @@ fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
     }
 }
 
+fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
+    ensure_dirs()?;
+    let active = active_state_file();
+    if !active.exists() {
+        print_out(cli, "No active session.");
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "fork",
+                "active": false,
+                "message": "No active session."
+            }),
+        );
+        return Ok(0);
+    }
+
+    let old_state = load_active_state()?;
+    if cli.dry_run {
+        print_out(
+            cli,
+            format!(
+                "[dry-run] Would fork active session {} into a new session.",
+                old_state.session_id
+            ),
+        );
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "fork",
+                "old_session_id": old_state.session_id,
+                "dry_run": true
+            }),
+        );
+        return Ok(0);
+    }
+
+    let split_start = Instant::now();
+    if let Some(pid) = old_state.ffmpeg_pid {
+        if old_state.transcription_paused && process_is_alive(pid) {
+            let _ = resume_recorder_capture(pid, cli);
+            thread::sleep(Duration::from_millis(20));
+        }
+        stop_recorder(pid, cli)?;
+    }
+    if let Some(pid) = old_state.clipboard_watcher_pid {
+        stop_clipboard_watcher(pid, cli);
+    }
+    let split_gap_ms = split_start.elapsed().as_secs_f64() * 1000.0;
+
+    clear_active_state()?;
+    let start_args = StartArgs {
+        screenshot_dir: Some(PathBuf::from(old_state.screenshot_source_dir.clone())),
+        audio_device: old_state.audio_device.clone(),
+    };
+    let internal_cli = Cli {
+        verbose: cli.verbose,
+        quiet: true,
+        json: false,
+        dry_run: false,
+        command: Commands::Status,
+    };
+    cmd_start(&internal_cli, &start_args)?;
+    let new_state = load_active_state()?;
+    let split_to_running_ms = split_start.elapsed().as_secs_f64() * 1000.0;
+
+    write_json(&active_state_file(), &old_state)?;
+    let stop_args = StopArgs {
+        transcribe_cmd: None,
+        python_bin: None,
+        parakeet_script: None,
+        parakeet_model: None,
+    };
+    let finalize_result = cmd_stop(&internal_cli, &stop_args);
+    let restore_result = save_active_state(&new_state);
+    if let Err(e) = restore_result {
+        return Err(app_error(
+            1,
+            format!(
+                "Forked to new session {}, but failed to restore active state: {}",
+                new_state.session_id, e
+            ),
+        ));
+    }
+    if let Err(e) = finalize_result {
+        return Err(app_error(
+            e.code,
+            format!(
+                "Forked to new session {}, but failed finalizing old session {}: {}",
+                new_state.session_id, old_state.session_id, e.message
+            ),
+        ));
+    }
+
+    print_out(
+        cli,
+        format!(
+            "Forked session {}\nnew session {}\nsplit_gap_ms: {}\nsplit_to_running_ms: {}",
+            old_state.session_id,
+            new_state.session_id,
+            round3(split_gap_ms),
+            round3(split_to_running_ms)
+        ),
+    );
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": "fork",
+            "old_session_id": old_state.session_id,
+            "new_session_id": new_state.session_id,
+            "split_gap_ms": round3(split_gap_ms),
+            "split_to_running_ms": round3(split_to_running_ms),
+            "new_session_dir": new_state.session_dir
+        }),
+    );
+    Ok(0)
+}
+
 fn cmd_toggle_pause(cli: &Cli) -> Result<i32, AppError> {
     ensure_dirs()?;
     let active = active_state_file();
@@ -2028,6 +2148,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Shot => cmd_shot(cli),
         Commands::Stop(args) => cmd_stop(cli, args),
         Commands::Toggle(args) => cmd_toggle(cli, args),
+        Commands::Fork => cmd_fork(cli),
         Commands::Live(args) => cmd_live(cli, args),
         Commands::Chunk => cmd_chunk(cli),
         Commands::Pause => cmd_pause(cli),

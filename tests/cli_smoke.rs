@@ -132,6 +132,16 @@ fn only_session_id(root: &Path) -> String {
         .to_string()
 }
 
+fn active_session_id(root: &Path) -> String {
+    let raw = fs::read_to_string(root.join("active_session.json")).expect("read active session");
+    let parsed: Value = serde_json::from_str(&raw).expect("parse active session json");
+    parsed
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .expect("active session id")
+        .to_string()
+}
+
 fn extract_transcript_section(note_markdown: &str) -> String {
     let marker = "## Transcript";
     let start = note_markdown
@@ -162,6 +172,10 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         (
             "toggle",
             "Toggle dictation session (start if idle, stop if active)",
+        ),
+        (
+            "fork",
+            "Split session: stop current recording and immediately start a new one",
         ),
         ("live", "Show running live session status"),
         (
@@ -211,6 +225,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         "shot",
         "stop",
         "toggle",
+        "fork",
         "live",
         "chunk",
         "pause",
@@ -275,6 +290,56 @@ fn toggle_starts_when_idle_and_stops_when_active() {
         .assert()
         .success()
         .stdout(predicates::str::contains("No active session."));
+}
+
+#[test]
+fn fork_splits_session_and_keeps_new_session_active() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    let first_session = active_session_id(td.path());
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_TRANSCRIBE_CMD", "printf 'fork test\\n' > {out_txt}")
+        .arg("fork")
+        .assert()
+        .success();
+
+    let second_session = active_session_id(td.path());
+    assert_ne!(
+        first_session, second_session,
+        "fork should rotate session id"
+    );
+
+    assert!(
+        td.path()
+            .join("sessions")
+            .join(&first_session)
+            .join("note.md")
+            .exists(),
+        "fork should finalize old session note"
+    );
+    assert!(
+        td.path()
+            .join("sessions")
+            .join(&second_session)
+            .join("audio.wav")
+            .exists(),
+        "fork should have active recording for new session"
+    );
 }
 
 #[test]

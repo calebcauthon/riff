@@ -33,6 +33,8 @@ pub enum Commands {
     Stop(StopArgs),
     /// Toggle dictation session (start if idle, stop if active)
     Toggle(ToggleArgs),
+    /// Split session: stop current recording and immediately start a new one
+    Fork,
     /// Show running live session status
     Live(LiveArgs),
     /// Transcribe audio captured so far and keep recording
