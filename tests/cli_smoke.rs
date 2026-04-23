@@ -253,6 +253,27 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
 }
 
 #[test]
+fn version_flag_reads_repo_version_file() {
+    let td = tempdir().expect("tempdir");
+    let expected_version =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("VERSION"))
+            .expect("read VERSION file")
+            .trim()
+            .to_string();
+
+    let out = cmd_with_root(td.path())
+        .arg("--version")
+        .output()
+        .expect("run --version");
+    assert!(out.status.success(), "--version should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("riff {expected_version}")),
+        "unexpected --version output: {stdout}"
+    );
+}
+
+#[test]
 fn toggle_starts_when_idle_and_stops_when_active() {
     let td = tempdir().expect("tempdir");
     let fake_bin = td.path().join("fake-bin");

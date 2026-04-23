@@ -60,6 +60,10 @@ If `RIFF_PYTHON_BIN` is not set, it auto-prefers:
 2. `~/Code/riff/.venv/bin/python` (dev venv)
 3. `python3` from PATH
 
+Versioning:
+- Repository version is stored in `VERSION`.
+- `riff --version` reads and displays that version at build time.
+
 Performance note:
 - `riff start` warms a local Parakeet server in the background (when enabled), so later `riff stop` calls are faster.
 - `riff stop` auto-starts a local HTML web server with idle-timeout for richer session pages.

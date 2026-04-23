@@ -4,6 +4,8 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     name = "riff",
+    version = crate::RIFF_VERSION,
+    long_version = crate::RIFF_LONG_VERSION,
     about = "riff CLI: local dictation + screenshot session tool"
 )]
 pub struct Cli {

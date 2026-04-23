@@ -49,9 +49,13 @@ use crate::transcription::{
 
 pub(crate) const SUPPORTED_IMAGE_EXTS: &[&str] =
     &["png", "jpg", "jpeg", "webp", "tif", "tiff", "heic", "heif"];
+pub(crate) const RIFF_VERSION: &str = env!("RIFF_VERSION");
+pub(crate) const RIFF_BUILD_ID: &str = env!("RIFF_BUILD_ID");
+pub(crate) const RIFF_LONG_VERSION: &str =
+    concat!(env!("RIFF_VERSION"), "\nbuild: ", env!("RIFF_BUILD_ID"));
 
 fn build_id() -> &'static str {
-    option_env!("RIFF_BUILD_ID").unwrap_or(env!("CARGO_PKG_VERSION"))
+    RIFF_BUILD_ID
 }
 
 fn now_iso() -> String {
