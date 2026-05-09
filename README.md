@@ -304,6 +304,8 @@ riff perf 100    # recent 100 records
 
 Summarizes `start`/`stop` timings from `/tmp/riff/perf.jsonl` (count, avg, p50, p95) and shows recent entries with dominant phase.
 
+`riff start` now also prints a short `startup_phase_ms` line, and `riff stop` prints `stop_phase_ms`, so you can spot the blocking phase immediately from the command output. The perf log now includes finer-grained phase timings for state setup, watcher startup/shutdown, screenshot movement, transcript generation, note rendering, and final writes.
+
 ### List recent sessions
 
 ```bash

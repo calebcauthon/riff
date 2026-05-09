@@ -12,8 +12,9 @@ use crate::reporting::{
 };
 use crate::screenshots::{detect_screenshot_dir, file_mtime_epoch, move_session_screenshots};
 use crate::transcription::{
-    ensure_parakeet_server, ensure_web_server, parakeet_server_enabled, resolve_parakeet_model,
-    resolve_parakeet_script, resolve_python_bin, run_transcription,
+    ensure_parakeet_server, ensure_web_server, parakeet_server_enabled,
+    resolve_parakeet_batch_size, resolve_parakeet_model, resolve_parakeet_script,
+    resolve_python_bin, run_transcription,
 };
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
@@ -33,6 +34,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
+
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
 
 fn load_chunked_transcript(session_dir: &Path, events_path: &Path) -> (String, Value) {
     let transcript_path = session_dir.join("transcript.txt");
@@ -182,13 +187,15 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
 
     let python_bin = resolve_python_bin(None);
     let model = resolve_parakeet_model(None);
+    let batch_size = resolve_parakeet_batch_size();
     let cmd_for_log = format!(
-        "{} {} --audio {} --out-txt {} --model {}",
+        "{} {} --audio {} --out-txt {} --model {} --batch-size {}",
         python_bin,
         script_path.display(),
         chunk_audio.display(),
         chunk_out_txt.display(),
-        model
+        model,
+        batch_size
     );
     print_verbose(
         cli,
@@ -204,7 +211,7 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
             "audio": chunk_audio,
             "out_txt": chunk_out_txt,
             "model": model,
-            "batch_size": 1
+            "batch_size": batch_size
         })
         .to_string();
         let server_out = Command::new("curl")
@@ -242,6 +249,7 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
                                 "method": "parakeet_server",
                                 "server": base_url,
                                 "model": model,
+                                "batch_size": batch_size,
                                 "elapsed_sec": parsed.get("elapsed_sec").and_then(|v| v.as_f64()),
                             }),
                         );
@@ -293,6 +301,8 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
         .arg(chunk_out_txt)
         .arg("--model")
         .arg(&model)
+        .arg("--batch-size")
+        .arg(batch_size.to_string())
         .output();
 
     match output {
@@ -306,6 +316,7 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
                 "status": "ok",
                 "method": "parakeet_python",
                 "model": model,
+                "batch_size": batch_size,
                 "script": script_path.display().to_string(),
             });
             if let Some(err) = server_error {
@@ -514,9 +525,22 @@ fn process_manual_chunk(
 pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
     let perf_total = Instant::now();
+    let mut stale_state_cleanup_ms = 0.0;
+    let create_session_dir_ms: f64;
+    let write_session_started_event_ms: f64;
+    let ffmpeg_check_ms: f64;
+    let initial_state_save_ms: f64;
+    let clipboard_bootstrap_read_ms: f64;
+    let clipboard_watcher_spawn_ms: f64;
+    let mut clipboard_state_save_ms = 0.0;
+    let transcription_watcher_spawn_ms: f64;
+    let mut transcription_state_save_ms = 0.0;
+    let mut parakeet_server_warmup_ms = 0.0;
+    let mut parakeet_server_warmup_attempted = false;
 
     let active_path = active_state_file();
     if active_path.exists() {
+        let t_stale_cleanup = Instant::now();
         let existing: SessionState = read_json(&active_path)?;
         if let Some(pid) = existing.clipboard_watcher_pid {
             stop_clipboard_watcher(pid, cli);
@@ -538,11 +562,12 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         print_verbose(cli, "Found stale active session state; removing.");
         fs::remove_file(&active_path)
             .map_err(|e| app_error(1, format!("Failed to remove stale state: {e}")))?;
+        stale_state_cleanup_ms = elapsed_ms(t_stale_cleanup);
     }
 
     let t_screenshot_dir = Instant::now();
     let screenshot_dir = detect_screenshot_dir(args.screenshot_dir.as_deref(), cli)?;
-    let screenshot_dir_ms = t_screenshot_dir.elapsed().as_secs_f64() * 1000.0;
+    let screenshot_dir_ms = elapsed_ms(t_screenshot_dir);
 
     let session_id = session_stamp();
     let session_dir = sessions_dir().join(&session_id);
@@ -561,7 +586,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
 
     let t_audio_device = Instant::now();
     let mut resolved_audio_device = resolve_audio_device(&requested_audio_device, cli);
-    let audio_device_ms = t_audio_device.elapsed().as_secs_f64() * 1000.0;
+    let audio_device_ms = elapsed_ms(t_audio_device);
 
     if cli.dry_run {
         print_out(
@@ -597,13 +622,16 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         return Ok(0);
     }
 
+    let t_create_session_dir = Instant::now();
     fs::create_dir_all(&screenshots_dir).map_err(|e| {
         app_error(
             1,
             format!("Failed to create {}: {e}", screenshots_dir.display()),
         )
     })?;
+    create_session_dir_ms = elapsed_ms(t_create_session_dir);
 
+    let t_write_session_started_event = Instant::now();
     append_jsonl(
         &events_path,
         &json!({
@@ -613,13 +641,16 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "screenshot_source_dir": screenshot_dir,
         }),
     )?;
+    write_session_started_event_ms = elapsed_ms(t_write_session_started_event);
 
+    let t_ffmpeg_check = Instant::now();
     if !command_exists("ffmpeg") {
         return Err(app_error(
             5,
             "ffmpeg is required but was not found in PATH.",
         ));
     }
+    ffmpeg_check_ms = elapsed_ms(t_ffmpeg_check);
 
     let t_spawn_recorder = Instant::now();
     let mut audio_device_retry = false;
@@ -662,7 +693,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         }
     };
 
-    let spawn_recorder_ms = t_spawn_recorder.elapsed().as_secs_f64() * 1000.0;
+    let spawn_recorder_ms = elapsed_ms(t_spawn_recorder);
 
     let mut state = SessionState {
         session_id: session_id.clone(),
@@ -683,40 +714,92 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         transcription_pause_started_sec: None,
     };
 
+    let t_initial_state_save = Instant::now();
     save_active_state(&state)?;
+    initial_state_save_ms = elapsed_ms(t_initial_state_save);
 
+    let t_clipboard_bootstrap_read = Instant::now();
     let existing_clips = clipboard_from_events(&read_jsonl_values(&events_path));
-    if let Some(watcher_pid) =
+    clipboard_bootstrap_read_ms = elapsed_ms(t_clipboard_bootstrap_read);
+
+    let t_clipboard_watcher_spawn = Instant::now();
+    clipboard_watcher_spawn_ms = if let Some(watcher_pid) =
         spawn_clipboard_watcher(&state, max_clipboard_id(&existing_clips), cli)
     {
+        let ms = elapsed_ms(t_clipboard_watcher_spawn);
         state.clipboard_watcher_pid = Some(watcher_pid);
+        let t_clipboard_state_save = Instant::now();
         save_active_state(&state)?;
-    }
+        clipboard_state_save_ms = elapsed_ms(t_clipboard_state_save);
+        ms
+    } else {
+        elapsed_ms(t_clipboard_watcher_spawn)
+    };
 
     let mut transcription_watcher_spawned = false;
-    let t_state_watcher = Instant::now();
-    if let Some(pid) = spawn_transcription_watcher(&state, cli) {
+    let t_transcription_watcher_spawn = Instant::now();
+    transcription_watcher_spawn_ms = if let Some(pid) = spawn_transcription_watcher(&state, cli) {
+        let ms = elapsed_ms(t_transcription_watcher_spawn);
         state.transcription_watcher_pid = Some(pid);
         transcription_watcher_spawned = true;
+        let t_transcription_state_save = Instant::now();
         save_active_state(&state)?;
-    }
-    let save_state_and_clipboard_ms = t_state_watcher.elapsed().as_secs_f64() * 1000.0;
+        transcription_state_save_ms = elapsed_ms(t_transcription_state_save);
+        ms
+    } else {
+        elapsed_ms(t_transcription_watcher_spawn)
+    };
+    let watcher_setup_ms = round3(
+        initial_state_save_ms
+            + clipboard_bootstrap_read_ms
+            + clipboard_watcher_spawn_ms
+            + clipboard_state_save_ms
+            + transcription_watcher_spawn_ms
+            + transcription_state_save_ms,
+    );
 
-    let start_total_ms = perf_total.elapsed().as_secs_f64() * 1000.0;
+    let custom_transcribe_enabled = env::var("RIFF_TRANSCRIBE_CMD")
+        .ok()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !custom_transcribe_enabled && parakeet_server_enabled() {
+        if let Some(script_path) = resolve_parakeet_script(None) {
+            let t_parakeet_server_warmup = Instant::now();
+            let python_bin = resolve_python_bin(None);
+            let model = resolve_parakeet_model(None);
+            ensure_parakeet_server(&python_bin, &script_path, &model, cli, false);
+            parakeet_server_warmup_attempted = true;
+            parakeet_server_warmup_ms = elapsed_ms(t_parakeet_server_warmup);
+        }
+    }
+
+    let start_total_ms = elapsed_ms(perf_total);
     append_perf_event(json!({
         "ts": now_iso(),
         "action": "start",
         "session_id": session_id,
         "total_ms": round3(start_total_ms),
         "phases": {
+            "stale_state_cleanup_ms": round3(stale_state_cleanup_ms),
             "detect_screenshot_dir_ms": round3(screenshot_dir_ms),
             "resolve_audio_device_ms": round3(audio_device_ms),
+            "create_session_dir_ms": round3(create_session_dir_ms),
+            "write_session_started_event_ms": round3(write_session_started_event_ms),
+            "ffmpeg_check_ms": round3(ffmpeg_check_ms),
             "spawn_recorder_ms": round3(spawn_recorder_ms),
-            "state_and_watchers_ms": round3(save_state_and_clipboard_ms)
+            "initial_state_save_ms": round3(initial_state_save_ms),
+            "clipboard_bootstrap_read_ms": round3(clipboard_bootstrap_read_ms),
+            "clipboard_watcher_spawn_ms": round3(clipboard_watcher_spawn_ms),
+            "clipboard_state_save_ms": round3(clipboard_state_save_ms),
+            "transcription_watcher_spawn_ms": round3(transcription_watcher_spawn_ms),
+            "transcription_state_save_ms": round3(transcription_state_save_ms),
+            "parakeet_server_warmup_ms": round3(parakeet_server_warmup_ms),
+            "watcher_setup_ms": watcher_setup_ms
         },
         "audio_device_retry": audio_device_retry,
         "transcription_watcher_spawned": transcription_watcher_spawned,
-        "transcription_watcher_pid": state.transcription_watcher_pid
+        "transcription_watcher_pid": state.transcription_watcher_pid,
+        "parakeet_server_warmup_attempted": parakeet_server_warmup_attempted
     }));
 
     play_event_sound("start", cli);
@@ -724,7 +807,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     print_out(
         cli,
         format!(
-            "Started session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}\naudio_device_retry: {}\nstartup_ms: {}",
+            "Started session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}\naudio_device_retry: {}\nstartup_ms: {}\nstartup_phase_ms: spawn_recorder={} watcher_setup={} parakeet_server_warmup={} audio_device={} screenshot_dir={}",
             session_id,
             session_dir.display(),
             audio_path.display(),
@@ -732,6 +815,11 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             resolved_audio_device,
             audio_device_retry,
             round3(start_total_ms),
+            round3(spawn_recorder_ms),
+            watcher_setup_ms,
+            round3(parakeet_server_warmup_ms),
+            round3(audio_device_ms),
+            round3(screenshot_dir_ms),
         ),
     );
 
@@ -749,6 +837,24 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "ffmpeg_pid": ffmpeg_pid,
             "transcription_watcher_pid": state.transcription_watcher_pid,
             "startup_ms": round3(start_total_ms),
+            "phases": {
+                "stale_state_cleanup_ms": round3(stale_state_cleanup_ms),
+                "detect_screenshot_dir_ms": round3(screenshot_dir_ms),
+                "resolve_audio_device_ms": round3(audio_device_ms),
+                "create_session_dir_ms": round3(create_session_dir_ms),
+                "write_session_started_event_ms": round3(write_session_started_event_ms),
+                "ffmpeg_check_ms": round3(ffmpeg_check_ms),
+                "spawn_recorder_ms": round3(spawn_recorder_ms),
+                "initial_state_save_ms": round3(initial_state_save_ms),
+                "clipboard_bootstrap_read_ms": round3(clipboard_bootstrap_read_ms),
+                "clipboard_watcher_spawn_ms": round3(clipboard_watcher_spawn_ms),
+                "clipboard_state_save_ms": round3(clipboard_state_save_ms),
+                "transcription_watcher_spawn_ms": round3(transcription_watcher_spawn_ms),
+                "transcription_state_save_ms": round3(transcription_state_save_ms),
+                "parakeet_server_warmup_ms": round3(parakeet_server_warmup_ms),
+                "watcher_setup_ms": watcher_setup_ms
+            },
+            "parakeet_server_warmup_attempted": parakeet_server_warmup_attempted,
             "dry_run": false,
             "state_saved": true
         }),
@@ -1221,6 +1327,19 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let mut clear_state_ms = 0.0;
     let mut transcription_wait_ms = 0.0;
     let mut stop_flush_ms = 0.0;
+    let mut stop_clipboard_watcher_ms = 0.0;
+    let mut append_stopping_event_ms = 0.0;
+    let mut resume_before_stop_ms = 0.0;
+    let mut transcription_watcher_stop_ms = 0.0;
+    let source_dir_check_ms: f64;
+    let load_prior_events_ms: f64;
+    let load_existing_shots_ms: f64;
+    let collect_clipboard_events_ms: f64;
+    let audio_duration_ms: f64;
+    let build_note_bundle_ms: f64;
+    let render_ms: f64;
+    let mut write_note_md_ms = 0.0;
+    let mut write_note_html_file_ms = 0.0;
     let mut transcription_forced_stop = false;
     let mut stop_flush_meta = Value::Null;
     let mut use_chunked_transcript = false;
@@ -1236,8 +1355,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
 
     if !cli.dry_run {
         if let Some(pid) = state.clipboard_watcher_pid {
+            let t_stop_clipboard_watcher = Instant::now();
             stop_clipboard_watcher(pid, cli);
+            stop_clipboard_watcher_ms = elapsed_ms(t_stop_clipboard_watcher);
         }
+        let t_append_stopping_event = Instant::now();
         append_jsonl(
             &events_path,
             &json!({
@@ -1246,21 +1368,24 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "session_id": state.session_id,
             }),
         )?;
+        append_stopping_event_ms = elapsed_ms(t_append_stopping_event);
     }
 
     if !cli.dry_run {
         let t_stop_recorder = Instant::now();
         if let Some(pid) = state.ffmpeg_pid {
             if state.transcription_paused && process_is_alive(pid) {
+                let t_resume_before_stop = Instant::now();
                 let _ = resume_recorder_capture(pid, cli);
                 thread::sleep(Duration::from_millis(20));
+                resume_before_stop_ms = elapsed_ms(t_resume_before_stop);
             }
             stop_recorder(pid, cli)?;
-            thread::sleep(Duration::from_millis(120));
         }
-        stop_recorder_ms = t_stop_recorder.elapsed().as_secs_f64() * 1000.0;
+        stop_recorder_ms = elapsed_ms(t_stop_recorder);
 
         if let Some(pid) = state.transcription_watcher_pid {
+            let t_transcription_watcher_stop = Instant::now();
             let (finished, waited_ms) =
                 wait_for_transcription_watcher(pid, Duration::from_secs(12), cli);
             transcription_wait_ms = waited_ms;
@@ -1268,6 +1393,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 transcription_forced_stop = true;
                 stop_transcription_watcher(pid, cli);
             }
+            transcription_watcher_stop_ms = elapsed_ms(t_transcription_watcher_stop);
         }
 
         if !use_custom_transcribe {
@@ -1284,7 +1410,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                         "reason": e.message,
                     }),
                 };
-                stop_flush_ms = t_stop_flush.elapsed().as_secs_f64() * 1000.0;
+                stop_flush_ms = elapsed_ms(t_stop_flush);
             } else {
                 stop_flush_meta = json!({
                     "status": "skipped",
@@ -1297,6 +1423,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     }
 
     let source_dir = PathBuf::from(&state.screenshot_source_dir);
+    let t_source_dir_check = Instant::now();
     if !source_dir.is_dir() {
         return Err(app_error(
             7,
@@ -1306,11 +1433,18 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             ),
         ));
     }
+    source_dir_check_ms = elapsed_ms(t_source_dir_check);
 
     let t_move_screens = Instant::now();
+    let t_load_prior_events = Instant::now();
     let prior_events = read_jsonl_values(&events_path);
+    load_prior_events_ms = elapsed_ms(t_load_prior_events);
+    let t_load_existing_shots = Instant::now();
     let mut shots = load_shots_for_session(&session_dir, &prior_events);
+    load_existing_shots_ms = elapsed_ms(t_load_existing_shots);
+    let t_collect_clipboard_events = Instant::now();
     let clips = clipboard_from_events(&prior_events);
+    collect_clipboard_events_ms = elapsed_ms(t_collect_clipboard_events);
     let moved_shots = move_session_screenshots(
         &source_dir,
         &screenshots_dir,
@@ -1323,7 +1457,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let moved_count = moved_shots.len();
     shots.extend(moved_shots);
     shots.sort_by_key(|s| s.shot_id);
-    let move_screenshots_ms = t_move_screens.elapsed().as_secs_f64() * 1000.0;
+    let move_screenshots_ms = elapsed_ms(t_move_screens);
 
     let t_transcribe = Instant::now();
     let (transcript_raw, mut transcription_meta) = if use_custom_transcribe {
@@ -1346,9 +1480,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             obj.insert("stop_flush".to_string(), stop_flush_meta.clone());
         }
     }
-    let transcribe_ms = t_transcribe.elapsed().as_secs_f64() * 1000.0;
+    let transcribe_ms = elapsed_ms(t_transcribe);
 
+    let t_audio_duration = Instant::now();
     let audio_duration = get_audio_duration_sec(Path::new(&state.audio_path));
+    audio_duration_ms = elapsed_ms(t_audio_duration);
 
     let t_render = Instant::now();
     let transcript_annotated =
@@ -1377,7 +1513,8 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         "../index.html",
     );
     let html_path = session_dir.join("note.html");
-    let render_ms = t_render.elapsed().as_secs_f64() * 1000.0;
+    render_ms = elapsed_ms(t_render);
+    build_note_bundle_ms = render_ms;
 
     if cli.dry_run {
         print_out(
@@ -1391,21 +1528,24 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     } else {
         let t_write = Instant::now();
 
-        let t_write_note_html = Instant::now();
+        let t_write_note_md = Instant::now();
         fs::write(&note_path, format!("{}\n", note_md)).map_err(|e| {
             app_error(
                 1,
                 format!("Failed to write note {}: {e}", note_path.display()),
             )
         })?;
+        write_note_md_ms = elapsed_ms(t_write_note_md);
 
+        let t_write_note_html = Instant::now();
         fs::write(&html_path, html_body).map_err(|e| {
             app_error(
                 1,
                 format!("Failed to write HTML note {}: {e}", html_path.display()),
             )
         })?;
-        write_note_html_ms = t_write_note_html.elapsed().as_secs_f64() * 1000.0;
+        write_note_html_file_ms = elapsed_ms(t_write_note_html);
+        write_note_html_ms = round3(write_note_md_ms + write_note_html_file_ms);
 
         let t_append_stop_event = Instant::now();
         append_jsonl(
@@ -1423,7 +1563,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "transcription": transcription_meta,
             }),
         )?;
-        append_stop_event_ms = t_append_stop_event.elapsed().as_secs_f64() * 1000.0;
+        append_stop_event_ms = elapsed_ms(t_append_stop_event);
 
         let t_last_session = Instant::now();
         write_json(
@@ -1438,24 +1578,24 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "clipboard_captures": clips.len(),
             }),
         )?;
-        write_last_session_ms = t_last_session.elapsed().as_secs_f64() * 1000.0;
+        write_last_session_ms = elapsed_ms(t_last_session);
 
         let t_index = Instant::now();
         let _ = generate_sessions_index_html()?;
-        generate_index_ms = t_index.elapsed().as_secs_f64() * 1000.0;
+        generate_index_ms = elapsed_ms(t_index);
 
         let t_clear_state = Instant::now();
         clear_active_state()?;
-        clear_state_ms = t_clear_state.elapsed().as_secs_f64() * 1000.0;
+        clear_state_ms = elapsed_ms(t_clear_state);
 
-        write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
+        write_ms = elapsed_ms(t_write);
 
         let t_web = Instant::now();
         let _ = ensure_web_server(cli, false);
-        web_server_ms = t_web.elapsed().as_secs_f64() * 1000.0;
+        web_server_ms = elapsed_ms(t_web);
     }
 
-    let stop_total_ms = perf_total.elapsed().as_secs_f64() * 1000.0;
+    let stop_total_ms = elapsed_ms(perf_total);
     let transcription_perf = transcription_meta
         .get("perf")
         .cloned()
@@ -1466,11 +1606,23 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         "session_id": state.session_id,
         "total_ms": round3(stop_total_ms),
         "phases": {
+            "stop_clipboard_watcher_ms": round3(stop_clipboard_watcher_ms),
+            "append_stopping_event_ms": round3(append_stopping_event_ms),
+            "resume_before_stop_ms": round3(resume_before_stop_ms),
             "stop_recorder_ms": round3(stop_recorder_ms),
+            "transcription_watcher_stop_ms": round3(transcription_watcher_stop_ms),
+            "source_dir_check_ms": round3(source_dir_check_ms),
+            "load_prior_events_ms": round3(load_prior_events_ms),
+            "load_existing_shots_ms": round3(load_existing_shots_ms),
+            "collect_clipboard_events_ms": round3(collect_clipboard_events_ms),
             "move_screenshots_ms": round3(move_screenshots_ms),
             "transcribe_ms": round3(transcribe_ms),
+            "audio_duration_ms": round3(audio_duration_ms),
             "render_ms": round3(render_ms),
+            "build_note_bundle_ms": round3(build_note_bundle_ms),
             "write_ms": round3(write_ms),
+            "write_note_md_ms": round3(write_note_md_ms),
+            "write_note_html_file_ms": round3(write_note_html_file_ms),
             "write_note_html_ms": round3(write_note_html_ms),
             "append_stop_event_ms": round3(append_stop_event_ms),
             "write_last_session_ms": round3(write_last_session_ms),
@@ -1492,7 +1644,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     print_out(
         cli,
         format!(
-            "Stopped session {}\nsession_dir: {}\nscreenshots_moved: {}\nscreenshots_total: {}\nclipboard_captures: {}\nnote: {}\nhtml: {}\nstop_ms: {}",
+            "Stopped session {}\nsession_dir: {}\nscreenshots_moved: {}\nscreenshots_total: {}\nclipboard_captures: {}\nnote: {}\nhtml: {}\nstop_ms: {}\nstop_phase_ms: transcribe={} stop_recorder={} move_screenshots={} render={} write={}",
             state.session_id,
             session_dir.display(),
             moved_count,
@@ -1501,6 +1653,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             note_path.display(),
             html_path.display(),
             round3(stop_total_ms),
+            round3(transcribe_ms),
+            round3(stop_recorder_ms),
+            round3(move_screenshots_ms),
+            round3(render_ms),
+            round3(write_ms),
         ),
     );
 
@@ -1531,11 +1688,23 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "clipboard_captures": clips.len(),
             "stop_ms": round3(stop_total_ms),
             "phases": {
+                "stop_clipboard_watcher_ms": round3(stop_clipboard_watcher_ms),
+                "append_stopping_event_ms": round3(append_stopping_event_ms),
+                "resume_before_stop_ms": round3(resume_before_stop_ms),
                 "stop_recorder_ms": round3(stop_recorder_ms),
+                "transcription_watcher_stop_ms": round3(transcription_watcher_stop_ms),
+                "source_dir_check_ms": round3(source_dir_check_ms),
+                "load_prior_events_ms": round3(load_prior_events_ms),
+                "load_existing_shots_ms": round3(load_existing_shots_ms),
+                "collect_clipboard_events_ms": round3(collect_clipboard_events_ms),
                 "move_screenshots_ms": round3(move_screenshots_ms),
                 "transcribe_ms": round3(transcribe_ms),
+                "audio_duration_ms": round3(audio_duration_ms),
                 "render_ms": round3(render_ms),
+                "build_note_bundle_ms": round3(build_note_bundle_ms),
                 "write_ms": round3(write_ms),
+                "write_note_md_ms": round3(write_note_md_ms),
+                "write_note_html_file_ms": round3(write_note_html_file_ms),
                 "write_note_html_ms": round3(write_note_html_ms),
                 "append_stop_event_ms": round3(append_stop_event_ms),
                 "write_last_session_ms": round3(write_last_session_ms),

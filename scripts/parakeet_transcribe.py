@@ -74,7 +74,12 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "cpu", "cuda"],
         help="Inference device",
     )
-    p.add_argument("--batch-size", type=int, default=1, help="Transcription batch size")
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=int(os.environ.get("RIFF_PARAKEET_BATCH_SIZE", "4")),
+        help="Transcription batch size",
+    )
 
     p.add_argument("--serve", action="store_true", help="Run persistent HTTP server")
     p.add_argument("--watch-audio", action="store_true", help="Run incremental silence-aware chunking")

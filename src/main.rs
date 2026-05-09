@@ -34,7 +34,7 @@ use crate::history::{
 use crate::models::SessionState;
 use crate::paths::{
     active_state_file, audio_device_cache_file, ensure_dirs, parakeet_server_pid_file,
-    perf_log_file, web_server_pid_file,
+    perf_log_file, watcher_python_cache_file, web_server_pid_file,
 };
 use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
 use crate::session_commands::{cmd_chunk, cmd_pause, cmd_shot, cmd_start, cmd_stop, cmd_unpause};
@@ -409,18 +409,7 @@ pub(crate) fn stop_clipboard_watcher(pid: i32, cli: &Cli) {
         return;
     }
     let _ = send_signal(pid, libc::SIGTERM);
-    let deadline = SystemTime::now() + Duration::from_millis(800);
-    while SystemTime::now() < deadline {
-        if !process_is_alive(pid) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(40));
-    }
-    let _ = send_signal(pid, libc::SIGKILL);
-    print_verbose(
-        cli,
-        format!("Clipboard watcher pid={pid} was force-stopped."),
-    );
+    print_verbose(cli, format!("Clipboard watcher pid={pid} sent SIGTERM."));
 }
 
 fn transcription_worker_enabled() -> bool {
@@ -484,7 +473,19 @@ fn python_has_parakeet_deps(bin: &str) -> bool {
     matches!(out, Ok(o) if o.status.success())
 }
 
-fn resolve_watcher_python_bin() -> (Option<String>, Vec<String>) {
+fn resolve_watcher_python_bin() -> (Option<String>, Vec<String>, bool) {
+    let cache_file = watcher_python_cache_file();
+    if let Ok(cached) = fs::read_to_string(&cache_file) {
+        let cached = cached.trim();
+        if !cached.is_empty() && command_exists(cached) && python_supported_for_parakeet(cached) {
+            return (
+                Some(cached.to_string()),
+                vec![format!("{cached} (cached)")],
+                true,
+            );
+        }
+    }
+
     let mut candidates = Vec::<String>::new();
     let primary = resolve_python_bin(None);
     candidates.push(primary);
@@ -520,10 +521,11 @@ fn resolve_watcher_python_bin() -> (Option<String>, Vec<String>) {
             }
         ));
         if supported && deps_ok {
-            return (Some(candidate.clone()), considered);
+            let _ = fs::write(&cache_file, format!("{candidate}\n"));
+            return (Some(candidate.clone()), considered, false);
         }
     }
-    (None, considered)
+    (None, considered, false)
 }
 
 fn append_transcription_watcher_event(state: &SessionState, payload: Value) {
@@ -573,7 +575,7 @@ pub(crate) fn spawn_transcription_watcher(state: &SessionState, cli: &Cli) -> Op
         return None;
     }
 
-    let (python_bin, python_candidates) = resolve_watcher_python_bin();
+    let (python_bin, python_candidates, python_from_cache) = resolve_watcher_python_bin();
     let Some(python_bin) = python_bin else {
         print_verbose(
             cli,
@@ -733,7 +735,7 @@ pub(crate) fn spawn_transcription_watcher(state: &SessionState, cli: &Cli) -> Op
             return None;
         }
     };
-    thread::sleep(Duration::from_millis(120));
+    thread::sleep(Duration::from_millis(40));
     if child.try_wait().ok().flatten().is_some() {
         print_verbose(
             cli,
@@ -748,12 +750,16 @@ pub(crate) fn spawn_transcription_watcher(state: &SessionState, cli: &Cli) -> Op
                 "type": "transcription_watcher_exited_early",
                 "reason": "exited_within_startup_window",
                 "python_bin": python_bin,
+                "python_from_cache": python_from_cache,
                 "python_candidates": python_candidates,
                 "script_path": script_path,
                 "log_path": log_path,
                 "command_preview": command_preview,
             }),
         );
+        if python_from_cache {
+            let _ = fs::remove_file(watcher_python_cache_file());
+        }
         return None;
     }
 
@@ -764,6 +770,7 @@ pub(crate) fn spawn_transcription_watcher(state: &SessionState, cli: &Cli) -> Op
             "type": "transcription_watcher_started",
             "pid": pid,
             "python_bin": python_bin,
+            "python_from_cache": python_from_cache,
             "python_candidates": python_candidates,
             "script_path": script_path,
             "log_path": log_path,
@@ -899,13 +906,21 @@ fn play_event_sound(kind: &str, cli: &Cli) {
             .arg(count.to_string())
             .arg(sound_path.as_os_str())
             .arg(format!("{:.2}", gap_sec))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn();
         return;
     }
 
     if command_exists("osascript") {
         let script = format!("beep {}", count);
-        let _ = Command::new("osascript").args(["-e", &script]).spawn();
+        let _ = Command::new("osascript")
+            .args(["-e", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
         if cli.verbose && !cli.quiet {
             eprintln!("[verbose] fallback beep used for {} x{}", kind, count);
         }
@@ -1158,48 +1173,22 @@ fn resolve_audio_device_with_cache(requested: &str, cli: &Cli, use_cache: bool) 
         return requested.to_string();
     }
 
-    let avoid = ["iphone", "continuity"];
-    let built_in = ["macbook", "built-in", "internal"];
-    let devices = list_avfoundation_audio_devices();
     let cache_file = audio_device_cache_file();
-
     if use_cache {
         if let Ok(cached) = fs::read_to_string(&cache_file) {
             let cached = cached.trim();
             if cached.starts_with(':') && cached.len() > 1 {
-                if devices.is_empty() {
-                    print_verbose(
-                        cli,
-                        format!(
-                            "Using cached audio device {} (device list unavailable)",
-                            cached
-                        ),
-                    );
-                    return cached.to_string();
-                }
-
-                let cached_idx = &cached[1..];
-                if let Some((_, name)) = devices.iter().find(|(idx, _)| idx == cached_idx) {
-                    let lc = name.to_ascii_lowercase();
-                    if !contains_any(&lc, &avoid) {
-                        print_verbose(
-                            cli,
-                            format!("Using cached audio device {} ({})", cached, name),
-                        );
-                        return cached.to_string();
-                    }
-                    print_verbose(
-                        cli,
-                        format!(
-                            "Ignoring cached audio device {} ({}), matched avoided device class.",
-                            cached, name
-                        ),
-                    );
-                    let _ = fs::remove_file(&cache_file);
-                }
+                // Trust the cached device for the fast path. If it goes stale, recorder startup
+                // already has a retry path that clears the cache and re-detects.
+                print_verbose(cli, format!("Using cached audio device {}", cached));
+                return cached.to_string();
             }
         }
     }
+
+    let avoid = ["iphone", "continuity"];
+    let built_in = ["macbook", "built-in", "internal"];
+    let devices = list_avfoundation_audio_devices();
 
     if devices.is_empty() {
         print_verbose(
@@ -1333,7 +1322,7 @@ fn wait_for_process_start(child: &mut Child, timeout: Duration) -> Result<bool, 
         {
             return Ok(true);
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -1390,7 +1379,7 @@ fn spawn_recorder(
         .spawn()
         .map_err(|e| app_error(6, format!("Failed to start ffmpeg recorder: {e}")))?;
 
-    let started = wait_for_process_start(&mut child, Duration::from_millis(300))?;
+    let started = wait_for_process_start(&mut child, Duration::from_millis(120))?;
     if !started {
         let tail = read_tail(ffmpeg_log_path, 1200);
         return Err(app_error(
@@ -1500,6 +1489,10 @@ pub(crate) fn fill_template(
 }
 
 pub(crate) fn get_audio_duration_sec(audio_path: &Path) -> Option<f64> {
+    if let Some(duration) = wav_duration_sec(audio_path) {
+        return Some(duration);
+    }
+
     if !command_exists("ffprobe") {
         return None;
     }
@@ -1525,6 +1518,33 @@ pub(crate) fn get_audio_duration_sec(audio_path: &Path) -> Option<f64> {
         .trim()
         .parse::<f64>()
         .ok()
+}
+
+fn wav_duration_sec(audio_path: &Path) -> Option<f64> {
+    let mut file = File::open(audio_path).ok()?;
+    let mut header = [0u8; 44];
+    file.read_exact(&mut header).ok()?;
+
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let channels = u16::from_le_bytes([header[22], header[23]]) as u64;
+    let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]) as u64;
+    let bits_per_sample = u16::from_le_bytes([header[34], header[35]]) as u64;
+    let data_size = u32::from_le_bytes([header[40], header[41], header[42], header[43]]) as u64;
+
+    if channels == 0 || sample_rate == 0 || bits_per_sample == 0 {
+        return None;
+    }
+
+    let bytes_per_sample = bits_per_sample.div_ceil(8);
+    let bytes_per_second = channels * sample_rate * bytes_per_sample;
+    if bytes_per_second == 0 {
+        return None;
+    }
+
+    Some(data_size as f64 / bytes_per_second as f64)
 }
 
 fn cmd_sounds(_cli: &Cli) -> Result<i32, AppError> {

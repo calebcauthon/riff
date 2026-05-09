@@ -29,6 +29,10 @@ pub fn audio_device_cache_file() -> PathBuf {
     root_dir().join("audio_device_cache.txt")
 }
 
+pub fn watcher_python_cache_file() -> PathBuf {
+    root_dir().join("watcher_python_cache.txt")
+}
+
 pub fn parakeet_server_log_file() -> PathBuf {
     root_dir().join("parakeet-server.log")
 }
