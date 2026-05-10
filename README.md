@@ -146,6 +146,25 @@ Notes:
 - Only `RIFF_*` keys are loaded from `~/.riffrc`.
 - Use `RIFF_RC_FILE=/path/to/file` to point riff at a different rc file.
 
+You can also use an optional JSON config file (loaded automatically):
+
+```json
+{
+  "RIFF_PYTHON_BIN": "$HOME/Code/riff/.venv/bin/python",
+  "RIFF_PARAKEET_SCRIPT": "$HOME/Code/riff/scripts/parakeet_transcribe.py",
+  "riff": {
+    "post_transcribe_cmd": "my-local-agent --text {transcript}"
+  }
+}
+```
+
+Notes:
+- Default path is `~/.riff.json`.
+- Use `RIFF_CONFIG_JSON_FILE=/path/to/file.json` to point riff at a different JSON config.
+- Process env vars still win over both config files.
+- Top-level `RIFF_*` keys are loaded automatically.
+- `riff.post_transcribe_cmd` maps to `RIFF_POST_TRANSCRIBE_CMD`.
+
 ---
 
 ## Bundled private Python runtime (recommended for distribution)
@@ -246,12 +265,22 @@ Flags:
 - `--parakeet-script <path>` override script path
 - `--parakeet-model <name>` override model name
 - `--transcribe-cmd '<template>'` custom transcription command (advanced)
+- `--post-transcribe-cmd '<template>'` rewrite transcript after transcription (advanced)
 
 `--transcribe-cmd` placeholders:
 - `{audio}`
 - `{out_base}`
 - `{out_txt}`
 - `{session_dir}`
+
+`--post-transcribe-cmd` placeholders:
+- `{transcript}`
+- `{audio}`
+- `{out_base}`
+- `{out_txt}`
+- `{session_dir}`
+
+`--post-transcribe-cmd` runs after riff has produced the transcript text and before `note.md` / `note.html` are rendered. If your command prints to stdout, that stdout becomes the rewritten transcript. If it writes `{out_txt}` directly, riff reads that file after the command exits.
 
 ### Toggle (start if idle, stop if active)
 
@@ -263,7 +292,7 @@ Useful when you want one command instead of separate `start`/`stop`.
 
 Flags:
 - Start-path flags (used when idle): `--screenshot-dir`, `--audio-device`
-- Stop-path flags (used when active): `--python-bin`, `--parakeet-script`, `--parakeet-model`, `--transcribe-cmd`
+- Stop-path flags (used when active): `--python-bin`, `--parakeet-script`, `--parakeet-model`, `--transcribe-cmd`, `--post-transcribe-cmd`
 
 ### Sounds (interactive picker)
 
@@ -380,6 +409,7 @@ Behavior:
 ## Global flags
 
 - `--verbose` prints extra diagnostic lines (`[verbose] ...`) for troubleshooting.
+  - For `riff stop`, this includes hook resolution/execution details for transcription and post-transcription commands, plus timing summaries.
   - For `riff copy`, `--verbose` instead prints a full frontmatter session dump to stdout.
 - `--quiet` suppresses normal human-readable command output (good for hotkeys/automation).
   - If you also pass `--json`, JSON output still prints.

@@ -2,6 +2,7 @@ use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -186,7 +187,29 @@ fn riffrc_path() -> Option<PathBuf> {
     env::var_os("HOME").map(|h| PathBuf::from(h).join(".riffrc"))
 }
 
-fn load_riffrc_defaults() {
+fn riff_json_config_path() -> Option<PathBuf> {
+    if let Some(custom) = env::var_os("RIFF_CONFIG_JSON_FILE") {
+        return Some(PathBuf::from(custom));
+    }
+    env::var_os("HOME").map(|h| PathBuf::from(h).join(".riff.json"))
+}
+
+fn maybe_set_default_env(
+    original_env_keys: &HashSet<OsString>,
+    key: &str,
+    value: String,
+    override_loaded_default: bool,
+) {
+    let key_os = OsString::from(key);
+    if original_env_keys.contains(&key_os) {
+        return;
+    }
+    if override_loaded_default || env::var_os(&key_os).is_none() {
+        env::set_var(key, value);
+    }
+}
+
+fn load_riffrc_defaults(original_env_keys: &HashSet<OsString>) {
     let Some(path) = riffrc_path() else {
         return;
     };
@@ -198,8 +221,56 @@ fn load_riffrc_defaults() {
             if !key.starts_with("RIFF_") {
                 continue;
             }
-            if env::var_os(&key).is_none() {
-                env::set_var(key, value);
+            maybe_set_default_env(original_env_keys, &key, value, false);
+        }
+    }
+}
+
+fn json_config_value_to_env_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(expand_env_refs(s)),
+        Value::Bool(v) => Some(if *v { "1" } else { "0" }.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn load_riff_json_defaults(original_env_keys: &HashSet<OsString>) {
+    let Some(path) = riff_json_config_path() else {
+        return;
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+    let Some(obj) = parsed.as_object() else {
+        return;
+    };
+
+    for (key, value) in obj {
+        if key.starts_with("RIFF_") {
+            if let Some(rendered) = json_config_value_to_env_string(value) {
+                maybe_set_default_env(original_env_keys, key, rendered, true);
+            }
+        }
+    }
+
+    if let Some(riff_obj) = obj.get("riff").and_then(|v| v.as_object()) {
+        if let Some(post_cmd) = riff_obj.get("post_transcribe_cmd") {
+            if let Some(rendered) = json_config_value_to_env_string(post_cmd) {
+                maybe_set_default_env(
+                    original_env_keys,
+                    "RIFF_POST_TRANSCRIBE_CMD",
+                    rendered,
+                    true,
+                );
+            }
+        }
+        if let Some(transcribe_cmd) = riff_obj.get("transcribe_cmd") {
+            if let Some(rendered) = json_config_value_to_env_string(transcribe_cmd) {
+                maybe_set_default_env(original_env_keys, "RIFF_TRANSCRIBE_CMD", rendered, true);
             }
         }
     }
@@ -1477,6 +1548,17 @@ pub(crate) fn fill_template(
     out_txt: &Path,
     session_dir: &Path,
 ) -> String {
+    fill_template_with_transcript(template, audio, out_base, out_txt, session_dir, None)
+}
+
+pub(crate) fn fill_template_with_transcript(
+    template: &str,
+    audio: &Path,
+    out_base: &Path,
+    out_txt: &Path,
+    session_dir: &Path,
+    transcript: Option<&str>,
+) -> String {
     let mut s = template.to_string();
     s = s.replace("{audio}", &shell_escape(&audio.display().to_string()));
     s = s.replace("{out_base}", &shell_escape(&out_base.display().to_string()));
@@ -1485,6 +1567,9 @@ pub(crate) fn fill_template(
         "{session_dir}",
         &shell_escape(&session_dir.display().to_string()),
     );
+    if let Some(text) = transcript {
+        s = s.replace("{transcript}", &shell_escape(text));
+    }
     s
 }
 
@@ -2233,6 +2318,7 @@ fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
     if active {
         let stop_args = StopArgs {
             transcribe_cmd: args.transcribe_cmd.clone(),
+            post_transcribe_cmd: args.post_transcribe_cmd.clone(),
             python_bin: args.python_bin.clone(),
             parakeet_script: args.parakeet_script.clone(),
             parakeet_model: args.parakeet_model.clone(),
@@ -2318,6 +2404,7 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
     write_json(&active_state_file(), &old_state)?;
     let stop_args = StopArgs {
         transcribe_cmd: None,
+        post_transcribe_cmd: None,
         python_bin: None,
         parakeet_script: None,
         parakeet_model: None,
@@ -2411,7 +2498,9 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
 }
 
 fn main() {
-    load_riffrc_defaults();
+    let original_env_keys: HashSet<OsString> = env::vars_os().map(|(k, _)| k).collect();
+    load_riffrc_defaults(&original_env_keys);
+    load_riff_json_defaults(&original_env_keys);
     let cli = Cli::parse();
     let exit = match run(&cli) {
         Ok(code) => code,
@@ -2437,7 +2526,16 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_env_refs, parse_riffrc_assignment};
+    use super::{
+        expand_env_refs, fill_template_with_transcript, load_riff_json_defaults,
+        parse_riffrc_assignment,
+    };
+    use serde_json::json;
+    use std::collections::HashSet;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::tempdir;
 
     #[test]
     fn parse_riffrc_accepts_export_and_quotes() {
@@ -2463,5 +2561,58 @@ mod tests {
         let home = std::env::var("HOME").unwrap_or_default();
         let expanded = expand_env_refs("${HOME}/Code/riff:$HOME/bin");
         assert_eq!(expanded, format!("{home}/Code/riff:{home}/bin"));
+    }
+
+    #[test]
+    fn fill_template_with_transcript_shell_escapes_transcript() {
+        let rendered = fill_template_with_transcript(
+            "agent --text {transcript}",
+            Path::new("/tmp/audio.wav"),
+            Path::new("/tmp/out"),
+            Path::new("/tmp/out.txt"),
+            Path::new("/tmp/session"),
+            Some("hello \"quoted\" world"),
+        );
+        assert_eq!(rendered, "agent --text \"hello \\\"quoted\\\" world\"");
+    }
+
+    #[test]
+    fn json_config_sets_post_transcribe_default() {
+        let td = tempdir().expect("tempdir");
+        let json_path = td.path().join("riff.json");
+        fs::write(
+            &json_path,
+            serde_json::to_string(&json!({
+                "riff": {
+                    "post_transcribe_cmd": "agent --text {transcript}"
+                }
+            }))
+            .expect("serialize json"),
+        )
+        .expect("write config");
+
+        let original = std::env::var_os("RIFF_POST_TRANSCRIBE_CMD");
+        let original_path = std::env::var_os("RIFF_CONFIG_JSON_FILE");
+        std::env::remove_var("RIFF_POST_TRANSCRIBE_CMD");
+        std::env::set_var("RIFF_CONFIG_JSON_FILE", &json_path);
+
+        let original_env_keys: HashSet<OsString> = std::env::vars_os().map(|(k, _)| k).collect();
+        load_riff_json_defaults(&original_env_keys);
+
+        assert_eq!(
+            std::env::var("RIFF_POST_TRANSCRIBE_CMD").ok().as_deref(),
+            Some("agent --text {transcript}")
+        );
+
+        if let Some(value) = original {
+            std::env::set_var("RIFF_POST_TRANSCRIBE_CMD", value);
+        } else {
+            std::env::remove_var("RIFF_POST_TRANSCRIBE_CMD");
+        }
+        if let Some(value) = original_path {
+            std::env::set_var("RIFF_CONFIG_JSON_FILE", value);
+        } else {
+            std::env::remove_var("RIFF_CONFIG_JSON_FILE");
+        }
     }
 }

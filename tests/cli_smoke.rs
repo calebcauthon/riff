@@ -12,6 +12,7 @@ use tempfile::tempdir;
 fn cmd_with_root(root: &Path) -> Command {
     let mut cmd = Command::cargo_bin("riff").expect("riff binary should build");
     cmd.env("RIFF_ROOT", root);
+    cmd.env("RIFF_CONFIG_JSON_FILE", root.join("test-riff-config.json"));
     cmd.env("RIFF_BEEP", "0");
     cmd.env("RIFF_WEB_SERVER", "0");
     cmd.env("RIFF_PARAKEET_SERVER", "0");
@@ -900,6 +901,43 @@ fn stop_json_includes_transcription_perf_breakdown() {
 }
 
 #[test]
+fn stop_verbose_prints_hook_instrumentation() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_POST_TRANSCRIBE_CMD", "printf '%s' {transcript}")
+        .args([
+            "--verbose",
+            "stop",
+            "--transcribe-cmd",
+            "printf 'verbose test\\n' > {out_txt}",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("[verbose] Stop pipeline:"))
+        .stderr(predicates::str::contains("transcribe_cmd=cli"))
+        .stderr(predicates::str::contains("post_transcribe_cmd=env"))
+        .stderr(predicates::str::contains("[verbose] Transcription result:"))
+        .stderr(predicates::str::contains("[verbose] Post-transcribe hook:"))
+        .stderr(predicates::str::contains(
+            "[verbose] Stop instrumentation summary:",
+        ));
+}
+
+#[test]
 fn end_to_end_start_shot_stop_produces_transcript_and_note() {
     let td = tempdir().expect("tempdir");
     let fake_bin = td.path().join("fake-bin");
@@ -993,6 +1031,63 @@ fn end_to_end_start_shot_stop_produces_transcript_and_note() {
         .success()
         .stdout(predicates::str::contains("hello from integration test"))
         .stdout(predicates::str::contains("[TestApp Screenshot 1]"));
+}
+
+#[test]
+fn json_config_post_transcribe_command_rewrites_transcript() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    let config_path = td.path().join("riff.json");
+    fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "riff": {
+                "post_transcribe_cmd": "printf 'rewritten: %s\\n' {transcript}"
+            }
+        }))
+        .expect("serialize config"),
+    )
+    .expect("write config");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_CONFIG_JSON_FILE", &config_path)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_CONFIG_JSON_FILE", &config_path)
+        .args([
+            "stop",
+            "--transcribe-cmd",
+            "printf 'hello from raw transcript\\n' > {out_txt}",
+        ])
+        .assert()
+        .success();
+
+    let session_id = only_session_id(td.path());
+    let session_dir = td.path().join("sessions").join(&session_id);
+    let transcript_txt = fs::read_to_string(session_dir.join("transcript.txt"))
+        .expect("transcript.txt should exist");
+    assert!(
+        transcript_txt.contains("rewritten: hello from raw transcript"),
+        "transcript.txt should contain rewritten text: {transcript_txt}"
+    );
+
+    let note_md = fs::read_to_string(session_dir.join("note.md")).expect("read note.md");
+    assert!(
+        note_md.contains("rewritten: hello from raw transcript"),
+        "note.md should contain rewritten transcript: {note_md}"
+    );
 }
 
 #[test]

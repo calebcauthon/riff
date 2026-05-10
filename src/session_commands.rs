@@ -14,7 +14,7 @@ use crate::screenshots::{detect_screenshot_dir, file_mtime_epoch, move_session_s
 use crate::transcription::{
     ensure_parakeet_server, ensure_web_server, parakeet_server_enabled,
     resolve_parakeet_batch_size, resolve_parakeet_model, resolve_parakeet_script,
-    resolve_python_bin, run_transcription,
+    resolve_python_bin, run_post_transcribe_command, run_transcription,
 };
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
@@ -37,6 +37,20 @@ use std::time::{Duration, Instant};
 
 fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
+}
+
+fn command_source(cli_value: Option<&str>, env_key: &str) -> &'static str {
+    if cli_value.map(str::trim).filter(|s| !s.is_empty()).is_some() {
+        "cli"
+    } else if env::var(env_key)
+        .ok()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        "env"
+    } else {
+        "off"
+    }
 }
 
 fn load_chunked_transcript(session_dir: &Path, events_path: &Path) -> (String, Value) {
@@ -1337,21 +1351,33 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let collect_clipboard_events_ms: f64;
     let audio_duration_ms: f64;
     let build_note_bundle_ms: f64;
+    let post_transcribe_ms: f64;
     let render_ms: f64;
     let mut write_note_md_ms = 0.0;
     let mut write_note_html_file_ms = 0.0;
     let mut transcription_forced_stop = false;
     let mut stop_flush_meta = Value::Null;
     let mut use_chunked_transcript = false;
-    let use_custom_transcribe = args
-        .transcribe_cmd
-        .as_ref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
-        || env::var("RIFF_TRANSCRIBE_CMD")
-            .ok()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false);
+    let custom_transcribe_source =
+        command_source(args.transcribe_cmd.as_deref(), "RIFF_TRANSCRIBE_CMD");
+    let post_transcribe_source = command_source(
+        args.post_transcribe_cmd.as_deref(),
+        "RIFF_POST_TRANSCRIBE_CMD",
+    );
+    let use_custom_transcribe = custom_transcribe_source != "off";
+
+    print_verbose(
+        cli,
+        format!(
+            "Stop pipeline: session_id={} watcher_pid={:?} cursor_sec={:.3} paused={} transcribe_cmd={} post_transcribe_cmd={}",
+            state.session_id,
+            state.transcription_watcher_pid,
+            state.transcription_cursor_sec,
+            state.transcription_paused,
+            custom_transcribe_source,
+            post_transcribe_source,
+        ),
+    );
 
     if !cli.dry_run {
         if let Some(pid) = state.clipboard_watcher_pid {
@@ -1386,11 +1412,21 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
 
         if let Some(pid) = state.transcription_watcher_pid {
             let t_transcription_watcher_stop = Instant::now();
+            print_verbose(
+                cli,
+                format!("Waiting up to 12s for transcription watcher pid={pid} to finish."),
+            );
             let (finished, waited_ms) =
                 wait_for_transcription_watcher(pid, Duration::from_secs(12), cli);
             transcription_wait_ms = waited_ms;
             if !finished {
                 transcription_forced_stop = true;
+                print_verbose(
+                    cli,
+                    format!(
+                        "Transcription watcher pid={pid} did not finish in time; forcing stop."
+                    ),
+                );
                 stop_transcription_watcher(pid, cli);
             }
             transcription_watcher_stop_ms = elapsed_ms(t_transcription_watcher_stop);
@@ -1402,6 +1438,15 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 || state.transcription_paused;
             if should_flush_manual_chunk {
                 use_chunked_transcript = true;
+                print_verbose(
+                    cli,
+                    format!(
+                        "Stop transcription strategy: chunked_flush (watcher_pid={:?} cursor_sec={:.3} paused={})",
+                        state.transcription_watcher_pid,
+                        state.transcription_cursor_sec,
+                        state.transcription_paused
+                    ),
+                );
                 let t_stop_flush = Instant::now();
                 stop_flush_meta = match process_manual_chunk(&mut state, cli, "stop_flush", None) {
                     Ok(meta) => meta,
@@ -1411,7 +1456,9 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                     }),
                 };
                 stop_flush_ms = elapsed_ms(t_stop_flush);
+                print_verbose(cli, format!("Stop flush result: {}", stop_flush_meta));
             } else {
+                print_verbose(cli, "Stop transcription strategy: full_transcribe_on_stop");
                 stop_flush_meta = json!({
                     "status": "skipped",
                     "reason": "full_transcribe_on_stop",
@@ -1481,6 +1528,57 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         }
     }
     let transcribe_ms = elapsed_ms(t_transcribe);
+    print_verbose(
+        cli,
+        format!(
+            "Transcription result: status={} method={} chars={} words={} elapsed_ms={}",
+            transcription_meta
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+            transcription_meta
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+            transcript_raw.chars().count(),
+            transcript_raw.split_whitespace().count(),
+            round3(transcribe_ms),
+        ),
+    );
+
+    let t_post_transcribe = Instant::now();
+    let pre_post_chars = transcript_raw.chars().count();
+    let (transcript_raw, post_transcribe_meta) =
+        if transcription_meta.get("status").and_then(|v| v.as_str()) == Some("ok") {
+            run_post_transcribe_command(&transcript_raw, &state, &session_dir, args, cli)
+        } else {
+            (
+                transcript_raw,
+                json!({"status": "skipped", "reason": "transcription_not_ok"}),
+            )
+        };
+    post_transcribe_ms = elapsed_ms(t_post_transcribe);
+    print_verbose(
+        cli,
+        format!(
+            "Post-transcribe hook: status={} source={} chars_before={} chars_after={} elapsed_ms={}",
+            post_transcribe_meta
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+            post_transcribe_source,
+            pre_post_chars,
+            transcript_raw.chars().count(),
+            round3(post_transcribe_ms),
+        ),
+    );
+    if let Some(obj) = transcription_meta.as_object_mut() {
+        obj.insert("post_process".to_string(), post_transcribe_meta.clone());
+        if post_transcribe_meta.get("status").and_then(|v| v.as_str()) == Some("error") {
+            obj.insert("status".to_string(), json!("error"));
+            obj.insert("reason".to_string(), json!("post_transcribe_failed"));
+        }
+    }
 
     let t_audio_duration = Instant::now();
     let audio_duration = get_audio_duration_sec(Path::new(&state.audio_path));
@@ -1617,6 +1715,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "collect_clipboard_events_ms": round3(collect_clipboard_events_ms),
             "move_screenshots_ms": round3(move_screenshots_ms),
             "transcribe_ms": round3(transcribe_ms),
+            "post_transcribe_ms": round3(post_transcribe_ms),
             "audio_duration_ms": round3(audio_duration_ms),
             "render_ms": round3(render_ms),
             "build_note_bundle_ms": round3(build_note_bundle_ms),
@@ -1636,6 +1735,18 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         "transcription_method": transcription_meta.get("method").and_then(|v| v.as_str()),
         "transcription_status": transcription_meta.get("status").and_then(|v| v.as_str())
     }));
+
+    print_verbose(
+        cli,
+        format!(
+            "Stop instrumentation summary: total_ms={} transcribe_ms={} post_transcribe_ms={} render_ms={} write_ms={}",
+            round3(stop_total_ms),
+            round3(transcribe_ms),
+            round3(post_transcribe_ms),
+            round3(render_ms),
+            round3(write_ms),
+        ),
+    );
 
     if !cli.dry_run {
         play_event_sound("stop", cli);

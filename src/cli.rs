@@ -96,6 +96,9 @@ pub struct StopArgs {
     pub transcribe_cmd: Option<String>,
 
     #[arg(long)]
+    pub post_transcribe_cmd: Option<String>,
+
+    #[arg(long)]
     pub python_bin: Option<String>,
 
     #[arg(long)]
@@ -118,6 +121,10 @@ pub struct ToggleArgs {
     /// Used when active (stop path): custom transcription command template
     #[arg(long)]
     pub transcribe_cmd: Option<String>,
+
+    /// Used when active (stop path): post-process transcript command template
+    #[arg(long)]
+    pub post_transcribe_cmd: Option<String>,
 
     /// Used when active (stop path): override python interpreter
     #[arg(long)]

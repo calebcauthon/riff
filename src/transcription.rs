@@ -6,8 +6,8 @@ use crate::paths::{
     web_server_pid_file,
 };
 use crate::{
-    command_exists, fill_template, print_verbose, process_is_alive, read_pid_file, round3,
-    shell_escape, write_pid_file,
+    command_exists, fill_template, fill_template_with_transcript, print_verbose, process_is_alive,
+    read_pid_file, round3, shell_escape, write_pid_file,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -928,5 +928,89 @@ pub(crate) fn run_transcription(
             }
             (String::new(), attach_perf(meta, perf, perf_total))
         }
+    }
+}
+
+pub(crate) fn run_post_transcribe_command(
+    transcript: &str,
+    state: &SessionState,
+    session_dir: &Path,
+    stop_args: &StopArgs,
+    cli: &Cli,
+) -> (String, Value) {
+    let cmd_template = stop_args
+        .post_transcribe_cmd
+        .clone()
+        .or_else(|| env::var("RIFF_POST_TRANSCRIBE_CMD").ok())
+        .map(|v| v.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let Some(template) = cmd_template else {
+        return (
+            transcript.to_string(),
+            json!({"status": "skipped", "reason": "not_configured"}),
+        );
+    };
+
+    let audio_path = PathBuf::from(&state.audio_path);
+    let out_base = session_dir.join("transcript");
+    let out_txt = session_dir.join("transcript.txt");
+    let filled = fill_template_with_transcript(
+        &template,
+        &audio_path,
+        &out_base,
+        &out_txt,
+        session_dir,
+        Some(transcript),
+    );
+    print_verbose(cli, format!("Running post-transcribe command: {filled}"));
+
+    match Command::new("sh").arg("-lc").arg(&filled).output() {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let rewritten = if !stdout.trim().is_empty() {
+                stdout
+            } else if out_txt.exists() {
+                fs::read_to_string(&out_txt).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let rewritten_trimmed = rewritten.trim().to_string();
+            let _ = fs::write(
+                &out_txt,
+                if rewritten_trimmed.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}\n", rewritten_trimmed)
+                },
+            );
+            (
+                rewritten_trimmed,
+                json!({
+                    "status": "ok",
+                    "method": "custom_command",
+                    "cmd": filled,
+                }),
+            )
+        }
+        Ok(out) => (
+            transcript.to_string(),
+            json!({
+                "status": "error",
+                "method": "custom_command",
+                "cmd": filled,
+                "returncode": out.status.code(),
+                "stderr": String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            }),
+        ),
+        Err(e) => (
+            transcript.to_string(),
+            json!({
+                "status": "error",
+                "method": "custom_command",
+                "cmd": filled,
+                "reason": format!("Failed to spawn shell command: {e}"),
+            }),
+        ),
     }
 }
