@@ -6,7 +6,7 @@ One-shot mode:
   python scripts/parakeet_transcribe.py \
     --audio /tmp/riff/sessions/<id>/audio.wav \
     --out-txt /tmp/riff/sessions/<id>/transcript.txt \
-    --model nvidia/parakeet-tdt-0.6b-v2
+    --model nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc
 
 Server mode (keeps model loaded for faster subsequent transcriptions):
   python scripts/parakeet_transcribe.py --serve --port 8765
@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument(
         "--model",
-        default=os.environ.get("RIFF_PARAKEET_MODEL", "nvidia/parakeet-tdt-0.6b-v2"),
+        default=os.environ.get("RIFF_PARAKEET_MODEL", "nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc"),
         help="Parakeet model name (NeMo pretrained id)",
     )
     p.add_argument(

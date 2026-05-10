@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_PARAKEET_MODEL: &str = "nvidia/parakeet-tdt-0.6b-v2";
+const DEFAULT_PARAKEET_MODEL: &str = "nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc";
 const DEFAULT_PARAKEET_SERVER_WAIT_READY_SEC: u64 = 30;
 const DEFAULT_PARAKEET_BATCH_SIZE: u32 = 4;
 

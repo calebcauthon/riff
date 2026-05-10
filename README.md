@@ -115,7 +115,7 @@ Set env vars (add to `~/.zshrc` if desired):
 ```bash
 export RIFF_PYTHON_BIN="$HOME/Code/riff/.venv/bin/python"
 export RIFF_PARAKEET_SCRIPT="$HOME/Code/riff/scripts/parakeet_transcribe.py"
-export RIFF_PARAKEET_MODEL="nvidia/parakeet-tdt-0.6b-v2"
+export RIFF_PARAKEET_MODEL="nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc"
 # optional perf + warm server controls
 export RIFF_PARAKEET_SERVER=1
 export RIFF_PARAKEET_SERVER_URL="http://127.0.0.1:8765"
@@ -135,7 +135,7 @@ Or use an optional global `~/.riffrc` file (loaded automatically by `target/rele
 cat > ~/.riffrc <<'EOF'
 export RIFF_PYTHON_BIN="$HOME/Code/riff/.venv/bin/python"
 export RIFF_PARAKEET_SCRIPT="$HOME/Code/riff/scripts/parakeet_transcribe.py"
-export RIFF_PARAKEET_MODEL="nvidia/parakeet-tdt-0.6b-v2"
+export RIFF_PARAKEET_MODEL="nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc"
 export RIFF_PARAKEET_SERVER=1
 EOF
 ```
@@ -474,13 +474,13 @@ Suggested skhd keybind setup (native commands + inline env):
 
 ```text
 # riff toggle: start if idle, stop if active
-alt - 0x2C : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2 $HOME/Code/riff/target/release/riff --quiet toggle >> /tmp/riff/toggle-hotkey.log 2>&1
+alt - 0x2C : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc $HOME/Code/riff/target/release/riff --quiet toggle >> /tmp/riff/toggle-hotkey.log 2>&1
 
 # riff toggle + send: stop, then send transcript to focused app
-alt - 0x27 : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2 $HOME/Code/riff/target/release/riff --quiet toggle && env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2 $HOME/Code/riff/target/release/riff --quiet send >> /tmp/riff/toggle-hotkey.log 2>&1
+alt - 0x27 : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc $HOME/Code/riff/target/release/riff --quiet toggle && env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc $HOME/Code/riff/target/release/riff --quiet send >> /tmp/riff/toggle-hotkey.log 2>&1
 
 # riff toggle + open html: stop, then open latest note.html
-alt - 0x29 : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2 $HOME/Code/riff/target/release/riff --quiet toggle && env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2 $HOME/Code/riff/target/release/riff --quiet html >> /tmp/riff/toggle-hotkey.log 2>&1
+alt - 0x29 : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc $HOME/Code/riff/target/release/riff --quiet toggle && env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc $HOME/Code/riff/target/release/riff --quiet html >> /tmp/riff/toggle-hotkey.log 2>&1
 ```
 
 Toggle behavior:
