@@ -2317,6 +2317,7 @@ fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
     let active = active_state_file().exists();
     if active {
         let stop_args = StopArgs {
+            no_stop_hooks: args.no_stop_hooks,
             transcribe_cmd: args.transcribe_cmd.clone(),
             post_transcribe_cmd: args.post_transcribe_cmd.clone(),
             python_bin: args.python_bin.clone(),
@@ -2403,6 +2404,7 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
 
     write_json(&active_state_file(), &old_state)?;
     let stop_args = StopArgs {
+        no_stop_hooks: false,
         transcribe_cmd: None,
         post_transcribe_cmd: None,
         python_bin: None,

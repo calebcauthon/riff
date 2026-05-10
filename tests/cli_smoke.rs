@@ -938,6 +938,58 @@ fn stop_verbose_prints_hook_instrumentation() {
 }
 
 #[test]
+fn stop_no_stop_hooks_disables_stop_hooks() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    let hook_marker = td.path().join("hook-marker.txt");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env(
+            "RIFF_POST_TRANSCRIBE_CMD",
+            format!(
+                "printf 'post-hook-ran\\n' >> {} && printf '%s' {{transcript}}",
+                hook_marker.display()
+            ),
+        )
+        .args([
+            "--verbose",
+            "stop",
+            "--no-stop-hooks",
+            "--transcribe-cmd",
+            &format!(
+                "printf 'transcribe-hook-ran\\n' >> {}",
+                hook_marker.display()
+            ),
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("no_stop_hooks=true"))
+        .stderr(predicates::str::contains("transcribe_cmd=disabled"))
+        .stderr(predicates::str::contains("post_transcribe_cmd=disabled"))
+        .stderr(predicates::str::contains(
+            "[verbose] Post-transcribe hook: status=skipped source=disabled",
+        ));
+
+    assert!(
+        !hook_marker.exists(),
+        "stop hooks should be disabled, but marker file exists"
+    );
+}
+
+#[test]
 fn end_to_end_start_shot_stop_produces_transcript_and_note() {
     let td = tempdir().expect("tempdir");
     let fake_bin = td.path().join("fake-bin");

@@ -93,6 +93,9 @@ pub struct StartArgs {
 #[derive(Args, Debug)]
 pub struct StopArgs {
     #[arg(long)]
+    pub no_stop_hooks: bool,
+
+    #[arg(long)]
     pub transcribe_cmd: Option<String>,
 
     #[arg(long)]
@@ -117,6 +120,10 @@ pub struct ToggleArgs {
     /// Used when idle (start path): ffmpeg avfoundation selector
     #[arg(long, default_value = "auto")]
     pub audio_device: String,
+
+    /// Used when active (stop path): custom transcription command template
+    #[arg(long)]
+    pub no_stop_hooks: bool,
 
     /// Used when active (stop path): custom transcription command template
     #[arg(long)]

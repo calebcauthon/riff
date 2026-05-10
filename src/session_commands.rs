@@ -53,6 +53,14 @@ fn command_source(cli_value: Option<&str>, env_key: &str) -> &'static str {
     }
 }
 
+fn hook_source(cli_value: Option<&str>, env_key: &str, disabled: bool) -> &'static str {
+    if disabled {
+        "disabled"
+    } else {
+        command_source(cli_value, env_key)
+    }
+}
+
 fn load_chunked_transcript(session_dir: &Path, events_path: &Path) -> (String, Value) {
     let transcript_path = session_dir.join("transcript.txt");
     let transcript_raw = fs::read_to_string(&transcript_path)
@@ -1358,22 +1366,44 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let mut transcription_forced_stop = false;
     let mut stop_flush_meta = Value::Null;
     let mut use_chunked_transcript = false;
-    let custom_transcribe_source =
-        command_source(args.transcribe_cmd.as_deref(), "RIFF_TRANSCRIBE_CMD");
-    let post_transcribe_source = command_source(
+    let stop_hooks_disabled = args.no_stop_hooks;
+    let custom_transcribe_source = hook_source(
+        args.transcribe_cmd.as_deref(),
+        "RIFF_TRANSCRIBE_CMD",
+        stop_hooks_disabled,
+    );
+    let post_transcribe_source = hook_source(
         args.post_transcribe_cmd.as_deref(),
         "RIFF_POST_TRANSCRIBE_CMD",
+        stop_hooks_disabled,
     );
-    let use_custom_transcribe = custom_transcribe_source != "off";
+    let use_custom_transcribe = matches!(custom_transcribe_source, "cli" | "env");
+    let effective_stop_args = StopArgs {
+        no_stop_hooks: args.no_stop_hooks,
+        transcribe_cmd: if stop_hooks_disabled {
+            None
+        } else {
+            args.transcribe_cmd.clone()
+        },
+        post_transcribe_cmd: if stop_hooks_disabled {
+            None
+        } else {
+            args.post_transcribe_cmd.clone()
+        },
+        python_bin: args.python_bin.clone(),
+        parakeet_script: args.parakeet_script.clone(),
+        parakeet_model: args.parakeet_model.clone(),
+    };
 
     print_verbose(
         cli,
         format!(
-            "Stop pipeline: session_id={} watcher_pid={:?} cursor_sec={:.3} paused={} transcribe_cmd={} post_transcribe_cmd={}",
+            "Stop pipeline: session_id={} watcher_pid={:?} cursor_sec={:.3} paused={} no_stop_hooks={} transcribe_cmd={} post_transcribe_cmd={}",
             state.session_id,
             state.transcription_watcher_pid,
             state.transcription_cursor_sec,
             state.transcription_paused,
+            stop_hooks_disabled,
             custom_transcribe_source,
             post_transcribe_source,
         ),
@@ -1508,11 +1538,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
 
     let t_transcribe = Instant::now();
     let (transcript_raw, mut transcription_meta) = if use_custom_transcribe {
-        run_transcription(&state, &session_dir, args, cli)
+        run_transcription(&state, &session_dir, &effective_stop_args, cli)
     } else if use_chunked_transcript {
         load_chunked_transcript(&session_dir, &events_path)
     } else {
-        run_transcription(&state, &session_dir, args, cli)
+        run_transcription(&state, &session_dir, &effective_stop_args, cli)
     };
     if !use_custom_transcribe && use_chunked_transcript {
         if let Some(obj) = transcription_meta.as_object_mut() {
@@ -1550,7 +1580,13 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let pre_post_chars = transcript_raw.chars().count();
     let (transcript_raw, post_transcribe_meta) =
         if transcription_meta.get("status").and_then(|v| v.as_str()) == Some("ok") {
-            run_post_transcribe_command(&transcript_raw, &state, &session_dir, args, cli)
+            run_post_transcribe_command(
+                &transcript_raw,
+                &state,
+                &session_dir,
+                &effective_stop_args,
+                cli,
+            )
         } else {
             (
                 transcript_raw,

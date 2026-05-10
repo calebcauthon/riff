@@ -261,6 +261,7 @@ Stops recording and processes the session (transcription, note/html generation, 
 It does **not** send output to the focused app.
 
 Flags:
+- `--no-stop-hooks` ignore stop-time hook commands and use the built-in stop pipeline
 - `--python-bin <path>` override python interpreter
 - `--parakeet-script <path>` override script path
 - `--parakeet-model <name>` override model name
@@ -292,7 +293,7 @@ Useful when you want one command instead of separate `start`/`stop`.
 
 Flags:
 - Start-path flags (used when idle): `--screenshot-dir`, `--audio-device`
-- Stop-path flags (used when active): `--python-bin`, `--parakeet-script`, `--parakeet-model`, `--transcribe-cmd`, `--post-transcribe-cmd`
+- Stop-path flags (used when active): `--no-stop-hooks`, `--python-bin`, `--parakeet-script`, `--parakeet-model`, `--transcribe-cmd`, `--post-transcribe-cmd`
 
 ### Sounds (interactive picker)
 

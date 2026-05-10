@@ -938,6 +938,13 @@ pub(crate) fn run_post_transcribe_command(
     stop_args: &StopArgs,
     cli: &Cli,
 ) -> (String, Value) {
+    if stop_args.no_stop_hooks {
+        return (
+            transcript.to_string(),
+            json!({"status": "skipped", "reason": "disabled_by_flag"}),
+        );
+    }
+
     let cmd_template = stop_args
         .post_transcribe_cmd
         .clone()
