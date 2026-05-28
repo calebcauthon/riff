@@ -49,6 +49,33 @@ Performance/observability logs:
 
 ## Install
 
+### Homebrew (recommended)
+
+Tap/install from GitHub:
+
+```bash
+brew install calebcauthon/riff/riff
+```
+
+This uses the formula at `Formula/riff.rb`, builds from source with Cargo, and installs the native `riff` binary.
+
+Upgrade later:
+
+```bash
+brew upgrade riff
+```
+
+First release/bootstrap note:
+- The formula URL is pinned to the release tag pattern `vX.Y.Z` (for example `v0.1.0`).
+- For the very first tagged release, update `Formula/riff.rb` with the real tarball SHA-256 before users install the stable formula.
+- Until that checksum is finalized, developers can install from `main` with:
+
+```bash
+brew install --HEAD calebcauthon/riff/riff
+```
+
+### Local repo wrapper (dev workflow)
+
 ```bash
 cd ~/Code/riff
 chmod +x riff
@@ -63,6 +90,40 @@ If `RIFF_PYTHON_BIN` is not set, it auto-prefers:
 Versioning:
 - Repository version is stored in `VERSION`.
 - `riff --version` reads and displays that version at build time.
+
+Homebrew release/update flow:
+
+```bash
+# dry run first (safe preview)
+./scripts/release.sh --dry-run --allow-dirty v0.1.0
+
+# actual release prep (requires clean tree by default)
+./scripts/release.sh v0.1.0
+
+# if tag is not on origin yet:
+git push origin v0.1.0
+./scripts/release.sh v0.1.0
+```
+
+What this script automates:
+- normalizes version input (`0.1.0` or `v0.1.0`)
+- updates `Cargo.toml` + `VERSION`
+- runs `cargo build --release` (+ `cargo test` unless `--skip-tests`)
+- creates/updates local release tag (`--retag` to force retag)
+- fetches GitHub tag tarball checksum with retries
+- updates `Formula/riff.rb` `url` + `sha256`
+
+What you still do manually:
+- push commit + tag (or use `--push-tag` for tag push)
+- open/merge PR if applicable
+- run any final Homebrew audit/install validation you want before publishing
+
+After release changes are pushed, users update with:
+
+```bash
+brew update
+brew upgrade riff
+```
 
 Performance note:
 - `riff start` warms a local Parakeet server in the background (when enabled), so later `riff stop` calls are faster.
