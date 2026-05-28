@@ -294,16 +294,18 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "[dry-run] fetch $tarball_url and compute sha256"
   sha256_value="<dry-run>"
 else
+  echo "[riff-release] Waiting 20s for GitHub to generate tarball..."
+  sleep 20
   echo "[riff-release] Downloading GitHub tag tarball"
   attempts=0
-  max_attempts=5
+  max_attempts=8
   until [[ "$attempts" -ge "$max_attempts" ]]; do
     attempts=$((attempts + 1))
     if curl --fail --location --silent --show-error "$tarball_url" --output "$tmp_tarball"; then
       break
     fi
     if [[ "$attempts" -lt "$max_attempts" ]]; then
-      sleep_seconds=$((attempts * 2))
+      sleep_seconds=$((attempts * 15))
       echo "[riff-release] Tarball fetch failed (attempt $attempts/$max_attempts), retrying in ${sleep_seconds}s..."
       sleep "$sleep_seconds"
     fi
