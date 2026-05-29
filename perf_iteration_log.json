@@ -1,0 +1,489 @@
+{
+  "benchmark": "real_riff_start_stop_outside_sandbox",
+  "notes": [
+    "Each iteration runs the real `riff start`, sleeps for 5/15/30 seconds, then runs the real `riff stop` in the normal `/tmp/riff` environment.",
+    "Wall-clock timings are measured by the caller. Reported timings come from the CLI JSON payloads.",
+    "The biggest remaining cost is Parakeet server inference (`transcribe_ms` / `server_request_ms`)."
+  ],
+  "iterations": [
+    {
+      "iteration": 0,
+      "label": "baseline_before_fixes",
+      "changes": [
+        "No code changes. Initial outside-sandbox benchmark."
+      ],
+      "results": [
+        {
+          "duration_sec": 5,
+          "start_wall_ms": 2760.56,
+          "start_reported_ms": 414.737,
+          "stop_wall_ms": 3424.885,
+          "stop_reported_ms": 1054.361
+        },
+        {
+          "duration_sec": 15,
+          "start_wall_ms": 2788.527,
+          "start_reported_ms": 410.032,
+          "stop_wall_ms": 3657.935,
+          "stop_reported_ms": 1285.225
+        },
+        {
+          "duration_sec": 30,
+          "start_wall_ms": 2780.124,
+          "start_reported_ms": 411.356,
+          "stop_wall_ms": 4153.015,
+          "stop_reported_ms": 1773.15
+        }
+      ],
+      "takeaway": "Caller-visible latency was much larger than the CLI's own timings. The command was waiting on detached beep helpers that inherited captured stdio."
+    },
+    {
+      "iteration": 1,
+      "label": "detach_beep_stdio",
+      "changes": [
+        "Updated `play_event_sound` to spawn `sh`/`osascript` with stdin/stdout/stderr redirected to `/dev/null`."
+      ],
+      "files": [
+        "src/main.rs"
+      ],
+      "results": [
+        {
+          "duration_sec": 5,
+          "start_wall_ms": 470.839,
+          "start_reported_ms": 461.357,
+          "stop_wall_ms": 1456.416,
+          "stop_reported_ms": 1435.648
+        },
+        {
+          "duration_sec": 15,
+          "start_wall_ms": 460.367,
+          "start_reported_ms": 449.047,
+          "stop_wall_ms": 1215.232,
+          "stop_reported_ms": 1194.94
+        },
+        {
+          "duration_sec": 30,
+          "start_wall_ms": 462.267,
+          "start_reported_ms": 449.459,
+          "stop_wall_ms": 1710.32,
+          "stop_reported_ms": 1695.036
+        }
+      ],
+      "takeaway": "This fixed the biggest mismatch. Wall-clock timing now closely matches the CLI's own measured work."
+    },
+    {
+      "iteration": 2,
+      "label": "wav_duration_fast_path_and_remove_extra_stop_sleep",
+      "changes": [
+        "Added a WAV header fast path for `get_audio_duration_sec` to avoid `ffprobe` on the common PCM WAV path.",
+        "Removed the unconditional `120ms` sleep after `stop_recorder()` in `cmd_stop`."
+      ],
+      "files": [
+        "src/main.rs",
+        "src/session_commands.rs"
+      ],
+      "results": [
+        {
+          "duration_sec": 5,
+          "start_wall_ms": 469.482,
+          "start_reported_ms": 459.979,
+          "stop_wall_ms": 1489.867,
+          "stop_reported_ms": 1464.725
+        },
+        {
+          "duration_sec": 15,
+          "start_wall_ms": 889.967,
+          "start_reported_ms": 866.31,
+          "stop_wall_ms": 992.126,
+          "stop_reported_ms": 965.995
+        },
+        {
+          "duration_sec": 30,
+          "start_wall_ms": 446.379,
+          "start_reported_ms": 433.82,
+          "stop_wall_ms": 3647.719,
+          "stop_reported_ms": 3610.012
+        }
+      ],
+      "takeaway": "This reduced fixed stop overhead, but overall stop time was dominated by highly variable Parakeet server request latency, so totals did not improve consistently."
+    },
+    {
+      "iteration": 3,
+      "label": "trust_cached_audio_device_immediately",
+      "changes": [
+        "Changed `resolve_audio_device_with_cache` to return the cached AVFoundation device immediately instead of re-running ffmpeg device enumeration on the fast path.",
+        "Recorder startup already retries with uncached detection if the cached device is stale."
+      ],
+      "files": [
+        "src/main.rs"
+      ],
+      "results": [
+        {
+          "duration_sec": 5,
+          "start_wall_ms": 347.276,
+          "start_reported_ms": 334.704
+        },
+        {
+          "duration_sec": 15,
+          "start_wall_ms": 348.567,
+          "start_reported_ms": 331.45
+        },
+        {
+          "duration_sec": 30,
+          "start_wall_ms": 351.519,
+          "start_reported_ms": 333.444
+        }
+      ],
+      "takeaway": "This eliminated the `resolve_audio_device_ms` spikes and made start time consistently ~340-350ms wall-clock."
+    },
+    {
+      "iteration": 4,
+      "label": "clipboard_watcher_shutdown_fire_and_forget",
+      "changes": [
+        "Changed `stop_clipboard_watcher` to send `SIGTERM` and return immediately instead of polling up to 800ms."
+      ],
+      "files": [
+        "src/main.rs"
+      ],
+      "results": [
+        {
+          "duration_sec": 5,
+          "start_wall_ms": 339.842,
+          "start_reported_ms": 331.201,
+          "stop_wall_ms": 1168.448,
+          "stop_reported_ms": 1154.794,
+          "stop_clipboard_watcher_ms": 0.008
+        },
+        {
+          "duration_sec": 15,
+          "start_wall_ms": 344.793,
+          "start_reported_ms": 333.554,
+          "stop_wall_ms": 1041.88,
+          "stop_reported_ms": 1017.637,
+          "stop_clipboard_watcher_ms": 0.014
+        },
+        {
+          "duration_sec": 30,
+          "start_wall_ms": 342.367,
+          "start_reported_ms": 330.698,
+          "stop_wall_ms": 1541.505,
+          "stop_reported_ms": 1517.619,
+          "stop_clipboard_watcher_ms": 0.016
+        }
+      ],
+      "takeaway": "This removed ~40-45ms of synchronous shutdown overhead and produced the current best overall run set."
+    },
+    {
+      "iteration": 5,
+      "label": "make_parakeet_batch_size_tunable",
+      "changes": [
+        "Added `RIFF_PARAKEET_BATCH_SIZE` plumbing through the main stop transcription path, chunk transcription path, and Python helper.",
+        "Recorded `batch_size` in transcription metadata so perf logs can be compared across runs."
+      ],
+      "files": [
+        "src/transcription.rs",
+        "src/session_commands.rs",
+        "scripts/parakeet_transcribe.py"
+      ],
+      "results": [
+        {
+          "mode": "shared_server_port_8765",
+          "batch_size": 1,
+          "durations": [
+            {
+              "duration_sec": 5,
+              "stop_wall_ms": 6915.061,
+              "server_request_ms": 6634.904
+            },
+            {
+              "duration_sec": 15,
+              "stop_wall_ms": 1239.395,
+              "server_request_ms": 1049.621
+            },
+            {
+              "duration_sec": 30,
+              "stop_wall_ms": 1766.232,
+              "server_request_ms": 1560.603
+            }
+          ]
+        },
+        {
+          "mode": "shared_server_port_8765",
+          "batch_size": 2,
+          "durations": [
+            {
+              "duration_sec": 5,
+              "stop_wall_ms": 755.192,
+              "server_request_ms": 561.527
+            },
+            {
+              "duration_sec": 15,
+              "stop_wall_ms": 1033.298,
+              "server_request_ms": 842.183
+            },
+            {
+              "duration_sec": 30,
+              "stop_wall_ms": 1566.036,
+              "server_request_ms": 1370.431
+            }
+          ]
+        },
+        {
+          "mode": "shared_server_port_8765",
+          "batch_size": 4,
+          "durations": [
+            {
+              "duration_sec": 5,
+              "stop_wall_ms": 843.302,
+              "server_request_ms": 644.662
+            },
+            {
+              "duration_sec": 15,
+              "stop_wall_ms": 1020.857,
+              "server_request_ms": 839.189
+            },
+            {
+              "duration_sec": 30,
+              "stop_wall_ms": 1422.954,
+              "server_request_ms": 1226.266
+            }
+          ]
+        }
+      ],
+      "takeaway": "The first matrix showed that forcing `batch_size=1` was leaving measurable performance on the table, but the shared 8765 server was later found to be an unrelated CPU-only process from another repo, so those numbers were suggestive rather than trustworthy."
+    },
+    {
+      "iteration": 6,
+      "label": "isolate_benchmark_server_and_set_default_batch_size_4",
+      "changes": [
+        "Benchmarked the same real `riff start` / `riff stop` flow against a dedicated riff-managed Parakeet server on `127.0.0.1:8875` to remove interference from the unrelated shared 8765 server.",
+        "Set the default Parakeet batch size from `1` to `4` based on the dedicated-server results."
+      ],
+      "files": [
+        "src/transcription.rs",
+        "scripts/parakeet_transcribe.py"
+      ],
+      "results": [
+        {
+          "mode": "dedicated_server_port_8875",
+          "batch_size": 1,
+          "durations": [
+            {
+              "duration_sec": 5,
+              "stop_wall_ms": 41543.742,
+              "server_health_before": false,
+              "server_ensure_ms": 29561.419,
+              "server_request_ms": 11324.859
+            },
+            {
+              "duration_sec": 15,
+              "stop_wall_ms": 9749.316,
+              "server_health_before": true,
+              "server_request_ms": 9462.505
+            },
+            {
+              "duration_sec": 30,
+              "stop_wall_ms": 8159.317,
+              "server_health_before": true,
+              "server_request_ms": 7915.175
+            }
+          ]
+        },
+        {
+          "mode": "dedicated_server_port_8875",
+          "batch_size": 2,
+          "durations": [
+            {
+              "duration_sec": 5,
+              "stop_wall_ms": 1365.092,
+              "server_request_ms": 1164.302
+            },
+            {
+              "duration_sec": 15,
+              "stop_wall_ms": 5285.16,
+              "server_request_ms": 5092.576
+            },
+            {
+              "duration_sec": 30,
+              "stop_wall_ms": 1509.603,
+              "server_request_ms": 1329.884
+            }
+          ]
+        },
+        {
+          "mode": "dedicated_server_port_8875",
+          "batch_size": 4,
+          "durations": [
+            {
+              "duration_sec": 5,
+              "stop_wall_ms": 879.981,
+              "server_request_ms": 691.5
+            },
+            {
+              "duration_sec": 15,
+              "stop_wall_ms": 1002.792,
+              "server_request_ms": 822.538
+            },
+            {
+              "duration_sec": 30,
+              "stop_wall_ms": 1427.768,
+              "server_request_ms": 1259.588
+            }
+          ]
+        }
+      ],
+      "takeaway": "With the shared-server confounder removed, `batch_size=4` was the only setting that stayed consistently near the earlier ~1s to ~1.4s stop range across all three durations, so it became the new default."
+    },
+    {
+      "iteration": 7,
+      "label": "validate_new_default_batch_size_4",
+      "changes": [
+        "Rebuilt with default `RIFF_PARAKEET_BATCH_SIZE=4` and reran the real 5s / 15s / 30s benchmark against the dedicated riff-managed server."
+      ],
+      "files": [
+        "src/transcription.rs",
+        "scripts/parakeet_transcribe.py",
+        "perf_iteration_log.json"
+      ],
+      "results": [
+        {
+          "mode": "dedicated_server_port_8875_default_batch_size_4",
+          "durations": [
+            {
+              "duration_sec": 5,
+              "start_wall_ms": 329.251,
+              "stop_wall_ms": 11968.759,
+              "server_health_before": false,
+              "server_request_ms": 736.803,
+              "transcribe_ms": 11775.218
+            },
+            {
+              "duration_sec": 15,
+              "start_wall_ms": 334.43,
+              "stop_wall_ms": 942.884,
+              "server_health_before": true,
+              "server_request_ms": 776.159,
+              "transcribe_ms": 799.394
+            },
+            {
+              "duration_sec": 30,
+              "start_wall_ms": 338.721,
+              "stop_wall_ms": 1437.448,
+              "server_health_before": true,
+              "server_request_ms": 1265.661,
+              "transcribe_ms": 1291.287
+            }
+          ]
+        }
+      ],
+      "takeaway": "The new default holds up on warm runs. The only regression in the validation pass was the first stop when the dedicated server was not already running, which paid server startup inside `transcribe_ms`."
+    },
+    {
+      "iteration": 8,
+      "label": "reduce_recorder_startup_wait_and_cache_watcher_python",
+      "changes": [
+        "Reduced recorder startup confirmation wait from `300ms` to `120ms` and tightened the poll interval from `50ms` to `20ms`.",
+        "Cached the resolved live-transcription watcher Python binary so repeated starts do not re-run expensive Torch/NeMo dependency probes.",
+        "Reduced the watcher early-exit confirmation sleep from `120ms` to `40ms`."
+      ],
+      "files": [
+        "src/main.rs",
+        "src/paths.rs"
+      ],
+      "results": [
+        {
+          "mode": "normal_stop_dedicated_server_port_8875",
+          "durations": [
+            {
+              "duration_sec": 5,
+              "start_wall_ms": 134.534,
+              "start_reported_ms": 128.504,
+              "stop_wall_ms": 11626.459,
+              "server_health_before": false,
+              "server_request_ms": 646.118,
+              "transcribe_ms": 11405.467
+            },
+            {
+              "duration_sec": 15,
+              "start_wall_ms": 150.742,
+              "start_reported_ms": 146.731,
+              "stop_wall_ms": 898.863,
+              "server_health_before": true,
+              "server_request_ms": 733.57,
+              "transcribe_ms": 761.169
+            },
+            {
+              "duration_sec": 30,
+              "start_wall_ms": 150.605,
+              "start_reported_ms": 146.73,
+              "stop_wall_ms": 1119.577,
+              "server_health_before": true,
+              "server_request_ms": 950.576,
+              "transcribe_ms": 982.346
+            }
+          ]
+        },
+        {
+          "mode": "live_transcribe_warm_cache_port_8875",
+          "env": {
+            "RIFF_LIVE_TRANSCRIBE": 1,
+            "RIFF_CHUNK_MIN_SEC": 3,
+            "RIFF_CHUNK_MAX_SEC": 6,
+            "RIFF_CHUNK_SILENCE_SEC": 0.35,
+            "RIFF_CHUNK_POLL_MS": 250
+          },
+          "durations": [
+            {
+              "duration_sec": 5,
+              "start_wall_ms": 216.294,
+              "start_reported_ms": 203.879,
+              "stop_wall_ms": 12603.676,
+              "watcher_wait_ms": 12084.52,
+              "transcription_method": "manual_chunked",
+              "transcription_status": "ok"
+            }
+          ]
+        }
+      ],
+      "takeaway": "This cleared the `250ms` target for `start` on the practical warm-server path. `stop` remains far above target because the command still waits for either full server transcription or watcher finalization."
+    },
+    {
+      "iteration": 9,
+      "label": "background_server_warmup_on_start",
+      "changes": [
+        "Added a non-blocking Parakeet server warmup kick on `start` when server transcription is in use and no custom transcribe command is configured."
+      ],
+      "files": [
+        "src/session_commands.rs"
+      ],
+      "results": [
+        {
+          "mode": "cold_server_new_port_8876",
+          "durations": [
+            {
+              "duration_sec": 5,
+              "start_wall_ms": 141.072,
+              "start_reported_ms": 136.804,
+              "parakeet_server_warmup_ms": 5.928,
+              "parakeet_server_warmup_attempted": true,
+              "stop_wall_ms": 6040.936,
+              "server_health_before": false,
+              "server_ensure_ms": 5259.999,
+              "server_request_ms": 553.972
+            }
+          ]
+        }
+      ],
+      "takeaway": "Background warmup is cheap on `start` and helps longer sessions, but it cannot fully hide a multi-second cold model load for very short sessions. That leaves `stop` fundamentally blocked on transcription readiness unless finalization semantics change."
+    }
+  ],
+  "current_best": {
+    "summary": "Start is now consistently ~135-150ms wall-clock on the practical warm-server path, which beats the `250ms` target. Warm `stop` is still roughly ~0.9s to ~1.1s with synchronous server transcription, and cold or watcher-backed stops can be much slower.",
+    "remaining_bottleneck": "Parakeet server inference latency",
+    "next_targets": [
+      "Record server ownership and device in perf logs so benchmarks cannot silently hit an unrelated process on the same port.",
+      "Move stop finalization off the critical path if command latency, rather than artifact readiness, is the primary requirement.",
+      "If synchronous semantics must stay, continue reducing inference latency, but the current measurements indicate `stop <= 250ms` is not realistic on this CPU-backed path."
+    ]
+  }
+}

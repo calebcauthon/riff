@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+ROOT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+BIN="$ROOT_DIR/target/release/riff"
+
+# Sensible local defaults for Parakeet python worker.
+if [[ -z "${RIFF_PYTHON_BIN:-}" && -x "$ROOT_DIR/runtime/python/bin/python" ]]; then
+  export RIFF_PYTHON_BIN="$ROOT_DIR/runtime/python/bin/python"
+elif [[ -z "${RIFF_PYTHON_BIN:-}" && -x "$ROOT_DIR/.venv/bin/python" ]]; then
+  export RIFF_PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+fi
+if [[ -z "${RIFF_PARAKEET_SCRIPT:-}" && -f "$ROOT_DIR/scripts/parakeet_transcribe.py" ]]; then
+  export RIFF_PARAKEET_SCRIPT="$ROOT_DIR/scripts/parakeet_transcribe.py"
+fi
+
+if [[ ! -x "$BIN" ]]; then
+  echo "[riff] Building Rust binary (first run)..." >&2
+  (cd "$ROOT_DIR" && cargo build --release >/dev/null)
+fi
+
+exec "$BIN" "$@"

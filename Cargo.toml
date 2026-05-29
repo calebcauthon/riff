@@ -1,0 +1,25 @@
+[package]
+name = "riff"
+version = "0.1.2"
+edition = "2021"
+build = "build.rs"
+description = "Local-first macOS dictation CLI with screenshots, clipboard capture, and Parakeet transcription"
+repository = "https://github.com/calebcauthon/riff"
+homepage = "https://github.com/calebcauthon/riff"
+readme = "README.md"
+keywords = ["dictation", "transcription", "macos", "cli"]
+categories = ["command-line-utilities"]
+exclude = ["perf_iteration_log.json"]
+
+[dependencies]
+chrono = { version = "0.4", features = ["clock"] }
+clap = { version = "4.5", features = ["derive"] }
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "tiff"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
