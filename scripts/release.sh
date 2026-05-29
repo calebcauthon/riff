@@ -18,6 +18,7 @@ PUSH_TAG=0
 SKIP_TESTS=0
 AUTO_COMMIT=0
 CARGO_JOBS="${CARGO_BUILD_JOBS:-}"
+SOURCE_MODE="${RIFF_RELEASE_SOURCE:-auto}"
 
 usage() {
   cat <<EOF
@@ -38,6 +39,7 @@ Options:
   --push-tag      Push release tag to origin if missing remotely
   --auto-commit   Commit Cargo.toml, Cargo.lock, and VERSION before tagging
   --jobs <n>      Limit cargo build/test jobs (default: min(host CPUs, 4))
+  --source <mode> Formula source: auto, tarball, or git (default: auto)
   --skip-tests    Skip cargo test sanity check
   -h, --help      Show this help text
 EOF
@@ -71,6 +73,14 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       CARGO_JOBS="$2"
+      shift 2
+      ;;
+    --source)
+      if [[ $# -lt 2 ]]; then
+        echo "--source requires one of: auto, tarball, git" >&2
+        exit 2
+      fi
+      SOURCE_MODE="$2"
       shift 2
       ;;
     --skip-tests)
@@ -152,6 +162,14 @@ if [[ ! "$CARGO_JOBS" =~ ^[0-9]+$ ]] || [[ "$CARGO_JOBS" -lt 1 ]]; then
   exit 2
 fi
 
+case "$SOURCE_MODE" in
+  auto|tarball|git) ;;
+  *)
+    echo "Invalid --source value '$SOURCE_MODE'. Expected one of: auto, tarball, git." >&2
+    exit 2
+    ;;
+esac
+
 if [[ ! -d "$ROOT_DIR/.git" ]]; then
   echo "Not a git repository root: $ROOT_DIR" >&2
   exit 1
@@ -220,7 +238,7 @@ version_path.write_text(version + "\n")
 PY
 }
 
-update_formula_file() {
+update_formula_tarball_file() {
   local formula_file="$1"
   local tarball_url="$2"
   local sha="$3"
@@ -234,11 +252,58 @@ tarball_url = sys.argv[2]
 sha = sys.argv[3]
 
 text = formula_path.read_text()
-updated = re.sub(r'(?m)^  url ".*"$', f'  url "{tarball_url}"', text, count=1)
-updated = re.sub(r'(?m)^  sha256 .*$',
-                 f'  sha256 "{sha}"',
-                 updated,
-                 count=1)
+updated, url_count = re.subn(
+    r'(?m)^  url .+$',
+    f'  url "{tarball_url}"',
+    text,
+    count=1,
+)
+if url_count != 1:
+    raise SystemExit(f"Failed to update url in {formula_path}")
+updated, sha_count = re.subn(
+    r'(?m)^  sha256 .+$',
+    f'  sha256 "{sha}"',
+    updated,
+    count=1,
+)
+if sha_count == 0:
+    updated, insert_count = re.subn(
+        r'(?m)^(  url ".+".*)$',
+        rf'\1\n  sha256 "{sha}"',
+        updated,
+        count=1,
+    )
+    if insert_count != 1:
+        raise SystemExit(f"Failed to insert sha256 in {formula_path}")
+
+if updated == text:
+    raise SystemExit(f"No formula changes applied in {formula_path}")
+
+formula_path.write_text(updated)
+PY
+}
+
+update_formula_git_file() {
+  local formula_file="$1"
+  local git_url="$2"
+  local tag="$3"
+  local revision="$4"
+  python3 - "$formula_file" "$git_url" "$tag" "$revision" <<'PY'
+import pathlib
+import re
+import sys
+
+formula_path = pathlib.Path(sys.argv[1])
+git_url = sys.argv[2]
+tag = sys.argv[3]
+revision = sys.argv[4]
+
+text = formula_path.read_text()
+url_line = f'  url "{git_url}", tag: "{tag}", revision: "{revision}"'
+updated, url_count = re.subn(r'(?m)^  url .+$', url_line, text, count=1)
+if url_count != 1:
+    raise SystemExit(f"Failed to update url in {formula_path}")
+updated = re.sub(r'(?m)^  sha256 .+\n', '', updated, count=1)
 
 if updated == text:
     raise SystemExit(f"No formula changes applied in {formula_path}")
@@ -276,9 +341,10 @@ PY
 }
 
 tarball_url="https://github.com/$repo_slug/archive/refs/tags/$TAG.tar.gz"
-tmp_tarball="$(mktemp "${TMPDIR:-/tmp}/riff-release.${TAG}.XXXXXX.tar.gz")"
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/riff-release.${TAG}.XXXXXX")"
+tmp_tarball="$tmp_dir/source.tar.gz"
 cleanup() {
-  rm -f "$tmp_tarball"
+  rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
 
@@ -286,6 +352,7 @@ echo "[riff-release] Preparing release $VERSION ($TAG)"
 echo "[riff-release] Repo root: $ROOT_DIR"
 echo "[riff-release] GitHub repo: $repo_slug"
 echo "[riff-release] Cargo jobs: $CARGO_JOBS"
+echo "[riff-release] Formula source mode: $SOURCE_MODE"
 
 echo "[riff-release] Updating Cargo.toml and VERSION"
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -368,41 +435,69 @@ if [[ -z "$remote_tag_sha" ]]; then
   fi
 fi
 
-if [[ "$DRY_RUN" -eq 1 ]]; then
-  echo "[dry-run] fetch $tarball_url and compute sha256"
-  sha256_value="<dry-run>"
-else
-  echo "[riff-release] Waiting 20s for GitHub to generate tarball..."
-  sleep 20
-  echo "[riff-release] Downloading GitHub tag tarball"
-  attempts=0
-  max_attempts=8
-  until [[ "$attempts" -ge "$max_attempts" ]]; do
-    attempts=$((attempts + 1))
-    if curl --fail --location --silent --show-error --connect-timeout 20 --max-time 120 "$tarball_url" --output "$tmp_tarball"; then
-      break
-    fi
-    if [[ "$attempts" -lt "$max_attempts" ]]; then
-      sleep_seconds=$((attempts * 15))
-      echo "[riff-release] Tarball fetch failed (attempt $attempts/$max_attempts), retrying in ${sleep_seconds}s..."
-      sleep "$sleep_seconds"
-    fi
-  done
-  if [[ "$attempts" -ge "$max_attempts" ]]; then
-    echo "Failed to fetch tarball after $max_attempts attempts: $tarball_url" >&2
-    echo "You can retry later, or run manually:" >&2
-    echo "  curl -L -o /tmp/riff-${TAG}.tar.gz $tarball_url" >&2
-    echo "  shasum -a 256 /tmp/riff-${TAG}.tar.gz" >&2
-    exit 1
+release_revision="$(git -C "$ROOT_DIR" rev-parse "$TAG^{}" 2>/dev/null || git -C "$ROOT_DIR" rev-parse HEAD)"
+resolved_source_mode="$SOURCE_MODE"
+if [[ "$resolved_source_mode" == "auto" ]]; then
+  if curl --fail --head --location --silent --show-error --connect-timeout 10 --max-time 20 "https://github.com/$repo_slug" >/dev/null 2>&1; then
+    resolved_source_mode="tarball"
+  else
+    resolved_source_mode="git"
   fi
-  sha256_value="$(shasum -a 256 "$tmp_tarball" | awk '{print $1}')"
 fi
 
-echo "[riff-release] Updating tap formula at $FORMULA_FILE"
-if [[ "$DRY_RUN" -eq 1 ]]; then
-  echo "[dry-run] set formula url=$tarball_url sha256=$sha256_value"
+echo "[riff-release] Resolved formula source: $resolved_source_mode"
+
+if [[ "$resolved_source_mode" == "tarball" ]]; then
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] fetch $tarball_url and compute sha256"
+    sha256_value="<dry-run>"
+  else
+    echo "[riff-release] Waiting 20s for GitHub to generate tarball..."
+    sleep 20
+    echo "[riff-release] Downloading GitHub tag tarball"
+    attempts=0
+    max_attempts=8
+    until [[ "$attempts" -ge "$max_attempts" ]]; do
+      attempts=$((attempts + 1))
+      if curl --fail --location --silent --show-error --connect-timeout 20 --max-time 120 "$tarball_url" --output "$tmp_tarball"; then
+        break
+      fi
+      if [[ "$attempts" -lt "$max_attempts" ]]; then
+        sleep_seconds=$((attempts * 15))
+        echo "[riff-release] Tarball fetch failed (attempt $attempts/$max_attempts), retrying in ${sleep_seconds}s..."
+        sleep "$sleep_seconds"
+      fi
+    done
+    if [[ "$attempts" -ge "$max_attempts" ]]; then
+      echo "Failed to fetch tarball after $max_attempts attempts: $tarball_url" >&2
+      echo "If this GitHub repo is private, use --source git or make the repo public." >&2
+      echo "Private GitHub repos return 404 for unauthenticated archive URLs, which is what Homebrew tarball formulas use." >&2
+      echo "You can verify with:" >&2
+      echo "  curl -I -L $tarball_url" >&2
+      exit 1
+    fi
+    sha256_value="$(shasum -a 256 "$tmp_tarball" | awk '{print $1}')"
+  fi
+
+  echo "[riff-release] Updating tap formula at $FORMULA_FILE"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] set formula url=$tarball_url sha256=$sha256_value"
+  else
+    update_formula_tarball_file "$FORMULA_FILE" "$tarball_url" "$sha256_value"
+  fi
 else
-  update_formula_file "$FORMULA_FILE" "$tarball_url" "$sha256_value"
+  git_source_url="$origin_url"
+  if [[ "$origin_url" == https://github.com/* ]]; then
+    git_source_url="git@github.com:${repo_slug}.git"
+  fi
+  echo "[riff-release] Using git source because tarball URLs require a public repo"
+  echo "[riff-release] Git source: $git_source_url tag=$TAG revision=$release_revision"
+  echo "[riff-release] Updating tap formula at $FORMULA_FILE"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] set formula git url=$git_source_url tag=$TAG revision=$release_revision"
+  else
+    update_formula_git_file "$FORMULA_FILE" "$git_source_url" "$TAG" "$release_revision"
+  fi
 fi
 
 echo "[riff-release] Committing and pushing tap repo"

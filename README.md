@@ -1,6 +1,8 @@
-# riff (Rust + local Parakeet)
+# riff
 
-Minimal local dictation CLI for macOS.
+Local-first dictation CLI for macOS. Riff records a short voice session, collects screenshots and clipboard snippets, transcribes locally with Parakeet, and writes Markdown/HTML notes under your local `RIFF_ROOT`.
+
+Privacy model: session audio, screenshots, clipboard snippets, transcripts, and reports stay on your machine unless you explicitly move or share them. The Parakeet setup may download model/runtime dependencies from their upstream package/model hosts.
 
 Workflow:
 
@@ -65,10 +67,7 @@ Upgrade later:
 brew upgrade riff
 ```
 
-First release/bootstrap note:
-- The formula URL is pinned to the release tag pattern `vX.Y.Z` (for example `v0.1.0`).
-- For the very first tagged release, update `Formula/riff.rb` with the real tarball SHA-256 before users install the stable formula.
-- Until that checksum is finalized, developers can install from `main` with:
+HEAD/development install:
 
 ```bash
 brew install --HEAD calebcauthon/riff/riff
@@ -77,14 +76,15 @@ brew install --HEAD calebcauthon/riff/riff
 ### Local repo wrapper (dev workflow)
 
 ```bash
-cd ~/Code/riff
+git clone git@github.com:calebcauthon/riff.git
+cd riff
 chmod +x riff
 ```
 
 `riff` is a wrapper script that builds/runs the Rust binary.
 If `RIFF_PYTHON_BIN` is not set, it auto-prefers:
-1. `~/Code/riff/runtime/python/bin/python` (bundled runtime)
-2. `~/Code/riff/.venv/bin/python` (dev venv)
+1. `./runtime/python/bin/python` (bundled runtime, when run from the repo)
+2. `./.venv/bin/python` (dev venv, when run from the repo)
 3. `python3` from PATH
 
 Versioning:
@@ -121,11 +121,12 @@ What this script automates:
 - limits cargo parallelism by default (`--jobs <n>` to override)
 - refuses to tag while release metadata is uncommitted unless `--auto-commit` is used
 - creates/updates local release tag (`--retag` to force retag)
-- fetches GitHub tag tarball checksum with retries
-- updates `Formula/riff.rb` `url` + `sha256`
+- auto-detects private GitHub repos and uses a git/tag formula source instead of an unauthenticated tarball URL
+- for public repos, fetches GitHub tag tarball checksum with retries and updates `Formula/riff.rb` `url` + `sha256`
 
 What you still do manually:
 - push the riff release commit if you did not already push it
+- make the source repo public if you want public Homebrew installs from GitHub tarballs
 - open/merge PR if applicable
 - run any final Homebrew audit/install validation you want before publishing
 
@@ -140,11 +141,11 @@ Performance note:
 - `riff start` warms a local Parakeet server in the background (when enabled), so later `riff stop` calls are faster.
 - `riff stop` auto-starts a local HTML web server with idle-timeout for richer session pages.
 
-Optional PATH link:
+Optional PATH link from a local clone:
 
 ```bash
 mkdir -p ~/bin
-ln -sf ~/Code/riff/riff ~/bin/riff
+ln -sf "$PWD/riff" ~/bin/riff
 ```
 
 ---
@@ -169,7 +170,6 @@ brew install ffmpeg
 Create a local venv and install dependencies (**use Python 3.12 preferred; 3.10-3.12 supported**):
 
 ```bash
-cd ~/Code/riff
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
@@ -185,8 +185,9 @@ brew install python@3.12
 Set env vars (add to `~/.zshrc` if desired):
 
 ```bash
-export RIFF_PYTHON_BIN="$HOME/Code/riff/.venv/bin/python"
-export RIFF_PARAKEET_SCRIPT="$HOME/Code/riff/scripts/parakeet_transcribe.py"
+export RIFF_REPO="$HOME/Code/riff" # adjust if your clone lives elsewhere
+export RIFF_PYTHON_BIN="$RIFF_REPO/.venv/bin/python"
+export RIFF_PARAKEET_SCRIPT="$RIFF_REPO/scripts/parakeet_transcribe.py"
 export RIFF_PARAKEET_MODEL="nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc"
 # optional perf + warm server controls
 export RIFF_PARAKEET_SERVER=1
@@ -201,12 +202,13 @@ export RIFF_WEB_SERVER_IDLE_TIMEOUT_SEC=1800
 export RIFF_CLIPBOARD_MONITOR=1
 ```
 
-Or use an optional global `~/.riffrc` file (loaded automatically by `target/release/riff`):
+Or use an optional global `~/.riffrc` file (loaded automatically by `riff`):
 
 ```bash
 cat > ~/.riffrc <<'EOF'
-export RIFF_PYTHON_BIN="$HOME/Code/riff/.venv/bin/python"
-export RIFF_PARAKEET_SCRIPT="$HOME/Code/riff/scripts/parakeet_transcribe.py"
+export RIFF_REPO="$HOME/Code/riff"
+export RIFF_PYTHON_BIN="$RIFF_REPO/.venv/bin/python"
+export RIFF_PARAKEET_SCRIPT="$RIFF_REPO/scripts/parakeet_transcribe.py"
 export RIFF_PARAKEET_MODEL="nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc"
 export RIFF_PARAKEET_SERVER=1
 EOF
@@ -230,6 +232,8 @@ You can also use an optional JSON config file (loaded automatically):
 }
 ```
 
+Adjust `$HOME/Code/riff` if your local clone lives elsewhere.
+
 Notes:
 - Default path is `~/.riff.json`.
 - Use `RIFF_CONFIG_JSON_FILE=/path/to/file.json` to point riff at a different JSON config.
@@ -239,14 +243,13 @@ Notes:
 
 ---
 
-## Bundled private Python runtime (recommended for distribution)
+## Bundled Python runtime (recommended for distribution)
 
 Use this when you want to package `riff` for another machine without relying on that machine's system Python.
 
 Create the bundled runtime (full Python distribution copy, not a venv):
 
 ```bash
-cd ~/Code/riff
 brew install uv
 uv python install 3.12
 ./scripts/build_bundled_python_runtime.sh
@@ -255,14 +258,12 @@ uv python install 3.12
 Build the Rust binary:
 
 ```bash
-cd ~/Code/riff
 cargo build --release
 ```
 
 Create a full distribution artifact tarball (runtime + binary + scripts):
 
 ```bash
-cd ~/Code/riff
 ./scripts/create_distribution_artifact.sh
 ```
 
@@ -567,31 +568,22 @@ riff sounds
 
 ## Hotkeys
 
-Current skhd setup on this machine:
-- `alt + /` (keycode `alt - 0x2C`) → toggle start/stop via `riff toggle`
-- `cmd + alt + d` → fallback toggle
-- `cmd + s` → hard fallback toggle
-- `cmd + alt + 9` → `riff shot`
+Riff does not require a hotkey daemon, but it works well with skhd, Raycast, Alfred, Hammerspoon, Keyboard Maestro, or any launcher that can run shell commands.
 
-Suggested skhd keybind setup (native commands + inline env):
+Example skhd setup using the Homebrew-installed `riff` binary:
 
 ```text
-# riff toggle: start if idle, stop if active
-alt - 0x2C : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc $HOME/Code/riff/target/release/riff --quiet toggle >> /tmp/riff/toggle-hotkey.log 2>&1
+# toggle: start if idle, stop if active
+alt - 0x2C : /opt/homebrew/bin/riff --quiet toggle >> /tmp/riff/toggle-hotkey.log 2>&1
 
-# riff toggle + send: stop, then send transcript to focused app
-alt - 0x27 : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc $HOME/Code/riff/target/release/riff --quiet toggle && env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc $HOME/Code/riff/target/release/riff --quiet send >> /tmp/riff/toggle-hotkey.log 2>&1
+# toggle + send: if active, stop and paste transcript into the focused app
+alt - 0x27 : /opt/homebrew/bin/riff --quiet toggle && /opt/homebrew/bin/riff --quiet send >> /tmp/riff/toggle-hotkey.log 2>&1
 
-# riff toggle + open html: stop, then open latest note.html
-alt - 0x29 : env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc $HOME/Code/riff/target/release/riff --quiet toggle && env RIFF_ROOT=/tmp/riff RIFF_PYTHON_BIN=$HOME/Code/riff/.venv/bin/python RIFF_PARAKEET_SCRIPT=$HOME/Code/riff/scripts/parakeet_transcribe.py RIFF_PARAKEET_MODEL=nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc $HOME/Code/riff/target/release/riff --quiet html >> /tmp/riff/toggle-hotkey.log 2>&1
+# toggle + open html: if active, stop and open the latest session report
+alt - 0x29 : /opt/homebrew/bin/riff --quiet toggle && /opt/homebrew/bin/riff --quiet html >> /tmp/riff/toggle-hotkey.log 2>&1
 ```
 
-Toggle behavior:
-- `0x2C`: if inactive start; if active stop
-- `0x27`: if inactive start; if active stop then send
-- `0x29`: if inactive start; if active stop then open HTML
-
-Use Raycast, Alfred, Hammerspoon, Keyboard Maestro, etc. if you prefer a different launcher.
+On Intel Homebrew, replace `/opt/homebrew/bin/riff` with `/usr/local/bin/riff`. For a local checkout, use `target/release/riff` after running `cargo build --release`.
 
 ---
 
@@ -608,7 +600,6 @@ If it's `3.13+` (especially 3.14), recreate your environment with Python 3.12.
 For dev venv:
 
 ```bash
-cd ~/Code/riff
 rm -rf .venv
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -619,7 +610,6 @@ pip install nemo_toolkit[asr] torch soundfile
 For bundled runtime:
 
 ```bash
-cd ~/Code/riff
 uv python install 3.12
 ./scripts/build_bundled_python_runtime.sh --python-version 3.12
 ```
@@ -627,5 +617,5 @@ uv python install 3.12
 Check bundled runtime directly:
 
 ```bash
-~/Code/riff/runtime/python/bin/python -V
+./runtime/python/bin/python -V
 ```
