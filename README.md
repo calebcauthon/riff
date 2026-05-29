@@ -97,24 +97,35 @@ Homebrew release/update flow:
 # dry run first (safe preview)
 ./scripts/release.sh --dry-run --allow-dirty v0.1.0
 
-# actual release prep (requires clean tree by default)
+# first pass updates release metadata and stops before tagging
 ./scripts/release.sh v0.1.0
 
-# if tag is not on origin yet:
-git push origin v0.1.0
-./scripts/release.sh v0.1.0
+git add Cargo.toml Cargo.lock VERSION
+git commit -m "release: v0.1.0"
+
+# second pass creates/pushes the tag, computes the GitHub tarball checksum,
+# updates the tap formula, then commits/pushes the tap repo
+./scripts/release.sh --push-tag v0.1.0
+```
+
+Shortcut if you want the script to make the release metadata commit:
+
+```bash
+./scripts/release.sh --auto-commit --push-tag v0.1.0
 ```
 
 What this script automates:
 - normalizes version input (`0.1.0` or `v0.1.0`)
-- updates `Cargo.toml` + `VERSION`
+- updates `Cargo.toml` + `Cargo.lock` + `VERSION`
 - runs `cargo build --release` (+ `cargo test` unless `--skip-tests`)
+- limits cargo parallelism by default (`--jobs <n>` to override)
+- refuses to tag while release metadata is uncommitted unless `--auto-commit` is used
 - creates/updates local release tag (`--retag` to force retag)
 - fetches GitHub tag tarball checksum with retries
 - updates `Formula/riff.rb` `url` + `sha256`
 
 What you still do manually:
-- push commit + tag (or use `--push-tag` for tag push)
+- push the riff release commit if you did not already push it
 - open/merge PR if applicable
 - run any final Homebrew audit/install validation you want before publishing
 

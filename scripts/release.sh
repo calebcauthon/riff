@@ -16,6 +16,8 @@ DRY_RUN=0
 RETAG=0
 PUSH_TAG=0
 SKIP_TESTS=0
+AUTO_COMMIT=0
+CARGO_JOBS="${CARGO_BUILD_JOBS:-}"
 
 usage() {
   cat <<EOF
@@ -34,6 +36,8 @@ Options:
   --allow-dirty   Allow running with a dirty git tree
   --retag         Force-update existing local tag to current HEAD
   --push-tag      Push release tag to origin if missing remotely
+  --auto-commit   Commit Cargo.toml, Cargo.lock, and VERSION before tagging
+  --jobs <n>      Limit cargo build/test jobs (default: min(host CPUs, 4))
   --skip-tests    Skip cargo test sanity check
   -h, --help      Show this help text
 EOF
@@ -56,6 +60,18 @@ while [[ $# -gt 0 ]]; do
     --push-tag)
       PUSH_TAG=1
       shift
+      ;;
+    --auto-commit)
+      AUTO_COMMIT=1
+      shift
+      ;;
+    --jobs)
+      if [[ $# -lt 2 ]]; then
+        echo "--jobs requires a positive integer argument" >&2
+        exit 2
+      fi
+      CARGO_JOBS="$2"
+      shift 2
       ;;
     --skip-tests)
       SKIP_TESTS=1
@@ -113,6 +129,29 @@ for tool in git cargo curl shasum python3; do
   require_tool "$tool"
 done
 
+# Make git network operations fail instead of sitting forever at credential prompts.
+export GIT_TERMINAL_PROMPT=0
+if [[ -z "${GIT_SSH_COMMAND:-}" ]]; then
+  export GIT_SSH_COMMAND="ssh -o BatchMode=yes"
+fi
+
+if [[ -z "$CARGO_JOBS" ]]; then
+  cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+  if [[ ! "$cpu_count" =~ ^[0-9]+$ ]] || [[ "$cpu_count" -lt 1 ]]; then
+    cpu_count=4
+  fi
+  if [[ "$cpu_count" -gt 4 ]]; then
+    CARGO_JOBS=4
+  else
+    CARGO_JOBS="$cpu_count"
+  fi
+fi
+
+if [[ ! "$CARGO_JOBS" =~ ^[0-9]+$ ]] || [[ "$CARGO_JOBS" -lt 1 ]]; then
+  echo "Invalid --jobs value '$CARGO_JOBS'. Expected a positive integer." >&2
+  exit 2
+fi
+
 if [[ ! -d "$ROOT_DIR/.git" ]]; then
   echo "Not a git repository root: $ROOT_DIR" >&2
   exit 1
@@ -137,10 +176,18 @@ if [[ "$ALLOW_DIRTY" -eq 0 ]]; then
   fi
 fi
 
+print_command() {
+  printf '%q ' "$@"
+  printf '\n'
+}
+
 run_or_echo() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    printf '[dry-run] %s\n' "$*"
+    printf '[dry-run] '
+    print_command "$@"
   else
+    printf '[riff-release] + '
+    print_command "$@"
     "$@"
   fi
 }
@@ -238,6 +285,7 @@ trap cleanup EXIT
 echo "[riff-release] Preparing release $VERSION ($TAG)"
 echo "[riff-release] Repo root: $ROOT_DIR"
 echo "[riff-release] GitHub repo: $repo_slug"
+echo "[riff-release] Cargo jobs: $CARGO_JOBS"
 
 echo "[riff-release] Updating Cargo.toml and VERSION"
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -247,13 +295,39 @@ else
 fi
 
 echo "[riff-release] Running cargo build --release"
-run_or_echo cargo build --release
+run_or_echo cargo build --release --jobs "$CARGO_JOBS"
 
 if [[ "$SKIP_TESTS" -eq 0 ]]; then
   echo "[riff-release] Running cargo test"
-  run_or_echo cargo test
+  run_or_echo cargo test --jobs "$CARGO_JOBS"
 else
   echo "[riff-release] Skipping cargo test (--skip-tests)"
+fi
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  release_metadata_status="$(git -C "$ROOT_DIR" status --porcelain -- Cargo.toml Cargo.lock VERSION)"
+  if [[ -n "$release_metadata_status" ]]; then
+    if [[ "$AUTO_COMMIT" -eq 1 ]]; then
+      echo "[riff-release] Committing release metadata"
+      run_or_echo git -C "$ROOT_DIR" add Cargo.toml Cargo.lock VERSION
+      run_or_echo git -C "$ROOT_DIR" commit -m "release: $TAG"
+    else
+      echo
+      echo "[riff-release] Release metadata changed; not creating or pushing $TAG yet."
+      echo "[riff-release] This prevents tagging the pre-release commit by accident."
+      echo
+      echo "Changed release files:"
+      git -C "$ROOT_DIR" status --short -- Cargo.toml Cargo.lock VERSION
+      echo
+      echo "Next steps:"
+      echo "  1) Review: git -C $ROOT_DIR diff -- Cargo.toml Cargo.lock VERSION"
+      echo "  2) Commit: git -C $ROOT_DIR add Cargo.toml Cargo.lock VERSION && git -C $ROOT_DIR commit -m \"release: $TAG\""
+      echo "  3) Rerun: $0${PUSH_TAG:+ --push-tag} $TAG"
+      echo
+      echo "Or rerun with --auto-commit to let this script make the release commit."
+      exit 0
+    fi
+  fi
 fi
 
 local_tag_sha="$(git -C "$ROOT_DIR" rev-parse -q --verify "refs/tags/$TAG" 2>/dev/null || true)"
@@ -275,10 +349,14 @@ else
   fi
 fi
 
-remote_tag_sha="$(git -C "$ROOT_DIR" ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}' || true)"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  remote_tag_sha=""
+else
+  remote_tag_sha="$(git -C "$ROOT_DIR" ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}' || true)"
+fi
 if [[ -z "$remote_tag_sha" ]]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "[dry-run] remote tag $TAG missing; would require push before checksum fetch"
+    echo "[dry-run] would check remote tag $TAG and push if missing before checksum fetch"
   elif [[ "$PUSH_TAG" -eq 1 ]]; then
     echo "[riff-release] Pushing tag $TAG to origin"
     run_or_echo git -C "$ROOT_DIR" push origin "$TAG"
@@ -301,7 +379,7 @@ else
   max_attempts=8
   until [[ "$attempts" -ge "$max_attempts" ]]; do
     attempts=$((attempts + 1))
-    if curl --fail --location --silent --show-error "$tarball_url" --output "$tmp_tarball"; then
+    if curl --fail --location --silent --show-error --connect-timeout 20 --max-time 120 "$tarball_url" --output "$tmp_tarball"; then
       break
     fi
     if [[ "$attempts" -lt "$max_attempts" ]]; then
@@ -336,11 +414,9 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   echo
   echo "Release prep complete for $TAG."
   echo "Next steps:"
-  echo "  1) Review riff changes: git -C $ROOT_DIR status && git -C $ROOT_DIR diff"
-  echo "  2) Commit riff release files: git -C $ROOT_DIR add Cargo.toml VERSION && git -C $ROOT_DIR commit -m \"release: $TAG\""
-  echo "  3) Push riff commit: git -C $ROOT_DIR push origin HEAD"
-  echo "  4) Push/verify tag: git -C $ROOT_DIR push origin $TAG"
-  echo "  5) Install: brew tap calebcauthon/riff && brew install calebcauthon/riff/riff"
+  echo "  1) Push riff commit if needed: git -C $ROOT_DIR push origin HEAD"
+  echo "  2) Push/verify tag: git -C $ROOT_DIR push origin $TAG"
+  echo "  3) Install: brew tap calebcauthon/riff && brew install calebcauthon/riff/riff"
 else
   echo
   echo "Dry-run complete. No files or tags were changed."
