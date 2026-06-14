@@ -448,6 +448,20 @@ riff send 2      # 2nd most recent
 ```
 
 Copies the transcript to clipboard and immediately pastes it into the currently focused app.
+Screenshots are pasted as their file paths (text).
+
+### Send transcript with inline images
+
+```bash
+riff send-images        # most recent (same as send-images 1)
+riff send-images 2      # 2nd most recent
+```
+
+Same as `send`, but for each screenshot reference it copies the actual image data
+to the clipboard and pastes the picture itself — useful for apps (chat boxes, docs,
+editors) that accept pasted images rather than file paths. Local screenshots are
+pasted as images; remote (`http`) URLs and missing files fall back to pasting the
+path text. Non-PNG/JPEG/TIFF/GIF formats are converted to PNG via `sips` first.
 
 ### Show full session markdown to stdout
 
