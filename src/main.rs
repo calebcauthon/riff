@@ -29,7 +29,7 @@ use crate::cli::{
 };
 use crate::error::{app_error, AppError};
 use crate::history::{
-    cmd_copy, cmd_list, cmd_perf, cmd_send, cmd_show, resolve_recent_session_dir,
+    cmd_copy, cmd_list, cmd_perf, cmd_send, cmd_send_images, cmd_show, resolve_recent_session_dir,
     resolve_session_dir_by_id,
 };
 use crate::models::SessionState;
@@ -2491,6 +2491,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::List(args) => cmd_list(cli, args),
         Commands::Copy(args) => cmd_copy(cli, args),
         Commands::Send(args) => cmd_send(cli, args),
+        Commands::SendImages(args) => cmd_send_images(cli, args),
         Commands::Show(args) => cmd_show(cli, args),
         Commands::Html(args) => cmd_html(cli, args),
         Commands::ScreenshotUse(args) => cmd_screenshot_use(cli, args),

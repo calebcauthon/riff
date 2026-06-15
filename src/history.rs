@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) fn read_jsonl_values(path: &Path) -> Vec<Value> {
     let Ok(text) = fs::read_to_string(path) else {
@@ -940,6 +940,169 @@ fn build_send_chunks(transcript: &str) -> Vec<String> {
     chunks
 }
 
+/// A unit of content to paste into the focused app when sending images.
+#[derive(Debug, PartialEq)]
+enum SendImageChunk {
+    /// Literal text pasted via the clipboard.
+    Text(String),
+    /// A local image file whose pixel data is pasted via the clipboard.
+    Image(String),
+}
+
+fn is_local_image_path(path: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| {
+            SUPPORTED_IMAGE_EXTS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(ext))
+        })
+        .unwrap_or(false)
+}
+
+/// Build the paste plan for `send-images`: identical to [`build_send_chunks`]
+/// except local screenshot paths become [`SendImageChunk::Image`] so the actual
+/// pixels are pasted instead of the file path text. Remote (http) paths fall
+/// back to pasting the URL text.
+fn build_send_image_chunks(transcript: &str) -> Vec<SendImageChunk> {
+    if transcript.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::<SendImageChunk>::new();
+    let lines_with_newline = transcript.split_inclusive('\n').collect::<Vec<_>>();
+    let mut idx = 0usize;
+
+    while idx < lines_with_newline.len() {
+        let line_with_nl = lines_with_newline[idx];
+        let line = line_with_nl.strip_suffix('\n').unwrap_or(line_with_nl);
+        let Some((label, path)) = parse_screenshot_source_line(line) else {
+            break;
+        };
+
+        let trailing_nl = if line_with_nl.ends_with('\n') { "\n" } else { "" };
+        if is_local_image_path(&path) && Path::new(&path).exists() {
+            chunks.push(SendImageChunk::Text(format!("{label}: ")));
+            chunks.push(SendImageChunk::Image(path));
+            if !trailing_nl.is_empty() {
+                chunks.push(SendImageChunk::Text(trailing_nl.to_string()));
+            }
+        } else {
+            // Remote URL or missing file: keep the original text behavior.
+            chunks.push(SendImageChunk::Text(format!("{label}: ")));
+            chunks.push(SendImageChunk::Text(format!("{path}{trailing_nl}")));
+        }
+        idx += 1;
+    }
+
+    let rest = lines_with_newline[idx..].join("");
+    if !rest.is_empty() {
+        chunks.push(SendImageChunk::Text(rest));
+    }
+
+    if chunks.is_empty() {
+        chunks.push(SendImageChunk::Text(transcript.to_string()));
+    }
+    chunks
+}
+
+/// AppleScript pasteboard class for reading an image file onto the clipboard,
+/// keyed by file extension. Returns `None` for formats AppleScript can't read
+/// directly (these are converted to PNG via `sips` first).
+fn clipboard_image_class(path: &str) -> Option<&'static str> {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("PNGf"),
+        "jpg" | "jpeg" => Some("JPEG"),
+        "tif" | "tiff" => Some("TIFF"),
+        "gif" => Some("GIFf"),
+        _ => None,
+    }
+}
+
+fn applescript_quote(path: &str) -> String {
+    path.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Copy an image file's pixel data to the macOS clipboard so it can be pasted as
+/// an image. Formats AppleScript can't read natively are converted to a temp PNG
+/// via `sips`.
+fn copy_image_to_clipboard(path: &str) -> Result<(), AppError> {
+    let (read_path, class) = match clipboard_image_class(path) {
+        Some(class) => (path.to_string(), class),
+        None => {
+            let png_path = convert_image_to_temp_png(path)?;
+            (png_path, "PNGf")
+        }
+    };
+
+    let script = format!(
+        "set the clipboard to (read (POSIX file \"{}\") as «class {}»)",
+        applescript_quote(&read_path),
+        class
+    );
+    let status = Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .status()
+        .map_err(|e| app_error(1, format!("Failed to run osascript to copy image: {e}")))?;
+    if !status.success() {
+        return Err(app_error(
+            1,
+            format!(
+                "osascript failed to copy image {} (status {:?})",
+                path,
+                status.code()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Convert an image to a temporary PNG using `sips`, returning the temp path.
+fn convert_image_to_temp_png(path: &str) -> Result<String, AppError> {
+    if !command_exists("sips") {
+        return Err(app_error(
+            7,
+            format!("sips is unavailable; cannot convert {path} for image paste"),
+        ));
+    }
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image");
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let out_path = env::temp_dir().join(format!("riff-send-{stem}-{unique}.png"));
+    let out_str = out_path.to_string_lossy().to_string();
+    let status = Command::new("sips")
+        .args(["-s", "format", "png", path, "--out", &out_str])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| app_error(1, format!("Failed to run sips on {path}: {e}")))?;
+    if !status.success() {
+        return Err(app_error(
+            1,
+            format!("sips failed to convert {path} (status {:?})", status.code()),
+        ));
+    }
+    Ok(out_str)
+}
+
 fn copy_text_to_pbcopy(text: &str) -> Result<(), AppError> {
     let mut child = Command::new("pbcopy")
         .stdin(Stdio::piped())
@@ -1070,6 +1233,100 @@ pub(crate) fn cmd_send(cli: &Cli, args: &SendArgs) -> Result<i32, AppError> {
     Ok(0)
 }
 
+pub(crate) fn cmd_send_images(cli: &Cli, args: &SendArgs) -> Result<i32, AppError> {
+    ensure_dirs()?;
+
+    let requested_rank = args.n.unwrap_or(1);
+    let (session_dir, transcript) = load_recent_session_transcript(requested_rank)?;
+    let chunks = build_send_image_chunks(&transcript);
+    let session_id = session_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let image_count = chunks
+        .iter()
+        .filter(|c| matches!(c, SendImageChunk::Image(_)))
+        .count();
+
+    if cli.dry_run {
+        print_out(
+            cli,
+            format!(
+                "[dry-run] Would send transcript from session {} ({} chars, {} chunk(s), {} image(s))",
+                session_id,
+                transcript.chars().count(),
+                chunks.len(),
+                image_count
+            ),
+        );
+        emit_json(
+            cli,
+            &json!({
+                "ok": true,
+                "action": "send-images",
+                "session_id": session_id,
+                "rank": requested_rank,
+                "chars": transcript.chars().count(),
+                "chunks": chunks.len(),
+                "images": image_count,
+                "dry_run": true
+            }),
+        );
+        return Ok(0);
+    }
+
+    if !command_exists("pbcopy") {
+        return Err(app_error(
+            7,
+            "pbcopy is unavailable; cannot send transcript",
+        ));
+    }
+    if !command_exists("osascript") {
+        return Err(app_error(
+            7,
+            "osascript is unavailable; cannot send transcript",
+        ));
+    }
+
+    let total = chunks.len();
+    for (idx, chunk) in chunks.iter().enumerate() {
+        match chunk {
+            SendImageChunk::Text(text) => copy_text_to_pbcopy(text)?,
+            SendImageChunk::Image(path) => copy_image_to_clipboard(path)?,
+        }
+        // Small delay improves reliability before issuing Cmd+V to focused app.
+        thread::sleep(Duration::from_millis(55));
+        paste_clipboard_to_focused_app()?;
+        if idx + 1 < total {
+            thread::sleep(Duration::from_millis(45));
+        }
+    }
+
+    print_out(
+        cli,
+        format!(
+            "Sent transcript from session {} to focused app ({} image(s) pasted).",
+            session_id, image_count
+        ),
+    );
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": "send-images",
+            "session_id": session_id,
+            "rank": requested_rank,
+            "chars": transcript.chars().count(),
+            "chunks": chunks.len(),
+            "images": image_count,
+            "dry_run": false
+        }),
+    );
+
+    Ok(0)
+}
+
 pub(crate) fn cmd_show(_cli: &Cli, args: &ShowArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
 
@@ -1093,7 +1350,7 @@ pub(crate) fn cmd_show(_cli: &Cli, args: &ShowArgs) -> Result<i32, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_send_chunks;
+    use super::{build_send_chunks, build_send_image_chunks, SendImageChunk};
 
     #[test]
     fn send_chunks_split_screenshot_source_lines() {
@@ -1127,5 +1384,53 @@ mod tests {
         let input = "just text without source preamble";
         let chunks = build_send_chunks(input);
         assert_eq!(chunks, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn send_image_chunks_use_image_for_existing_local_file() {
+        let dir = std::env::temp_dir().join(format!("riff-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("shot-001.png");
+        std::fs::write(&img, b"not-a-real-png-but-exists").unwrap();
+        let img_str = img.to_string_lossy().to_string();
+
+        let input = format!(
+            "ghostty Screenshot 1: {img_str}\n\nTesting [ghostty Screenshot 1]."
+        );
+        let chunks = build_send_image_chunks(&input);
+
+        assert_eq!(chunks[0], SendImageChunk::Text("ghostty Screenshot 1: ".into()));
+        assert_eq!(chunks[1], SendImageChunk::Image(img_str));
+        assert_eq!(chunks[2], SendImageChunk::Text("\n".into()));
+        assert_eq!(
+            chunks[3],
+            SendImageChunk::Text("\nTesting [ghostty Screenshot 1].".into())
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn send_image_chunks_keep_text_for_remote_and_missing_paths() {
+        let input = [
+            "web Screenshot 1: https://example.com/a.png",
+            "gone Screenshot 2: /tmp/riff/does-not-exist-xyz/shot.png",
+            "",
+            "Body [web Screenshot 1] [gone Screenshot 2].",
+        ]
+        .join("\n");
+
+        let chunks = build_send_image_chunks(&input);
+
+        // No Image chunks; remote URL and missing file fall back to text.
+        assert!(!chunks.iter().any(|c| matches!(c, SendImageChunk::Image(_))));
+        assert_eq!(
+            chunks[1],
+            SendImageChunk::Text("https://example.com/a.png\n".into())
+        );
+        assert_eq!(
+            chunks[3],
+            SendImageChunk::Text("/tmp/riff/does-not-exist-xyz/shot.png\n".into())
+        );
     }
 }

@@ -60,6 +60,9 @@ pub enum Commands {
     Copy(CopyArgs),
     /// Copy transcript and paste into focused app
     Send(SendArgs),
+    /// Like `send`, but paste actual image data for screenshots instead of file paths
+    #[command(name = "send-images")]
+    SendImages(SendArgs),
     /// Open HTML report for a session id
     Html(HtmlArgs),
     /// Set which derived image is used at the transcript screenshot path
