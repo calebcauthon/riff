@@ -240,6 +240,158 @@ Notes:
 - Process env vars still win over both config files.
 - Top-level `RIFF_*` keys are loaded automatically.
 - `riff.post_transcribe_cmd` maps to `RIFF_POST_TRANSCRIBE_CMD`.
+- `riff.hooks` maps to `RIFF_HOOKS` (see [Output hooks](#output-hooks)).
+
+---
+
+## Output hooks
+
+Output hooks let you post-process the transcript with your own scripts after
+transcription. Each hook is a bash command. Hooks run in order, and each one is
+invoked with two temp-file paths as positional arguments:
+
+- `$1` — a temp file containing the current transcript. **Edit it in place**;
+  riff reads the file back and uses it as the new transcript (feeding it into
+  the next hook).
+- `$2` — a temp file containing a read-only JSON blob of session metadata
+  (session id, dirs, timing, transcription info, screenshots, clipboard). The
+  transcript itself is not in the JSON — it's `$1`.
+
+The metadata in `$2` looks like:
+
+```json
+{
+  "session_id": "20260619-154934",
+  "session_dir": "/tmp/riff/sessions/20260619-154934",
+  "audio_path": "/tmp/riff/sessions/20260619-154934/audio.wav",
+  "audio_device": ":0",
+  "started_at": "2026-06-19T15:49:34Z",
+  "ended_at": "2026-06-19T15:51:11Z",
+  "audio_duration_sec": 12.84,
+  "transcription": { "status": "ok", "method": "parakeet_server" },
+  "screenshots": [
+    {
+      "id": 1,
+      "path": "/tmp/riff/sessions/.../screenshots/shot-001.png",
+      "rel_path": "screenshots/shot-001.png",
+      "audio_sec": 3.2,
+      "app_name": "Safari",
+      "window_title": "Example"
+    }
+  ],
+  "clipboard": [
+    { "id": 1, "text": "copied text", "audio_sec": 5.1 }
+  ]
+}
+```
+
+Configure a chain via the JSON config `riff.hooks` array (runs in order):
+
+```json
+{
+  "riff": {
+    "hooks": [
+      "$HOME/Code/riff/scripts/hooks/remove_ums.sh \"$@\"",
+      "$HOME/Code/riff/scripts/hooks/capitalize_sentences.sh \"$@\""
+    ]
+  }
+}
+```
+
+Or via `~/.riffrc` for a single hook (`RIFF_HOOKS` is newline-delimited, so the
+rc form is best for one command):
+
+```bash
+export RIFF_HOOKS='$HOME/Code/riff/scripts/hooks/remove_ums.sh "$@"'
+```
+
+Use `"$@"` so the two temp paths are forwarded to your script as `$1`/`$2`.
+Inline snippets can also read `$1`/`$2` directly, e.g.:
+
+```bash
+export RIFF_HOOKS="perl -0777 -i -pe 's/\\bum\\b[,.]?//gi' \"\$1\""
+```
+
+Hooks run automatically on every `riff stop`/`riff toggle` once configured. To
+skip them for a single run, pass `--no-hooks`:
+
+```bash
+riff stop --no-hooks      # transcribe + post-transcribe still run, hooks don't
+```
+
+`--no-stop-hooks` also skips them (it disables the entire stop-hook pipeline:
+custom transcription, post-transcribe, and output hooks).
+
+Notes:
+- Hooks only run when transcription succeeded; `--no-hooks` or `--no-stop-hooks`
+  skips them.
+- A non-zero exit from a hook stops the chain and marks the stop as errored.
+- Hook results and timing appear in `transcription.hooks` (JSON output) and in
+  the perf log as `output_hooks_ms`.
+
+### Writing your own hook
+
+A hook is any executable that reads/rewrites the transcript file (`$1`) and may
+inspect the metadata file (`$2`). Edit `$1` in place; riff reads it back.
+A starter template:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+transcript="${1:?transcript path required}"
+metadata="${2:?metadata path required}"
+
+# Example: read a value from the metadata blob (requires jq).
+session_id="$(jq -r .session_id "$metadata")"
+echo "post-processing transcript for $session_id" >&2
+
+# Rewrite the transcript in place. Here we just uppercase it.
+tr '[:lower:]' '[:upper:]' < "$transcript" > "$transcript.tmp"
+mv "$transcript.tmp" "$transcript"
+```
+
+Make it executable (`chmod +x your_hook.sh`) and point a hook entry at it with
+`"$@"` so riff forwards the two temp paths:
+
+```json
+{
+  "riff": {
+    "hooks": ["$HOME/path/to/your_hook.sh \"$@\""]
+  }
+}
+```
+
+### Bundled hook: remove "um"
+
+`scripts/hooks/remove_ums.sh` removes standalone filler `um` tokens (any
+case, with an optional trailing comma/period) and tidies the spacing —
+`"Um, so I um think."` becomes `"so I think."`. Real words like `umbrella`
+are left untouched.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+transcript="${1:?transcript path required}"
+
+perl -0777 -i -pe '
+    s/\bum\b[,.]?//gi;      # drop "um", "um,", "um." anywhere it stands alone
+    s/[ \t]{2,}/ /g;        # collapse doubled spaces left behind
+    s/[ \t]+([,.!?])/$1/g;  # pull punctuation back against the previous word
+    s/^[ \t]+//mg;          # trim leading spaces per line
+' "$transcript"
+```
+
+Enable it:
+
+```json
+{
+  "riff": {
+    "hooks": ["$HOME/Code/riff/scripts/hooks/remove_ums.sh \"$@\""]
+  }
+}
+```
 
 ---
 
@@ -335,6 +487,7 @@ It does **not** send output to the focused app.
 
 Flags:
 - `--no-stop-hooks` ignore stop-time hook commands and use the built-in stop pipeline
+- `--no-hooks` skip just the RIFF_HOOKS output-hook chain for this run
 - `--python-bin <path>` override python interpreter
 - `--parakeet-script <path>` override script path
 - `--parakeet-model <name>` override model name
@@ -366,7 +519,7 @@ Useful when you want one command instead of separate `start`/`stop`.
 
 Flags:
 - Start-path flags (used when idle): `--screenshot-dir`, `--audio-device`
-- Stop-path flags (used when active): `--no-stop-hooks`, `--python-bin`, `--parakeet-script`, `--parakeet-model`, `--transcribe-cmd`, `--post-transcribe-cmd`
+- Stop-path flags (used when active): `--no-stop-hooks`, `--no-hooks`, `--python-bin`, `--parakeet-script`, `--parakeet-model`, `--transcribe-cmd`, `--post-transcribe-cmd`
 
 ### Sounds (interactive picker)
 

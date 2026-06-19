@@ -273,6 +273,18 @@ fn load_riff_json_defaults(original_env_keys: &HashSet<OsString>) {
                 maybe_set_default_env(original_env_keys, "RIFF_TRANSCRIBE_CMD", rendered, true);
             }
         }
+        if let Some(hooks) = riff_obj.get("hooks").and_then(|v| v.as_array()) {
+            let joined = hooks
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(expand_env_refs)
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !joined.is_empty() {
+                maybe_set_default_env(original_env_keys, "RIFF_HOOKS", joined, true);
+            }
+        }
     }
 }
 
@@ -2318,6 +2330,7 @@ fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
     if active {
         let stop_args = StopArgs {
             no_stop_hooks: args.no_stop_hooks,
+            no_hooks: args.no_hooks,
             transcribe_cmd: args.transcribe_cmd.clone(),
             post_transcribe_cmd: args.post_transcribe_cmd.clone(),
             python_bin: args.python_bin.clone(),
@@ -2405,6 +2418,7 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
     write_json(&active_state_file(), &old_state)?;
     let stop_args = StopArgs {
         no_stop_hooks: false,
+        no_hooks: false,
         transcribe_cmd: None,
         post_transcribe_cmd: None,
         python_bin: None,
@@ -2538,7 +2552,12 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::path::Path;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    // RIFF_CONFIG_JSON_FILE and the vars these tests assert on are process-global;
+    // serialize tests that load JSON config defaults.
+    static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parse_riffrc_accepts_export_and_quotes() {
@@ -2581,6 +2600,7 @@ mod tests {
 
     #[test]
     fn json_config_sets_post_transcribe_default() {
+        let _guard = CONFIG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let td = tempdir().expect("tempdir");
         let json_path = td.path().join("riff.json");
         fs::write(
@@ -2611,6 +2631,47 @@ mod tests {
             std::env::set_var("RIFF_POST_TRANSCRIBE_CMD", value);
         } else {
             std::env::remove_var("RIFF_POST_TRANSCRIBE_CMD");
+        }
+        if let Some(value) = original_path {
+            std::env::set_var("RIFF_CONFIG_JSON_FILE", value);
+        } else {
+            std::env::remove_var("RIFF_CONFIG_JSON_FILE");
+        }
+    }
+
+    #[test]
+    fn json_config_joins_hooks_array_into_riff_hooks() {
+        let _guard = CONFIG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let td = tempdir().expect("tempdir");
+        let json_path = td.path().join("riff.json");
+        fs::write(
+            &json_path,
+            serde_json::to_string(&json!({
+                "riff": {
+                    "hooks": ["first --text", "second --text"]
+                }
+            }))
+            .expect("serialize json"),
+        )
+        .expect("write config");
+
+        let original = std::env::var_os("RIFF_HOOKS");
+        let original_path = std::env::var_os("RIFF_CONFIG_JSON_FILE");
+        std::env::remove_var("RIFF_HOOKS");
+        std::env::set_var("RIFF_CONFIG_JSON_FILE", &json_path);
+
+        let original_env_keys: HashSet<OsString> = std::env::vars_os().map(|(k, _)| k).collect();
+        load_riff_json_defaults(&original_env_keys);
+
+        assert_eq!(
+            std::env::var("RIFF_HOOKS").ok().as_deref(),
+            Some("first --text\nsecond --text")
+        );
+
+        if let Some(value) = original {
+            std::env::set_var("RIFF_HOOKS", value);
+        } else {
+            std::env::remove_var("RIFF_HOOKS");
         }
         if let Some(value) = original_path {
             std::env::set_var("RIFF_CONFIG_JSON_FILE", value);

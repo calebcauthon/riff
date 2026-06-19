@@ -1021,3 +1021,279 @@ pub(crate) fn run_post_transcribe_command(
         ),
     }
 }
+
+/// Run the configured `RIFF_HOOKS` chain against the transcript.
+///
+/// Each hook is a bash command. Hooks run in order and are invoked as
+/// `sh -lc '<hook>' riff-hook <transcript_path> <metadata_path>` so that:
+///   - `$1` is a temp file containing the current transcript (edit in place)
+///   - `$2` is a temp file containing a read-only JSON blob of session metadata
+///
+/// After each hook runs, the transcript temp file is read back and becomes the
+/// input for the next hook. The final transcript is written to
+/// `<session_dir>/transcript.txt`.
+pub(crate) fn run_output_hooks(
+    transcript: &str,
+    metadata: &Value,
+    session_dir: &Path,
+    stop_args: &StopArgs,
+    cli: &Cli,
+) -> (String, Value) {
+    if stop_args.no_stop_hooks || stop_args.no_hooks {
+        return (
+            transcript.to_string(),
+            json!({"status": "skipped", "reason": "disabled_by_flag"}),
+        );
+    }
+
+    let hooks: Vec<String> = env::var("RIFF_HOOKS")
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if hooks.is_empty() {
+        return (
+            transcript.to_string(),
+            json!({"status": "skipped", "reason": "not_configured"}),
+        );
+    }
+
+    let unique = format!(
+        "riff-hooks-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let tmp_dir = env::temp_dir().join(unique);
+    if let Err(e) = fs::create_dir_all(&tmp_dir) {
+        return (
+            transcript.to_string(),
+            json!({"status": "error", "reason": format!("Failed to create hook temp dir: {e}")}),
+        );
+    }
+    let transcript_path = tmp_dir.join("transcript.txt");
+    let metadata_path = tmp_dir.join("metadata.json");
+
+    if let Err(e) = fs::write(&transcript_path, transcript) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return (
+            transcript.to_string(),
+            json!({"status": "error", "reason": format!("Failed to write transcript temp file: {e}")}),
+        );
+    }
+    let metadata_text = serde_json::to_string_pretty(metadata).unwrap_or_else(|_| "{}".to_string());
+    if let Err(e) = fs::write(&metadata_path, metadata_text) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return (
+            transcript.to_string(),
+            json!({"status": "error", "reason": format!("Failed to write metadata temp file: {e}")}),
+        );
+    }
+
+    let mut current = transcript.to_string();
+    let mut results: Vec<Value> = Vec::new();
+    let mut overall_error = false;
+
+    for (idx, hook) in hooks.iter().enumerate() {
+        print_verbose(cli, format!("Running output hook {}: {hook}", idx + 1));
+        let output = Command::new("sh")
+            .arg("-lc")
+            .arg(hook)
+            .arg("riff-hook")
+            .arg(&transcript_path)
+            .arg(&metadata_path)
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                current = fs::read_to_string(&transcript_path).unwrap_or(current);
+                results.push(json!({
+                    "hook": hook,
+                    "status": "ok",
+                    "chars": current.chars().count(),
+                }));
+            }
+            Ok(out) => {
+                overall_error = true;
+                results.push(json!({
+                    "hook": hook,
+                    "status": "error",
+                    "returncode": out.status.code(),
+                    "stderr": String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                }));
+                break;
+            }
+            Err(e) => {
+                overall_error = true;
+                results.push(json!({
+                    "hook": hook,
+                    "status": "error",
+                    "reason": format!("Failed to spawn shell command: {e}"),
+                }));
+                break;
+            }
+        }
+    }
+
+    let _ = fs::remove_dir_all(&tmp_dir);
+
+    let final_transcript = current.trim().to_string();
+    let out_txt = session_dir.join("transcript.txt");
+    let _ = fs::write(
+        &out_txt,
+        if final_transcript.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", final_transcript)
+        },
+    );
+
+    let meta = json!({
+        "status": if overall_error { "error" } else { "ok" },
+        "count": hooks.len(),
+        "hooks": results,
+    });
+    (final_transcript, meta)
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+    use crate::cli::Commands;
+    use std::sync::Mutex;
+
+    // RIFF_HOOKS is process-global; serialize tests that mutate it.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn test_cli() -> Cli {
+        Cli {
+            verbose: false,
+            quiet: true,
+            json: false,
+            dry_run: false,
+            no_beeps: true,
+            command: Commands::Shot,
+        }
+    }
+
+    fn default_stop_args() -> StopArgs {
+        StopArgs {
+            no_stop_hooks: false,
+            no_hooks: false,
+            transcribe_cmd: None,
+            post_transcribe_cmd: None,
+            python_bin: None,
+            parakeet_script: None,
+            parakeet_model: None,
+        }
+    }
+
+    #[test]
+    fn output_hook_receives_temp_paths_and_rewrites_transcript() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let session_dir = tempfile::tempdir().expect("session dir");
+        let prev = env::var_os("RIFF_HOOKS");
+        // $1 is the transcript temp file, $2 is the metadata temp file.
+        // Assert the metadata file exists and is valid JSON, then strip "um".
+        env::set_var(
+            "RIFF_HOOKS",
+            r#"test -f "$2" && grep -q session_id "$2" && perl -0777 -i -pe 's/\bum\b[,.]?//gi; s/[ \t]{2,}/ /g' "$1""#,
+        );
+
+        let metadata = json!({"session_id": "sess-123", "screenshots": []});
+        let (out, meta) = run_output_hooks(
+            "Um, hello um there.",
+            &metadata,
+            session_dir.path(),
+            &default_stop_args(),
+            &test_cli(),
+        );
+
+        match prev {
+            Some(v) => env::set_var("RIFF_HOOKS", v),
+            None => env::remove_var("RIFF_HOOKS"),
+        }
+
+        assert_eq!(meta["status"], "ok");
+        assert_eq!(meta["count"], 1);
+        assert_eq!(out, "hello there.");
+        // final transcript persisted to the canonical file
+        let written = fs::read_to_string(session_dir.path().join("transcript.txt")).unwrap();
+        assert_eq!(written.trim(), "hello there.");
+    }
+
+    #[test]
+    fn output_hook_skipped_when_not_configured() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let session_dir = tempfile::tempdir().expect("session dir");
+        let prev = env::var_os("RIFF_HOOKS");
+        env::remove_var("RIFF_HOOKS");
+
+        let (out, meta) = run_output_hooks(
+            "unchanged",
+            &json!({}),
+            session_dir.path(),
+            &default_stop_args(),
+            &test_cli(),
+        );
+
+        if let Some(v) = prev {
+            env::set_var("RIFF_HOOKS", v);
+        }
+
+        assert_eq!(out, "unchanged");
+        assert_eq!(meta["status"], "skipped");
+        assert_eq!(meta["reason"], "not_configured");
+    }
+
+    #[test]
+    fn output_hook_skipped_when_disabled_by_flag() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let session_dir = tempfile::tempdir().expect("session dir");
+        let mut args = default_stop_args();
+        args.no_stop_hooks = true;
+
+        let (out, meta) = run_output_hooks(
+            "unchanged",
+            &json!({}),
+            session_dir.path(),
+            &args,
+            &test_cli(),
+        );
+
+        assert_eq!(out, "unchanged");
+        assert_eq!(meta["status"], "skipped");
+        assert_eq!(meta["reason"], "disabled_by_flag");
+    }
+
+    #[test]
+    fn output_hook_skipped_by_no_hooks_flag_even_when_configured() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let session_dir = tempfile::tempdir().expect("session dir");
+        let prev = env::var_os("RIFF_HOOKS");
+        env::set_var("RIFF_HOOKS", r#"perl -0777 -i -pe 's/\bum\b//gi' "$1""#);
+
+        let mut args = default_stop_args();
+        args.no_hooks = true;
+
+        let (out, meta) = run_output_hooks(
+            "um unchanged um",
+            &json!({}),
+            session_dir.path(),
+            &args,
+            &test_cli(),
+        );
+
+        match prev {
+            Some(v) => env::set_var("RIFF_HOOKS", v),
+            None => env::remove_var("RIFF_HOOKS"),
+        }
+
+        assert_eq!(out, "um unchanged um");
+        assert_eq!(meta["status"], "skipped");
+        assert_eq!(meta["reason"], "disabled_by_flag");
+    }
+}

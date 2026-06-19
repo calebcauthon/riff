@@ -1,7 +1,7 @@
 use crate::cli::{Cli, StartArgs, StopArgs};
 use crate::error::{app_error, AppError};
 use crate::history::read_jsonl_values;
-use crate::models::SessionState;
+use crate::models::{ClipboardMeta, SessionState, ShotMeta};
 use crate::paths::{
     active_state_file, audio_device_cache_file, ensure_dirs, last_session_file, sessions_dir,
 };
@@ -14,7 +14,7 @@ use crate::screenshots::{detect_screenshot_dir, file_mtime_epoch, move_session_s
 use crate::transcription::{
     ensure_parakeet_server, ensure_web_server, parakeet_server_enabled,
     resolve_parakeet_batch_size, resolve_parakeet_model, resolve_parakeet_script,
-    resolve_python_bin, run_post_transcribe_command, run_transcription,
+    resolve_python_bin, run_output_hooks, run_post_transcribe_command, run_transcription,
 };
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
@@ -51,6 +51,59 @@ fn command_source(cli_value: Option<&str>, env_key: &str) -> &'static str {
     } else {
         "off"
     }
+}
+
+/// Build the read-only JSON metadata blob handed to output hooks as their
+/// second argument (`$2`). Contains everything about the riff except the
+/// transcript itself (which is the mutable first argument, `$1`).
+fn build_hook_metadata(
+    state: &SessionState,
+    ended_iso: &str,
+    shots: &[ShotMeta],
+    clips: &[ClipboardMeta],
+    audio_duration: Option<f64>,
+    transcription_meta: &Value,
+) -> Value {
+    let screenshots: Vec<Value> = shots
+        .iter()
+        .map(|shot| {
+            json!({
+                "id": shot.shot_id,
+                "path": Path::new(&state.session_dir)
+                    .join(&shot.dest_rel_path)
+                    .display()
+                    .to_string(),
+                "rel_path": shot.dest_rel_path,
+                "audio_sec": round3(shot.audio_sec),
+                "app_name": shot.app_name,
+                "window_title": shot.window_title,
+            })
+        })
+        .collect();
+
+    let clipboard: Vec<Value> = clips
+        .iter()
+        .map(|clip| {
+            json!({
+                "id": clip.clip_id,
+                "text": clip.text,
+                "audio_sec": round3(clip.audio_sec),
+            })
+        })
+        .collect();
+
+    json!({
+        "session_id": state.session_id,
+        "session_dir": state.session_dir,
+        "audio_path": state.audio_path,
+        "audio_device": state.audio_device,
+        "started_at": state.started_at_iso,
+        "ended_at": ended_iso,
+        "audio_duration_sec": audio_duration.map(round3),
+        "transcription": transcription_meta,
+        "screenshots": screenshots,
+        "clipboard": clipboard,
+    })
 }
 
 fn hook_source(cli_value: Option<&str>, env_key: &str, disabled: bool) -> &'static str {
@@ -1360,6 +1413,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let audio_duration_ms: f64;
     let build_note_bundle_ms: f64;
     let post_transcribe_ms: f64;
+    let output_hooks_ms: f64;
     let render_ms: f64;
     let mut write_note_md_ms = 0.0;
     let mut write_note_html_file_ms = 0.0;
@@ -1380,6 +1434,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let use_custom_transcribe = matches!(custom_transcribe_source, "cli" | "env");
     let effective_stop_args = StopArgs {
         no_stop_hooks: args.no_stop_hooks,
+        no_hooks: args.no_hooks,
         transcribe_cmd: if stop_hooks_disabled {
             None
         } else {
@@ -1620,6 +1675,57 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let audio_duration = get_audio_duration_sec(Path::new(&state.audio_path));
     audio_duration_ms = elapsed_ms(t_audio_duration);
 
+    let t_output_hooks = Instant::now();
+    let pre_hook_chars = transcript_raw.chars().count();
+    let (transcript_raw, output_hooks_meta) =
+        if transcription_meta.get("status").and_then(|v| v.as_str()) == Some("ok") {
+            let hook_metadata = build_hook_metadata(
+                &state,
+                &ended_iso,
+                &shots,
+                &clips,
+                audio_duration,
+                &transcription_meta,
+            );
+            run_output_hooks(
+                &transcript_raw,
+                &hook_metadata,
+                &session_dir,
+                &effective_stop_args,
+                cli,
+            )
+        } else {
+            (
+                transcript_raw,
+                json!({"status": "skipped", "reason": "transcription_not_ok"}),
+            )
+        };
+    output_hooks_ms = elapsed_ms(t_output_hooks);
+    print_verbose(
+        cli,
+        format!(
+            "Output hooks: status={} count={} chars_before={} chars_after={} elapsed_ms={}",
+            output_hooks_meta
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+            output_hooks_meta
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            pre_hook_chars,
+            transcript_raw.chars().count(),
+            round3(output_hooks_ms),
+        ),
+    );
+    if let Some(obj) = transcription_meta.as_object_mut() {
+        obj.insert("hooks".to_string(), output_hooks_meta.clone());
+        if output_hooks_meta.get("status").and_then(|v| v.as_str()) == Some("error") {
+            obj.insert("status".to_string(), json!("error"));
+            obj.insert("reason".to_string(), json!("output_hook_failed"));
+        }
+    }
+
     let t_render = Instant::now();
     let transcript_annotated =
         inject_annotation_markers(&transcript_raw, &shots, &clips, audio_duration);
@@ -1752,6 +1858,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "move_screenshots_ms": round3(move_screenshots_ms),
             "transcribe_ms": round3(transcribe_ms),
             "post_transcribe_ms": round3(post_transcribe_ms),
+            "output_hooks_ms": round3(output_hooks_ms),
             "audio_duration_ms": round3(audio_duration_ms),
             "render_ms": round3(render_ms),
             "build_note_bundle_ms": round3(build_note_bundle_ms),

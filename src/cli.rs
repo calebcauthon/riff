@@ -98,6 +98,10 @@ pub struct StopArgs {
     #[arg(long)]
     pub no_stop_hooks: bool,
 
+    /// Skip the configured RIFF_HOOKS output-hook chain for this run
+    #[arg(long)]
+    pub no_hooks: bool,
+
     #[arg(long)]
     pub transcribe_cmd: Option<String>,
 
@@ -127,6 +131,10 @@ pub struct ToggleArgs {
     /// Used when active (stop path): custom transcription command template
     #[arg(long)]
     pub no_stop_hooks: bool,
+
+    /// Used when active (stop path): skip the RIFF_HOOKS output-hook chain
+    #[arg(long)]
+    pub no_hooks: bool,
 
     /// Used when active (stop path): custom transcription command template
     #[arg(long)]
