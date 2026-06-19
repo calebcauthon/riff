@@ -14,15 +14,18 @@ VERSION_INPUT=""
 ALLOW_DIRTY=0
 DRY_RUN=0
 RETAG=0
-PUSH_TAG=0
 SKIP_TESTS=0
-AUTO_COMMIT=0
 CARGO_JOBS="${CARGO_BUILD_JOBS:-}"
 SOURCE_MODE="${RIFF_RELEASE_SOURCE:-auto}"
 
 usage() {
   cat <<EOF
-Prepare a Homebrew-friendly release for riff.
+Cut a Homebrew-friendly release for riff in one shot.
+
+This is a one-stop command: it bumps versions, builds, tests, commits and
+pushes the release commit + tag, then updates, commits, and pushes the
+Homebrew tap formula. On success the working tree is left clean with nothing
+half-done. Run it once; no follow-up git commands are required.
 
 Usage:
   $(basename "$0") [options] <version>
@@ -30,14 +33,12 @@ Usage:
 Examples:
   $(basename "$0") 0.2.0
   $(basename "$0") v0.2.0
-  $(basename "$0") --dry-run --allow-dirty v0.2.0
+  $(basename "$0") --dry-run v0.2.0
 
 Options:
   --dry-run       Print planned actions without mutating files/tags
   --allow-dirty   Allow running with a dirty git tree
-  --retag         Force-update existing local tag to current HEAD
-  --push-tag      Push release tag to origin if missing remotely
-  --auto-commit   Commit Cargo.toml, Cargo.lock, and VERSION before tagging
+  --retag         Force-update existing tag (local and remote) to current HEAD
   --jobs <n>      Limit cargo build/test jobs (default: min(host CPUs, 4))
   --source <mode> Formula source: auto, tarball, or git (default: auto)
   --skip-tests    Skip cargo test sanity check
@@ -57,14 +58,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --retag)
       RETAG=1
-      shift
-      ;;
-    --push-tag)
-      PUSH_TAG=1
-      shift
-      ;;
-    --auto-commit)
-      AUTO_COMMIT=1
       shift
       ;;
     --jobs)
@@ -188,8 +181,13 @@ for path in "$CARGO_TOML" "$VERSION_FILE" "$FORMULA_FILE"; do
 done
 
 if [[ "$ALLOW_DIRTY" -eq 0 ]]; then
-  if [[ -n "$(git -C "$ROOT_DIR" status --porcelain)" ]]; then
-    echo "Git working tree is not clean. Commit/stash changes or rerun with --allow-dirty." >&2
+  # Ignore the files this script manages so a previously interrupted release can
+  # be resumed from a clean-enough tree without --allow-dirty.
+  unmanaged_changes="$(git -C "$ROOT_DIR" status --porcelain | grep -vE ' (Cargo\.toml|Cargo\.lock|VERSION)$' || true)"
+  if [[ -n "$unmanaged_changes" ]]; then
+    echo "Git working tree has changes outside release metadata (Cargo.toml, Cargo.lock, VERSION)." >&2
+    echo "Commit/stash them or rerun with --allow-dirty:" >&2
+    echo "$unmanaged_changes" >&2
     exit 1
   fi
 fi
@@ -371,31 +369,23 @@ else
   echo "[riff-release] Skipping cargo test (--skip-tests)"
 fi
 
-if [[ "$DRY_RUN" -eq 0 ]]; then
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "[riff-release] Committing release metadata"
+  run_or_echo git -C "$ROOT_DIR" add Cargo.toml Cargo.lock VERSION
+  run_or_echo git -C "$ROOT_DIR" commit -m "release: $TAG"
+else
   release_metadata_status="$(git -C "$ROOT_DIR" status --porcelain -- Cargo.toml Cargo.lock VERSION)"
   if [[ -n "$release_metadata_status" ]]; then
-    if [[ "$AUTO_COMMIT" -eq 1 ]]; then
-      echo "[riff-release] Committing release metadata"
-      run_or_echo git -C "$ROOT_DIR" add Cargo.toml Cargo.lock VERSION
-      run_or_echo git -C "$ROOT_DIR" commit -m "release: $TAG"
-    else
-      echo
-      echo "[riff-release] Release metadata changed; not creating or pushing $TAG yet."
-      echo "[riff-release] This prevents tagging the pre-release commit by accident."
-      echo
-      echo "Changed release files:"
-      git -C "$ROOT_DIR" status --short -- Cargo.toml Cargo.lock VERSION
-      echo
-      echo "Next steps:"
-      echo "  1) Review: git -C $ROOT_DIR diff -- Cargo.toml Cargo.lock VERSION"
-      echo "  2) Commit: git -C $ROOT_DIR add Cargo.toml Cargo.lock VERSION && git -C $ROOT_DIR commit -m \"release: $TAG\""
-      echo "  3) Rerun: $0${PUSH_TAG:+ --push-tag} $TAG"
-      echo
-      echo "Or rerun with --auto-commit to let this script make the release commit."
-      exit 0
-    fi
+    echo "[riff-release] Committing release metadata"
+    run_or_echo git -C "$ROOT_DIR" add Cargo.toml Cargo.lock VERSION
+    run_or_echo git -C "$ROOT_DIR" commit -m "release: $TAG"
+  else
+    echo "[riff-release] No release metadata changes to commit"
   fi
 fi
+
+echo "[riff-release] Pushing riff commit to origin"
+run_or_echo git -C "$ROOT_DIR" push origin HEAD
 
 local_tag_sha="$(git -C "$ROOT_DIR" rev-parse -q --verify "refs/tags/$TAG" 2>/dev/null || true)"
 head_sha="$(git -C "$ROOT_DIR" rev-parse HEAD)"
@@ -416,23 +406,11 @@ else
   fi
 fi
 
-if [[ "$DRY_RUN" -eq 1 ]]; then
-  remote_tag_sha=""
+echo "[riff-release] Pushing tag $TAG to origin"
+if [[ "$RETAG" -eq 1 ]]; then
+  run_or_echo git -C "$ROOT_DIR" push --force origin "$TAG"
 else
-  remote_tag_sha="$(git -C "$ROOT_DIR" ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}' || true)"
-fi
-if [[ -z "$remote_tag_sha" ]]; then
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "[dry-run] would check remote tag $TAG and push if missing before checksum fetch"
-  elif [[ "$PUSH_TAG" -eq 1 ]]; then
-    echo "[riff-release] Pushing tag $TAG to origin"
-    run_or_echo git -C "$ROOT_DIR" push origin "$TAG"
-  else
-    echo "Remote tag $TAG is missing on origin, cannot compute GitHub tarball checksum yet." >&2
-    echo "Run: git push origin $TAG" >&2
-    echo "Then rerun this script (or rerun with --push-tag)." >&2
-    exit 1
-  fi
+  run_or_echo git -C "$ROOT_DIR" push origin "$TAG"
 fi
 
 release_revision="$(git -C "$ROOT_DIR" rev-parse "$TAG^{}" 2>/dev/null || git -C "$ROOT_DIR" rev-parse HEAD)"
@@ -507,13 +485,14 @@ run_or_echo git -C "$TAP_DIR" push origin HEAD
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
   echo
-  echo "Release prep complete for $TAG."
-  echo "Next steps:"
-  echo "  1) Push riff commit if needed: git -C $ROOT_DIR push origin HEAD"
-  echo "  2) Push/verify tag: git -C $ROOT_DIR push origin $TAG"
-  echo "  3) Install: brew tap calebcauthon/riff && brew install calebcauthon/riff/riff"
+  echo "Release $TAG complete. Everything is committed and pushed:"
+  echo "  - riff commit and tag $TAG pushed to origin"
+  echo "  - tap formula updated, committed, and pushed"
+  echo "  - working tree is clean; no follow-up commands needed"
+  echo
+  echo "Install: brew tap calebcauthon/riff && brew install calebcauthon/riff/riff"
 else
   echo
-  echo "Dry-run complete. No files or tags were changed."
-  echo "Run without --dry-run once ready."
+  echo "Dry-run complete. No files, tags, or remotes were changed."
+  echo "Run without --dry-run to perform the full release in one shot."
 fi
