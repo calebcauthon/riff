@@ -473,6 +473,86 @@ fn is_annotation_source_line(line: &str) -> bool {
     is_screenshot_path_line(line) || is_clipboard_reference_line(line)
 }
 
+/// Build the "Output hooks" HTML panel: the list of hooks that ran and, when
+/// the hooks changed the transcript, the original (pre-hook) text. Returns an
+/// empty string when there is nothing to show.
+fn build_hooks_section_html(transcription_meta: &Value, pre_hook_core: Option<&str>) -> String {
+    let hooks_meta = transcription_meta.get("hooks");
+    let count = hooks_meta
+        .and_then(|m| m.get("count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let status = hooks_meta
+        .and_then(|m| m.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Nothing to show when no hooks ran and the transcript was unchanged.
+    if count == 0 && pre_hook_core.is_none() {
+        return String::new();
+    }
+
+    let mut hook_items = String::new();
+    if let Some(hooks) = hooks_meta
+        .and_then(|m| m.get("hooks"))
+        .and_then(|v| v.as_array())
+    {
+        for h in hooks {
+            let cmd = h.get("hook").and_then(|v| v.as_str()).unwrap_or("");
+            let hstatus = h.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let detail = if hstatus == "ok" {
+                h.get("chars")
+                    .and_then(|v| v.as_u64())
+                    .map(|c| format!("{c} chars"))
+                    .unwrap_or_default()
+            } else {
+                h.get("stderr")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| h.get("reason").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let badge_class = if hstatus == "ok" {
+                "hook-ok"
+            } else {
+                "hook-err"
+            };
+            let detail_html = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" <span class=\"hook-detail\">{}</span>", html_escape(&detail))
+            };
+            hook_items.push_str(&format!(
+                r#"<li><span class="hook-badge {badge}">{status}</span><code>{cmd}</code>{detail}</li>"#,
+                badge = badge_class,
+                status = html_escape(hstatus),
+                cmd = html_escape(cmd),
+                detail = detail_html,
+            ));
+        }
+    }
+
+    let hooks_list_html = if hook_items.is_empty() {
+        String::new()
+    } else {
+        format!("<ol class=\"hook-list\">{hook_items}</ol>")
+    };
+
+    let original_html = match pre_hook_core {
+        Some(core) => format!(
+            r#"<details class="hook-diff" open><summary>Original transcript (before output hooks)</summary><div class="transcript pre-hook">{}</div></details>"#,
+            html_escape(core)
+        ),
+        None if count > 0 && status == "ok" => {
+            r#"<div class="status">Output hooks ran but did not change the transcript.</div>"#
+                .to_string()
+        }
+        None => String::new(),
+    };
+
+    format!(r#"<section class="panel"><h2>Output hooks</h2>{hooks_list_html}{original_html}</section>"#)
+}
+
 pub(crate) fn build_html_note(
     session_id: &str,
     started_iso: &str,
@@ -480,6 +560,7 @@ pub(crate) fn build_html_note(
     audio_duration_sec: Option<f64>,
     transcription_meta: &Value,
     transcript: &str,
+    pre_hook_transcript: Option<&str>,
     markdown_for_copy: &str,
     shots: &[ShotMeta],
     clips: &[ClipboardMeta],
@@ -608,6 +689,12 @@ pub(crate) fn build_html_note(
         transcript_text = format!("{}\n\n{}", source_lines.trim_end(), transcript_text);
     }
 
+    let post_core = transcript_core.trim().to_string();
+    let pre_hook_core = pre_hook_transcript
+        .map(|t| strip_leading_annotation_source_block(t.trim()).trim().to_string())
+        .filter(|core| !core.is_empty() && *core != post_core);
+    let hooks_section = build_hooks_section_html(transcription_meta, pre_hook_core.as_deref());
+
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -635,6 +722,15 @@ pub(crate) fn build_html_note(
     .riff-btn.small {{ padding: 6px 10px; font-size: 12px; }}
     .riff-btn.tiny {{ padding: 3px 8px; font-size: 11px; border-radius: 6px; }}
     .transcript {{ white-space: pre-wrap; line-height: 1.6; font-size: 15px; }}
+    .transcript.pre-hook {{ background: #fef9c3; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 12px; margin-top: 8px; }}
+    .hook-list {{ margin: 0 0 12px; padding-left: 20px; line-height: 1.7; }}
+    .hook-list code {{ background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 6px; padding: 1px 6px; font-size: 12px; word-break: break-all; }}
+    .hook-badge {{ display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; padding: 1px 6px; border-radius: 999px; margin-right: 6px; }}
+    .hook-badge.hook-ok {{ color: #0f766e; background: #ccfbf1; border: 1px solid #99f6e4; }}
+    .hook-badge.hook-err {{ color: #b91c1c; background: #fee2e2; border: 1px solid #fecaca; }}
+    .hook-detail {{ color: #6b7280; font-size: 12px; }}
+    .hook-diff {{ margin-top: 8px; }}
+    .hook-diff summary {{ cursor: pointer; font-weight: 600; color: #92400e; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }}
     .shot-grid {{ display: grid; grid-template-columns: 1fr; gap: 12px; }}
     .card {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px; margin: 0; }}
@@ -698,6 +794,8 @@ pub(crate) fn build_html_note(
       </div>
       <div class="transcript">{transcript_html}</div>
     </section>
+
+    {hooks_section}
 
     <section class="panel">
       <h2>Screenshots</h2>
@@ -1317,6 +1415,7 @@ pub(crate) fn build_html_note(
         t_status = html_escape(t_status),
         t_method = html_escape(t_method),
         transcript_html = html_escape(&transcript_text),
+        hooks_section = hooks_section,
         transcript_copy_html = html_escape(&transcript_text),
         markdown_html = html_escape(markdown_for_copy),
         sessions_index_href = html_escape(sessions_index_href),
@@ -1751,6 +1850,15 @@ pub(crate) fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, A
         markdown_for_copy = transcript_annotated.clone();
     }
 
+    // The pre-hook transcript is persisted alongside the session when output
+    // hooks changed the text; annotate it the same way so the HTML can show the
+    // original beside the hooked output.
+    let pre_hook_annotated = fs::read_to_string(session_dir.join("transcript.original.txt"))
+        .ok()
+        .map(|raw| strip_leading_annotation_source_block(raw.trim()))
+        .filter(|core| !core.trim().is_empty())
+        .map(|core| inject_annotation_markers(&core, &shots, &clips, audio_duration));
+
     let html = build_html_note(
         &session_id,
         &started_iso,
@@ -1758,6 +1866,7 @@ pub(crate) fn generate_html_for_session(session_dir: &Path) -> Result<PathBuf, A
         audio_duration,
         &transcription_meta,
         &transcript_annotated,
+        pre_hook_annotated.as_deref(),
         &markdown_for_copy,
         &shots,
         &clips,
@@ -1831,6 +1940,7 @@ mod tests {
                 "method": "parakeet_server"
             }),
             "hello world",
+            None,
             "hello world",
             &shots,
             &clips,
@@ -1870,6 +1980,59 @@ mod tests {
         assert!(html.contains("window.__riffOpenExcalidraw"));
         assert!(html.contains("h(pkg.Excalidraw"));
         assert!(html.contains("@excalidraw/excalidraw@0.18.0"));
+    }
+
+    #[test]
+    fn html_shows_pre_and_post_hook_transcripts_when_hooks_changed_text() {
+        let session_dir = tempdir().expect("tempdir").path().join("20260413-151333");
+        let meta = json!({
+            "status": "ok",
+            "method": "parakeet_server",
+            "hooks": {
+                "status": "ok",
+                "count": 1,
+                "hooks": [{"hook": "perl -e 1", "status": "ok", "chars": 11}]
+            }
+        });
+        let html = build_html_note(
+            "20260413-151333",
+            "2026-04-13T15:13:33Z",
+            "2026-04-13T15:14:33Z",
+            Some(60.0),
+            &meta,
+            "hello world",
+            Some("um hello world"),
+            "hello world",
+            &[],
+            &[],
+            &session_dir,
+            "../index.html",
+        );
+        assert!(html.contains("Output hooks"));
+        assert!(html.contains("Original transcript (before output hooks)"));
+        assert!(html.contains("um hello world"));
+        assert!(html.contains("<code>perl -e 1</code>"));
+    }
+
+    #[test]
+    fn html_omits_hooks_section_when_no_hooks_ran() {
+        let session_dir = tempdir().expect("tempdir").path().join("20260413-151333");
+        let html = build_html_note(
+            "20260413-151333",
+            "2026-04-13T15:13:33Z",
+            "2026-04-13T15:14:33Z",
+            Some(60.0),
+            &json!({"status": "ok", "method": "parakeet_server"}),
+            "hello world",
+            None,
+            "hello world",
+            &[],
+            &[],
+            &session_dir,
+            "../index.html",
+        );
+        assert!(!html.contains("Output hooks"));
+        assert!(!html.contains("Original transcript (before output hooks)"));
     }
 
     #[test]

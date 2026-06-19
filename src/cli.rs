@@ -76,6 +76,8 @@ pub enum Commands {
     Loud,
     /// Show active session status
     Status,
+    /// Show configured output hooks and transcription commands
+    Hooks,
     /// Show startup/shutdown timing summary from perf log
     Perf(PerfArgs),
     #[command(hide = true, name = "watch-clipboard")]

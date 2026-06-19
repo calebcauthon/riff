@@ -106,6 +106,49 @@ fn build_hook_metadata(
     })
 }
 
+/// One-line, human-readable summary of the output-hook chain for the `stop`
+/// command output.
+fn format_output_hooks_summary(meta: &Value, pre_chars: usize, post_chars: usize) -> String {
+    let status = meta.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+    match status {
+        "skipped" => {
+            let reason = meta.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            match reason {
+                "not_configured" => "output_hooks: none configured".to_string(),
+                "disabled_by_flag" => "output_hooks: skipped (disabled by flag)".to_string(),
+                "transcription_not_ok" => {
+                    "output_hooks: skipped (transcription not ok)".to_string()
+                }
+                other if !other.is_empty() => format!("output_hooks: skipped ({other})"),
+                _ => "output_hooks: skipped".to_string(),
+            }
+        }
+        "ok" => {
+            let count = meta.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+            format!("output_hooks: {count} ran ok ({pre_chars}→{post_chars} chars)")
+        }
+        "error" => {
+            let count = meta.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let failing = meta
+                .get("hooks")
+                .and_then(|v| v.as_array())
+                .and_then(|hooks| {
+                    hooks
+                        .iter()
+                        .find(|h| h.get("status").and_then(|s| s.as_str()) == Some("error"))
+                })
+                .and_then(|h| h.get("hook").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if failing.is_empty() {
+                format!("output_hooks: error (of {count} configured)")
+            } else {
+                format!("output_hooks: error running `{failing}` (of {count} configured)")
+            }
+        }
+        other => format!("output_hooks: {other}"),
+    }
+}
+
 fn hook_source(cli_value: Option<&str>, env_key: &str, disabled: bool) -> &'static str {
     if disabled {
         "disabled"
@@ -1676,6 +1719,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     audio_duration_ms = elapsed_ms(t_audio_duration);
 
     let t_output_hooks = Instant::now();
+    let pre_hook_transcript = transcript_raw.clone();
     let pre_hook_chars = transcript_raw.chars().count();
     let (transcript_raw, output_hooks_meta) =
         if transcription_meta.get("status").and_then(|v| v.as_str()) == Some("ok") {
@@ -1726,9 +1770,22 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         }
     }
 
+    let hook_changed_transcript = transcript_raw != pre_hook_transcript
+        && output_hooks_meta.get("status").and_then(|v| v.as_str()) != Some("skipped");
+
     let t_render = Instant::now();
     let transcript_annotated =
         inject_annotation_markers(&transcript_raw, &shots, &clips, audio_duration);
+    let pre_hook_annotated = if hook_changed_transcript {
+        Some(inject_annotation_markers(
+            &pre_hook_transcript,
+            &shots,
+            &clips,
+            audio_duration,
+        ))
+    } else {
+        None
+    };
     let note_md = build_note(
         &state,
         &ended_iso,
@@ -1746,6 +1803,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         audio_duration,
         &transcription_meta,
         &transcript_annotated,
+        pre_hook_annotated.as_deref(),
         &note_md,
         &shots,
         &clips,
@@ -1776,6 +1834,16 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             )
         })?;
         write_note_md_ms = elapsed_ms(t_write_note_md);
+
+        // Persist the pre-hook transcript so HTML regeneration can show the
+        // original alongside the hooked output. Remove any stale copy when the
+        // hooks did not change anything this run.
+        let original_path = session_dir.join("transcript.original.txt");
+        if hook_changed_transcript {
+            let _ = fs::write(&original_path, format!("{}\n", pre_hook_transcript.trim()));
+        } else {
+            let _ = fs::remove_file(&original_path);
+        }
 
         let t_write_note_html = Instant::now();
         fs::write(&html_path, html_body).map_err(|e| {
@@ -1895,10 +1963,12 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         play_event_sound("stop", cli);
     }
 
+    let output_hooks_summary =
+        format_output_hooks_summary(&output_hooks_meta, pre_hook_chars, transcript_raw.chars().count());
     print_out(
         cli,
         format!(
-            "Stopped session {}\nsession_dir: {}\nscreenshots_moved: {}\nscreenshots_total: {}\nclipboard_captures: {}\nnote: {}\nhtml: {}\nstop_ms: {}\nstop_phase_ms: transcribe={} stop_recorder={} move_screenshots={} render={} write={}",
+            "Stopped session {}\nsession_dir: {}\nscreenshots_moved: {}\nscreenshots_total: {}\nclipboard_captures: {}\nnote: {}\nhtml: {}\n{}\nstop_ms: {}\nstop_phase_ms: transcribe={} stop_recorder={} move_screenshots={} render={} write={}",
             state.session_id,
             session_dir.display(),
             moved_count,
@@ -1906,6 +1976,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             clips.len(),
             note_path.display(),
             html_path.display(),
+            output_hooks_summary,
             round3(stop_total_ms),
             round3(transcribe_ms),
             round3(stop_recorder_ms),

@@ -329,6 +329,25 @@ Notes:
 - Hook results and timing appear in `transcription.hooks` (JSON output) and in
   the perf log as `output_hooks_ms`.
 
+### Inspecting and reviewing hooks
+
+Run `riff hooks` to print the currently configured output-hook chain plus any
+custom transcribe/post-transcribe commands (reads the effective config from the
+environment and `~/.riffrc`/JSON defaults):
+
+```bash
+riff hooks          # human-readable
+riff hooks --json   # machine-readable
+```
+
+`riff stop`/`riff toggle` now print an `output_hooks:` summary line reporting how
+many hooks ran, their status, and the character count before/after the chain.
+
+When the hooks change the transcript, the session HTML adds an **Output hooks**
+panel listing the hooks that ran and showing the **original (pre-hook)**
+transcript alongside the final (post-hook) text, so you can see exactly what the
+chain rewrote.
+
 ### Writing your own hook
 
 A hook is any executable that reads/rewrites the transcript file (`$1`) and may
@@ -549,6 +568,13 @@ riff loud      # writes RIFF_BEEP=1 to ~/.riffrc (or RIFF_RC_FILE)
 
 ```bash
 riff status
+```
+
+### Hooks (show configured output/transcription commands)
+
+```bash
+riff hooks          # human-readable
+riff hooks --json   # machine-readable
 ```
 
 ### Perf (startup/shutdown timing summary)

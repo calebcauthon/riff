@@ -1862,6 +1862,63 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
     Ok(0)
 }
 
+fn cmd_hooks(cli: &Cli) -> Result<i32, AppError> {
+    let hooks: Vec<String> = env::var("RIFF_HOOKS")
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let transcribe_cmd = env::var("RIFF_TRANSCRIBE_CMD")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let post_transcribe_cmd = env::var("RIFF_POST_TRANSCRIBE_CMD")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if hooks.is_empty() {
+        print_out(cli, "Output hooks (RIFF_HOOKS): none configured");
+    } else {
+        print_out(
+            cli,
+            format!("Output hooks (RIFF_HOOKS): {} configured", hooks.len()),
+        );
+        for (idx, hook) in hooks.iter().enumerate() {
+            print_out(cli, format!("  {}. {}", idx + 1, hook));
+        }
+    }
+    print_out(
+        cli,
+        format!(
+            "Custom transcribe command (RIFF_TRANSCRIBE_CMD): {}",
+            transcribe_cmd.as_deref().unwrap_or("<not set>")
+        ),
+    );
+    print_out(
+        cli,
+        format!(
+            "Post-transcribe command (RIFF_POST_TRANSCRIBE_CMD): {}",
+            post_transcribe_cmd.as_deref().unwrap_or("<not set>")
+        ),
+    );
+
+    emit_json(
+        cli,
+        &json!({
+            "ok": true,
+            "action": "hooks",
+            "output_hooks": hooks,
+            "output_hooks_count": hooks.len(),
+            "transcribe_cmd": transcribe_cmd,
+            "post_transcribe_cmd": post_transcribe_cmd,
+        }),
+    );
+
+    Ok(0)
+}
+
 fn format_hms_compact(seconds: f64) -> String {
     let sec = seconds.max(0.0).round() as i64;
     let h = sec / 3600;
@@ -2501,6 +2558,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Silence => cmd_silence(cli),
         Commands::Loud => cmd_loud(cli),
         Commands::Status => cmd_status(cli),
+        Commands::Hooks => cmd_hooks(cli),
         Commands::Perf(args) => cmd_perf(cli, args),
         Commands::List(args) => cmd_list(cli, args),
         Commands::Copy(args) => cmd_copy(cli, args),
