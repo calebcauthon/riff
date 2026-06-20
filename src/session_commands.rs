@@ -1478,6 +1478,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let effective_stop_args = StopArgs {
         no_stop_hooks: args.no_stop_hooks,
         no_hooks: args.no_hooks,
+        with_post_hook: if stop_hooks_disabled {
+            Vec::new()
+        } else {
+            args.with_post_hook.clone()
+        },
         transcribe_cmd: if stop_hooks_disabled {
             None
         } else {

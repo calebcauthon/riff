@@ -319,6 +319,30 @@ skip them for a single run, pass `--no-hooks`:
 riff stop --no-hooks      # transcribe + post-transcribe still run, hooks don't
 ```
 
+### Ad-hoc hooks on the command line
+
+Add extra output hooks for a single run with `--with-post-hook`. It is
+repeatable, so you can chain several in one command; they run in order, after
+the configured `RIFF_HOOKS` chain:
+
+```bash
+riff stop \
+  --with-post-hook ~/hooks/remove_ums.sh \
+  --with-post-hook ~/hooks/capitalize.sh
+```
+
+A bare script path automatically receives the transcript (`$1`) and metadata
+(`$2`) temp files. To pass a full inline command, reference the paths yourself
+and they are used as-is:
+
+```bash
+riff stop --with-post-hook "perl -0777 -i -pe 's/\\bum\\b//gi' \"\$1\""
+```
+
+`--with-post-hook` still runs alongside `--no-hooks` (which only disables the
+configured `RIFF_HOOKS` chain), but is suppressed by `--no-stop-hooks` (which
+disables the whole pipeline).
+
 `--no-stop-hooks` also skips them (it disables the entire stop-hook pipeline:
 custom transcription, post-transcribe, and output hooks).
 
@@ -507,6 +531,7 @@ It does **not** send output to the focused app.
 Flags:
 - `--no-stop-hooks` ignore stop-time hook commands and use the built-in stop pipeline
 - `--no-hooks` skip just the RIFF_HOOKS output-hook chain for this run
+- `--with-post-hook <cmd>` add an ad-hoc output hook for this run (repeatable; runs after RIFF_HOOKS)
 - `--python-bin <path>` override python interpreter
 - `--parakeet-script <path>` override script path
 - `--parakeet-model <name>` override model name

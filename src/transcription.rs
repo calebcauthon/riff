@@ -1032,6 +1032,19 @@ pub(crate) fn run_post_transcribe_command(
 /// After each hook runs, the transcript temp file is read back and becomes the
 /// input for the next hook. The final transcript is written to
 /// `<session_dir>/transcript.txt`.
+/// Normalize an ad-hoc `--with-post-hook` value into a shell command for the
+/// hook runner. A bare script path (no shell variable reference) gets `"$@"`
+/// appended so the transcript (`$1`) and metadata (`$2`) temp files are
+/// forwarded to it; a value that already references `$1`/`$2`/`$@` is used as-is.
+fn normalize_cli_hook(raw: &str) -> String {
+    let hook = raw.trim();
+    if hook.contains('$') {
+        hook.to_string()
+    } else {
+        format!(r#"{hook} "$@""#)
+    }
+}
+
 pub(crate) fn run_output_hooks(
     transcript: &str,
     metadata: &Value,
@@ -1039,24 +1052,43 @@ pub(crate) fn run_output_hooks(
     stop_args: &StopArgs,
     cli: &Cli,
 ) -> (String, Value) {
-    if stop_args.no_stop_hooks || stop_args.no_hooks {
+    if stop_args.no_stop_hooks {
         return (
             transcript.to_string(),
             json!({"status": "skipped", "reason": "disabled_by_flag"}),
         );
     }
 
-    let hooks: Vec<String> = env::var("RIFF_HOOKS")
-        .unwrap_or_default()
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
+    // The configured RIFF_HOOKS chain runs first (unless --no-hooks), followed
+    // by any ad-hoc --with-post-hook hooks passed on the command line.
+    let mut hooks: Vec<String> = if stop_args.no_hooks {
+        Vec::new()
+    } else {
+        env::var("RIFF_HOOKS")
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    };
+    hooks.extend(
+        stop_args
+            .with_post_hook
+            .iter()
+            .map(|h| h.trim())
+            .filter(|h| !h.is_empty())
+            .map(normalize_cli_hook),
+    );
 
     if hooks.is_empty() {
+        let reason = if stop_args.no_hooks {
+            "disabled_by_flag"
+        } else {
+            "not_configured"
+        };
         return (
             transcript.to_string(),
-            json!({"status": "skipped", "reason": "not_configured"}),
+            json!({"status": "skipped", "reason": reason}),
         );
     }
 
@@ -1183,6 +1215,7 @@ mod hook_tests {
         StopArgs {
             no_stop_hooks: false,
             no_hooks: false,
+            with_post_hook: Vec::new(),
             transcribe_cmd: None,
             post_transcribe_cmd: None,
             python_bin: None,
@@ -1295,5 +1328,77 @@ mod hook_tests {
         assert_eq!(out, "um unchanged um");
         assert_eq!(meta["status"], "skipped");
         assert_eq!(meta["reason"], "disabled_by_flag");
+    }
+
+    #[test]
+    fn normalize_cli_hook_appends_args_for_bare_path() {
+        assert_eq!(normalize_cli_hook("/tmp/hook.sh"), r#"/tmp/hook.sh "$@""#);
+        // A value that references the temp paths is left untouched.
+        assert_eq!(
+            normalize_cli_hook(r#"perl -i -pe 's/a/b/' "$1""#),
+            r#"perl -i -pe 's/a/b/' "$1""#
+        );
+    }
+
+    #[test]
+    fn cli_post_hooks_run_after_env_hooks() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let session_dir = tempfile::tempdir().expect("session dir");
+        let prev = env::var_os("RIFF_HOOKS");
+        // Env hook lowercases; CLI hook then uppercases. Order proves chaining.
+        env::set_var("RIFF_HOOKS", r#"tr '[:upper:]' '[:lower:]' < "$1" > "$1.t" && mv "$1.t" "$1""#);
+
+        let mut args = default_stop_args();
+        args.with_post_hook = vec![
+            r#"tr '[:lower:]' '[:upper:]' < "$1" > "$1.t" && mv "$1.t" "$1""#.to_string(),
+        ];
+
+        let (out, meta) = run_output_hooks(
+            "Hello There",
+            &json!({}),
+            session_dir.path(),
+            &args,
+            &test_cli(),
+        );
+
+        match prev {
+            Some(v) => env::set_var("RIFF_HOOKS", v),
+            None => env::remove_var("RIFF_HOOKS"),
+        }
+
+        assert_eq!(meta["status"], "ok");
+        assert_eq!(meta["count"], 2);
+        assert_eq!(out, "HELLO THERE");
+    }
+
+    #[test]
+    fn cli_post_hook_runs_even_with_no_hooks_flag() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let session_dir = tempfile::tempdir().expect("session dir");
+        let prev = env::var_os("RIFF_HOOKS");
+        env::set_var("RIFF_HOOKS", r#"perl -0777 -i -pe 's/\bum\b//gi' "$1""#);
+
+        let mut args = default_stop_args();
+        args.no_hooks = true; // disables the env chain
+        args.with_post_hook =
+            vec![r#"perl -0777 -i -pe 's/there/world/gi' "$1""#.to_string()];
+
+        let (out, meta) = run_output_hooks(
+            "um hello there",
+            &json!({}),
+            session_dir.path(),
+            &args,
+            &test_cli(),
+        );
+
+        match prev {
+            Some(v) => env::set_var("RIFF_HOOKS", v),
+            None => env::remove_var("RIFF_HOOKS"),
+        }
+
+        // env hook skipped (um remains), CLI hook applied (there -> world)
+        assert_eq!(meta["status"], "ok");
+        assert_eq!(meta["count"], 1);
+        assert_eq!(out, "um hello world");
     }
 }

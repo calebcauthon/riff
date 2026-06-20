@@ -104,6 +104,12 @@ pub struct StopArgs {
     #[arg(long)]
     pub no_hooks: bool,
 
+    /// Add an ad-hoc output hook for this run (script path or shell command).
+    /// Repeatable; hooks run in order, after the configured RIFF_HOOKS chain.
+    /// A bare path is forwarded the transcript ("$1") and metadata ("$2") files.
+    #[arg(long = "with-post-hook", value_name = "CMD")]
+    pub with_post_hook: Vec<String>,
+
     #[arg(long)]
     pub transcribe_cmd: Option<String>,
 
@@ -137,6 +143,10 @@ pub struct ToggleArgs {
     /// Used when active (stop path): skip the RIFF_HOOKS output-hook chain
     #[arg(long)]
     pub no_hooks: bool,
+
+    /// Used when active (stop path): add an ad-hoc output hook (repeatable)
+    #[arg(long = "with-post-hook", value_name = "CMD")]
+    pub with_post_hook: Vec<String>,
 
     /// Used when active (stop path): custom transcription command template
     #[arg(long)]

@@ -2388,6 +2388,7 @@ fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
         let stop_args = StopArgs {
             no_stop_hooks: args.no_stop_hooks,
             no_hooks: args.no_hooks,
+            with_post_hook: args.with_post_hook.clone(),
             transcribe_cmd: args.transcribe_cmd.clone(),
             post_transcribe_cmd: args.post_transcribe_cmd.clone(),
             python_bin: args.python_bin.clone(),
@@ -2476,6 +2477,7 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
     let stop_args = StopArgs {
         no_stop_hooks: false,
         no_hooks: false,
+        with_post_hook: Vec::new(),
         transcribe_cmd: None,
         post_transcribe_cmd: None,
         python_bin: None,
