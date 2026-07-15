@@ -863,7 +863,7 @@ fn stop_without_chunking_skips_stop_flush_chunk_event() {
 }
 
 #[test]
-fn stop_json_reports_failure_when_transcription_skipped() {
+fn stop_json_reports_failure_when_transcription_not_ok() {
     let td = tempdir().expect("tempdir");
     let fake_bin = td.path().join("fake-bin");
     install_fake_tools(&fake_bin);
@@ -879,7 +879,8 @@ fn stop_json_reports_failure_when_transcription_skipped() {
         .assert()
         .success();
 
-    // No --transcribe-cmd and no parakeet config => transcription skipped.
+    // No --transcribe-cmd: either skipped (no script) or error (bundled script
+    // present but deps missing). Either way stop must not report success.
     let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
         .args(["--json", "--quiet", "stop"])
         .output()
@@ -887,22 +888,22 @@ fn stop_json_reports_failure_when_transcription_skipped() {
 
     assert!(
         !out.status.success(),
-        "stop should exit non-zero when transcription is skipped; stderr={}",
+        "stop should exit non-zero when transcription is not ok; stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     let payload: Value = serde_json::from_slice(&out.stdout).expect("parse stop json");
     assert_eq!(
         payload.get("ok").and_then(|v| v.as_bool()),
         Some(false),
-        "stop --json must set ok=false when transcription skipped: {payload}"
+        "stop --json must set ok=false when transcription is not ok: {payload}"
     );
-    assert_eq!(
-        payload
-            .get("transcription")
-            .and_then(|v| v.get("status"))
-            .and_then(|v| v.as_str()),
-        Some("skipped"),
-        "expected skipped transcription status: {payload}"
+    let status = payload
+        .get("transcription")
+        .and_then(|v| v.get("status"))
+        .and_then(|v| v.as_str());
+    assert!(
+        matches!(status, Some("skipped") | Some("error") | Some("missing_audio")),
+        "expected non-ok transcription status, got {status:?}: {payload}"
     );
 }
 
@@ -1147,8 +1148,11 @@ fn stop_no_stop_hooks_disables_stop_hooks() {
                 hook_marker.display()
             ),
         ])
+        // --no-stop-hooks clears --transcribe-cmd, so transcription is not ok and
+        // stop correctly exits non-zero. Still verify hooks were disabled.
         .assert()
-        .success()
+        .failure()
+        .code(1)
         .stderr(predicates::str::contains("no_stop_hooks=true"))
         .stderr(predicates::str::contains("transcribe_cmd=disabled"))
         .stderr(predicates::str::contains("post_transcribe_cmd=disabled"))

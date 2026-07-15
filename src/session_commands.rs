@@ -39,6 +39,13 @@ fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
+/// dry_run intentionally skips transcription; treat that as success.
+/// skipped/error/missing_audio/empty/etc. must fail stop so automation does
+/// not treat a missing transcript as a successful recording.
+fn transcription_status_is_success(status: &str) -> bool {
+    matches!(status, "ok" | "dry_run")
+}
+
 fn command_source(cli_value: Option<&str>, env_key: &str) -> &'static str {
     if cli_value.map(str::trim).filter(|s| !s.is_empty()).is_some() {
         "cli"
@@ -1995,11 +2002,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         .get("status")
         .and_then(|s| s.as_str())
         .unwrap_or("unknown");
-    // dry_run intentionally skips transcription; treat that as success.
-    // skipped/error/missing_audio/empty/etc. must fail the stop command so
-    // automation does not treat a missing transcript as a successful recording.
-    let transcription_ok =
-        matches!(transcription_status, "ok" | "dry_run");
+    let transcription_ok = transcription_status_is_success(transcription_status);
 
     if !transcription_ok {
         let reason = transcription_meta
@@ -2064,7 +2067,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_manual_chunk_text;
+    use super::{merge_manual_chunk_text, transcription_status_is_success};
 
     #[test]
     fn merge_manual_chunk_text_uses_double_newline_separator() {
@@ -2076,5 +2079,16 @@ mod tests {
     fn merge_manual_chunk_text_trims_outer_whitespace() {
         let merged = merge_manual_chunk_text("  first  ", "  second  ");
         assert_eq!(merged, "first\n\nsecond");
+    }
+
+    #[test]
+    fn transcription_status_success_only_for_ok_and_dry_run() {
+        assert!(transcription_status_is_success("ok"));
+        assert!(transcription_status_is_success("dry_run"));
+        assert!(!transcription_status_is_success("skipped"));
+        assert!(!transcription_status_is_success("error"));
+        assert!(!transcription_status_is_success("missing_audio"));
+        assert!(!transcription_status_is_success("empty"));
+        assert!(!transcription_status_is_success("unknown"));
     }
 }
