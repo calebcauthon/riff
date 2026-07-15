@@ -1991,23 +1991,32 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         ),
     );
 
-    if transcription_meta.get("status").and_then(|s| s.as_str()) != Some("ok") {
-        let status = transcription_meta
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+    let transcription_status = transcription_meta
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    // dry_run intentionally skips transcription; treat that as success.
+    // skipped/error/missing_audio/empty/etc. must fail the stop command so
+    // automation does not treat a missing transcript as a successful recording.
+    let transcription_ok =
+        matches!(transcription_status, "ok" | "dry_run");
+
+    if !transcription_ok {
         let reason = transcription_meta
             .get("reason")
             .and_then(|v| v.as_str())
             .or_else(|| transcription_meta.get("stderr").and_then(|v| v.as_str()))
             .unwrap_or("");
-        print_out(cli, format!("transcription_status: {status} ({reason})"));
+        print_out(
+            cli,
+            format!("transcription_status: {transcription_status} ({reason})"),
+        );
     }
 
     emit_json(
         cli,
         &json!({
-            "ok": true,
+            "ok": transcription_ok,
             "action": "stop",
             "session_id": state.session_id,
             "session_dir": session_dir,
@@ -2050,7 +2059,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         }),
     );
 
-    Ok(0)
+    Ok(if transcription_ok { 0 } else { 1 })
 }
 
 #[cfg(test)]
