@@ -13,7 +13,7 @@ ROOT_DIR="$(cd -P "$SCRIPT_DIR/.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/runtime/python"
 SOURCE_PYTHON=""
 PYTHON_VERSION="3.12"
-PACKAGES="nemo_toolkit[asr] torch soundfile"
+REQUIREMENTS_FILE="$ROOT_DIR/scripts/parakeet-requirements.txt"
 SKIP_INSTALL=0
 ALLOW_NONRELOCATABLE=0
 
@@ -28,7 +28,7 @@ Options:
   --runtime-dir <path>      Target runtime dir (default: $ROOT_DIR/runtime/python)
   --source-python <path>    Source python executable to copy from
   --python-version <ver>    Source version to resolve when --source-python is omitted (default: 3.12)
-  --packages "<specs>"      Pip specs to install (default: "$PACKAGES")
+  --requirements <path>     Requirements file to install (default: $REQUIREMENTS_FILE)
   --skip-install            Copy runtime only; skip pip installs
   --allow-nonrelocatable    Allow source runtimes that keep absolute sys.prefix paths
   -h, --help                Show this help
@@ -53,8 +53,8 @@ while [[ $# -gt 0 ]]; do
       PYTHON_VERSION="${2:-}"
       shift 2
       ;;
-    --packages)
-      PACKAGES="${2:-}"
+    --requirements)
+      REQUIREMENTS_FILE="${2:-}"
       shift 2
       ;;
     --skip-install)
@@ -152,7 +152,11 @@ fi
 
 if [[ "$SKIP_INSTALL" -eq 0 ]]; then
   PY="$TMP_DIR/bin/python"
-  echo "[riff] Installing runtime packages: $PACKAGES"
+  if [[ ! -f "$REQUIREMENTS_FILE" ]]; then
+    echo "Requirements file not found: $REQUIREMENTS_FILE" >&2
+    exit 1
+  fi
+  echo "[riff] Installing runtime packages from: $REQUIREMENTS_FILE"
 
   if ! "$PY" -m pip --version >/dev/null 2>&1; then
     "$PY" -m ensurepip --default-pip || true
@@ -162,8 +166,8 @@ if [[ "$SKIP_INSTALL" -eq 0 ]]; then
     "$PY" -m pip install --upgrade pip
   fi
 
-  if ! "$PY" -m pip install --break-system-packages $PACKAGES; then
-    "$PY" -m pip install $PACKAGES
+  if ! "$PY" -m pip install --break-system-packages -r "$REQUIREMENTS_FILE"; then
+    "$PY" -m pip install -r "$REQUIREMENTS_FILE"
   fi
 fi
 

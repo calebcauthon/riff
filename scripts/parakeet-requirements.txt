@@ -1,0 +1,5 @@
+# Pinned top-level transcription dependencies for `riff setup`.
+# Regenerate and audit this file when changing the Parakeet runtime.
+nemo_toolkit[asr]==2.4.0
+torch==2.7.1
+soundfile==0.13.1

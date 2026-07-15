@@ -20,6 +20,7 @@ mod paths;
 mod reporting;
 mod screenshots;
 mod session_commands;
+mod setup;
 mod shot_modules;
 mod transcription;
 
@@ -39,6 +40,7 @@ use crate::paths::{
 };
 use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
 use crate::session_commands::{cmd_chunk, cmd_pause, cmd_shot, cmd_start, cmd_stop, cmd_unpause};
+use crate::setup::{cmd_doctor, cmd_setup};
 use crate::transcription::{
     default_parakeet_script, default_sound_picker_script, ensure_web_server,
     resolve_parakeet_model, resolve_parakeet_script, resolve_python_bin, touch_web_server,
@@ -2556,6 +2558,8 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Pause => cmd_pause(cli),
         Commands::Unpause => cmd_unpause(cli),
         Commands::TogglePause => cmd_toggle_pause(cli),
+        Commands::Setup(args) => cmd_setup(cli, args),
+        Commands::Doctor(args) => cmd_doctor(cli, args),
         Commands::Sounds => cmd_sounds(cli),
         Commands::Silence => cmd_silence(cli),
         Commands::Loud => cmd_loud(cli),

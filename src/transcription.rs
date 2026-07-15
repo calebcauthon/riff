@@ -5,6 +5,7 @@ use crate::paths::{
     parakeet_server_log_file, parakeet_server_pid_file, root_dir, web_server_log_file,
     web_server_pid_file,
 };
+use crate::setup::default_user_runtime_dir;
 use crate::{
     command_exists, fill_template, fill_template_with_transcript, print_verbose, process_is_alive,
     read_pid_file, round3, shell_escape, write_pid_file,
@@ -39,12 +40,8 @@ fn attach_perf(mut meta: Value, mut perf: Map<String, Value>, started: Instant) 
     meta
 }
 
-fn search_roots() -> Vec<PathBuf> {
+fn executable_ancestor_roots() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
-
-    if let Ok(cwd) = env::current_dir() {
-        roots.push(cwd);
-    }
 
     if let Ok(exe) = env::current_exe() {
         let mut parent = exe.parent();
@@ -64,8 +61,33 @@ fn search_roots() -> Vec<PathBuf> {
         .collect()
 }
 
+pub(crate) fn resource_dir() -> Option<PathBuf> {
+    if let Some(dir) = env::var_os("RIFF_RESOURCE_DIR").map(PathBuf::from) {
+        if dir.exists() {
+            return Some(dir);
+        }
+    }
+
+    for root in executable_ancestor_roots() {
+        for candidate in [&root, &root.join("libexec")] {
+            if candidate.join("scripts").exists() {
+                return Some(candidate.to_path_buf());
+            }
+        }
+    }
+
+    None
+}
+
 fn first_existing_relative(paths: &[&str]) -> Option<PathBuf> {
-    for root in search_roots() {
+    let mut roots = Vec::new();
+    if let Some(dir) = resource_dir() {
+        roots.push(dir);
+    }
+    roots.extend(executable_ancestor_roots());
+
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for root in roots.into_iter().filter(|p| seen.insert(p.clone())) {
         for rel in paths {
             let candidate = root.join(rel);
             if candidate.exists() {
@@ -77,6 +99,14 @@ fn first_existing_relative(paths: &[&str]) -> Option<PathBuf> {
 }
 
 fn default_local_python_bin() -> Option<PathBuf> {
+    let setup_runtime = default_user_runtime_dir();
+    for rel in ["bin/python3", "bin/python"] {
+        let candidate = setup_runtime.join(rel);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
     first_existing_relative(&[
         "runtime/python/bin/python3",
         "runtime/python/bin/python",
@@ -161,7 +191,7 @@ pub(crate) fn parakeet_server_enabled() -> bool {
         .unwrap_or(true)
 }
 
-fn parakeet_server_base_url() -> String {
+pub(crate) fn parakeet_server_base_url() -> String {
     env::var("RIFF_PARAKEET_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8765".to_string())
 }
 
@@ -181,7 +211,7 @@ fn parakeet_server_transcribe_url(base: &str) -> String {
     format!("{}/transcribe", base.trim_end_matches('/'))
 }
 
-fn check_parakeet_server_health(base_url: &str) -> bool {
+pub(crate) fn check_parakeet_server_health(base_url: &str) -> bool {
     if !command_exists("curl") {
         return false;
     }
@@ -350,7 +380,7 @@ fn web_server_idle_timeout_sec() -> u64 {
         .unwrap_or(1800)
 }
 
-fn default_web_server_script() -> Option<PathBuf> {
+pub(crate) fn default_web_server_script() -> Option<PathBuf> {
     first_existing_relative(&["scripts/riff_web_server.py"])
 }
 
@@ -366,7 +396,7 @@ fn web_server_touch_url(base: &str) -> String {
     format!("{}/touch", base.trim_end_matches('/'))
 }
 
-fn check_web_server_health(base_url: &str) -> bool {
+pub(crate) fn check_web_server_health(base_url: &str) -> bool {
     if !command_exists("curl") {
         return false;
     }
@@ -1346,12 +1376,14 @@ mod hook_tests {
         let session_dir = tempfile::tempdir().expect("session dir");
         let prev = env::var_os("RIFF_HOOKS");
         // Env hook lowercases; CLI hook then uppercases. Order proves chaining.
-        env::set_var("RIFF_HOOKS", r#"tr '[:upper:]' '[:lower:]' < "$1" > "$1.t" && mv "$1.t" "$1""#);
+        env::set_var(
+            "RIFF_HOOKS",
+            r#"tr '[:upper:]' '[:lower:]' < "$1" > "$1.t" && mv "$1.t" "$1""#,
+        );
 
         let mut args = default_stop_args();
-        args.with_post_hook = vec![
-            r#"tr '[:lower:]' '[:upper:]' < "$1" > "$1.t" && mv "$1.t" "$1""#.to_string(),
-        ];
+        args.with_post_hook =
+            vec![r#"tr '[:lower:]' '[:upper:]' < "$1" > "$1.t" && mv "$1.t" "$1""#.to_string()];
 
         let (out, meta) = run_output_hooks(
             "Hello There",
@@ -1380,8 +1412,7 @@ mod hook_tests {
 
         let mut args = default_stop_args();
         args.no_hooks = true; // disables the env chain
-        args.with_post_hook =
-            vec![r#"perl -0777 -i -pe 's/there/world/gi' "$1""#.to_string()];
+        args.with_post_hook = vec![r#"perl -0777 -i -pe 's/there/world/gi' "$1""#.to_string()];
 
         let (out, meta) = run_output_hooks(
             "um hello there",

@@ -83,6 +83,7 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--serve", action="store_true", help="Run persistent HTTP server")
     p.add_argument("--watch-audio", action="store_true", help="Run incremental silence-aware chunking")
+    p.add_argument("--download-model", action="store_true", help="Download/load the configured model and exit")
     p.add_argument("--host", default="127.0.0.1", help="Server host (serve mode)")
     p.add_argument("--port", type=int, default=8765, help="Server port (serve mode)")
     p.add_argument("--events-path", help="events.jsonl path (watch mode)")
@@ -155,7 +156,7 @@ def load_model(model_name: str, device: str, verbose: bool, quiet: bool):
         raise AppError(
             "Failed to import Parakeet dependencies. "
             "This is usually a Python/version dependency mismatch. "
-            "Install with: pip install nemo_toolkit[asr] torch soundfile\n"
+            "Install with: pip install -r scripts/parakeet-requirements.txt\n"
             f"Import error: {type(e).__name__}: {e}",
             code=20,
         ) from e
@@ -165,8 +166,19 @@ def load_model(model_name: str, device: str, verbose: bool, quiet: bool):
 
     t0 = time.time()
     vout(f"Loading model '{model_name}' on {map_location}", verbose, quiet)
+    revision = os.environ.get("RIFF_PARAKEET_MODEL_REVISION", "").strip()
     try:
-        model = ASRModel.from_pretrained(model_name=model_name, map_location=map_location)
+        if revision:
+            try:
+                model = ASRModel.from_pretrained(
+                    model_name=model_name,
+                    map_location=map_location,
+                    revision=revision,
+                )
+            except TypeError:
+                model = ASRModel.from_pretrained(model_name=model_name, map_location=map_location)
+        else:
+            model = ASRModel.from_pretrained(model_name=model_name, map_location=map_location)
     except Exception as e:
         raise AppError(f"Failed to load Parakeet model '{model_name}': {e}", code=21) from e
 
@@ -697,11 +709,19 @@ def run_server(args: argparse.Namespace) -> int:
     return 0
 
 
+def download_model(args: argparse.Namespace) -> int:
+    _, actual_device = load_model(args.model, args.device, args.verbose, args.quiet)
+    out(f"Model ready: {args.model} (device={actual_device})", args.quiet)
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     try:
         if args.watch_audio:
             return run_watch_audio(args)
+        if args.download_model:
+            return download_model(args)
         if args.serve:
             return run_server(args)
         return run_one_shot(args)

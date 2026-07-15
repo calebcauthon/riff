@@ -52,6 +52,11 @@ pub enum Commands {
     /// Toggle transcription pause state (pause if listening, unpause if paused)
     TogglePause,
 
+    /// Provision riff's private transcription environment
+    Setup(SetupArgs),
+    /// Check installation, transcription, permissions, and helper health
+    Doctor(DoctorArgs),
+
     /// List recent sessions
     List(ListArgs),
     /// Show note markdown for a session id
@@ -178,6 +183,32 @@ pub struct LiveArgs {
     /// Print one snapshot and exit
     #[arg(long, default_value_t = false)]
     pub once: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct SetupArgs {
+    /// Python 3.12 interpreter used to create the private runtime
+    #[arg(long)]
+    pub python: Option<String>,
+
+    /// Private runtime directory; defaults to ~/Library/Application Support/riff/runtime/python
+    #[arg(long)]
+    pub runtime_dir: Option<PathBuf>,
+
+    /// Skip Python package installation
+    #[arg(long)]
+    pub skip_packages: bool,
+
+    /// Skip model pre-download
+    #[arg(long)]
+    pub skip_model: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct DoctorArgs {
+    /// Attempt slower checks such as importing Python packages
+    #[arg(long)]
+    pub deep: bool,
 }
 
 #[derive(Args, Debug)]

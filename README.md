@@ -59,7 +59,14 @@ Tap/install from GitHub:
 brew install calebcauthon/riff/riff
 ```
 
-This uses the formula at `Formula/riff.rb`, builds from source with Cargo, and installs the native `riff` binary.
+This uses the formula at `Formula/riff.rb`, builds from source with Cargo, and installs the native `riff` binary, helper scripts, `ffmpeg`, and Python 3.12.
+
+Provision the private transcription environment once:
+
+```bash
+riff setup
+riff doctor
+```
 
 Upgrade later:
 
@@ -153,9 +160,9 @@ ln -sf "$PWD/riff" ~/bin/riff
 ## Requirements
 
 - macOS
-- Rust/Cargo
+- Rust/Cargo for source builds
 - `ffmpeg` (+ optional `ffprobe`) in PATH
-- Python env for Parakeet transcription
+- Python 3.12 plus a private Parakeet runtime from `riff setup`
 
 Install ffmpeg:
 
@@ -173,7 +180,7 @@ Create a local venv and install dependencies (**use Python 3.12 preferred; 3.10-
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install nemo_toolkit[asr] torch soundfile
+pip install -r scripts/parakeet-requirements.txt
 ```
 
 If you only have Python 3.14 installed, install 3.12 first:
@@ -822,7 +829,7 @@ rm -rf .venv
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install nemo_toolkit[asr] torch soundfile
+pip install -r scripts/parakeet-requirements.txt
 ```
 
 For bundled runtime:

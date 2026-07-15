@@ -205,6 +205,14 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
             "toggle-pause",
             "Toggle transcription pause state (pause if listening, unpause if paused)",
         ),
+        (
+            "setup",
+            "Provision riff's private transcription environment",
+        ),
+        (
+            "doctor",
+            "Check installation, transcription, permissions, and helper health",
+        ),
         ("list", "List recent sessions"),
         ("show", "Show note markdown for a session id"),
         ("copy", "Print transcript for a recent session index"),
@@ -253,6 +261,8 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         "pause",
         "unpause",
         "toggle-pause",
+        "setup",
+        "doctor",
         "list",
         "show",
         "copy",
@@ -344,6 +354,57 @@ fn version_flag_reads_repo_version_file() {
         stdout.contains(&format!("riff {expected_version}")),
         "unexpected --version output: {stdout}"
     );
+}
+
+#[test]
+fn doctor_resolves_installed_resources_when_run_outside_repo() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+
+    let resource_dir = td.path().join("installed").join("libexec");
+    let scripts_dir = resource_dir.join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    write_executable(
+        &scripts_dir.join("parakeet_transcribe.py"),
+        "#!/usr/bin/env python3\n",
+    );
+    write_executable(
+        &scripts_dir.join("riff_web_server.py"),
+        "#!/usr/bin/env python3\n",
+    );
+    write_executable(
+        &scripts_dir.join("pick_riff_sounds.sh"),
+        "#!/usr/bin/env bash\n",
+    );
+    fs::write(
+        scripts_dir.join("parakeet-requirements.txt"),
+        "nemo_toolkit[asr]==2.4.0\ntorch==2.7.1\nsoundfile==0.13.1\n",
+    )
+    .expect("write requirements");
+
+    let runtime_dir = td.path().join("runtime").join("python");
+    fs::create_dir_all(runtime_dir.join("bin")).expect("create runtime bin");
+    write_executable(
+        &runtime_dir.join("bin").join("python"),
+        "#!/usr/bin/env bash\nexit 0\n",
+    );
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .current_dir(env::temp_dir())
+        .env("RIFF_RESOURCE_DIR", &resource_dir)
+        .env("RIFF_RUNTIME_DIR", &runtime_dir)
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(
+            predicates::str::contains("parakeet_script").and(predicates::str::contains(
+                scripts_dir
+                    .join("parakeet_transcribe.py")
+                    .display()
+                    .to_string(),
+            )),
+        );
 }
 
 #[test]

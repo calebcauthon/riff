@@ -14,7 +14,7 @@ OUTPUT_DIR="$ROOT_DIR/dist"
 ARTIFACT_NAME=""
 PYTHON_VERSION="3.12"
 SOURCE_PYTHON=""
-RUNTIME_PACKAGES="nemo_toolkit[asr] torch soundfile"
+REQUIREMENTS_FILE="$ROOT_DIR/scripts/parakeet-requirements.txt"
 SKIP_RUST_BUILD=0
 SKIP_RUNTIME_BUILD=0
 ALLOW_NONRELOCATABLE=0
@@ -34,7 +34,7 @@ Options:
   --skip-runtime-build        Reuse existing runtime/python if present
   --python-version <ver>      Python version for runtime builder (default: 3.12)
   --source-python <path>      Source python executable for runtime builder
-  --runtime-packages "<spec>" Pip packages to install in bundled runtime
+  --requirements <path>       Requirements file to install in bundled runtime
   --allow-nonrelocatable      Pass through to runtime builder (not recommended)
   --keep-staging              Keep temporary staging directory for inspection
   -h, --help                  Show this help
@@ -67,8 +67,8 @@ while [[ $# -gt 0 ]]; do
       SOURCE_PYTHON="${2:-}"
       shift 2
       ;;
-    --runtime-packages)
-      RUNTIME_PACKAGES="${2:-}"
+    --requirements)
+      REQUIREMENTS_FILE="${2:-}"
       shift 2
       ;;
     --allow-nonrelocatable)
@@ -108,7 +108,7 @@ if [[ "$SKIP_RUNTIME_BUILD" -eq 0 ]]; then
   RUNTIME_CMD=(
     "$ROOT_DIR/scripts/build_bundled_python_runtime.sh"
     --python-version "$PYTHON_VERSION"
-    --packages "$RUNTIME_PACKAGES"
+    --requirements "$REQUIREMENTS_FILE"
   )
   if [[ -n "$SOURCE_PYTHON" ]]; then
     RUNTIME_CMD+=(--source-python "$SOURCE_PYTHON")
