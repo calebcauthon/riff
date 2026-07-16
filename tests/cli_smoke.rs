@@ -55,10 +55,22 @@ if [[ "$*" == *"-list_devices true"* ]]; then
   echo "[0] Built-in Microphone"
   exit 0
 fi
+max_sec=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  if [[ "${args[$i]}" == "-t" ]]; then
+    max_sec="${args[$((i+1))]}"
+  fi
+done
 out="${@: -1}"
 mkdir -p "$(dirname "$out")"
 : > "$out"
 trap 'exit 0' INT TERM
+if [[ -n "$max_sec" ]]; then
+  # Cap can be fractional (e.g. 1.000); sleep accepts floats on macOS/Linux.
+  sleep "$max_sec"
+  exit 0
+fi
 while true; do sleep 1; done
 "#,
     );
@@ -873,12 +885,114 @@ fn status_reports_active_session_after_start() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Active session:"))
-        .stdout(predicates::str::contains("alive=true"));
+        .stdout(predicates::str::contains("alive=true"))
+        .stdout(predicates::str::contains("recording_max_sec: 120.000"));
 
     cmd_with_root_and_fake_path(td.path(), &fake_bin)
         .args(["stop", "--transcribe-cmd", "printf '' > {out_txt}"])
         .assert()
         .success();
+}
+
+#[test]
+fn start_max_sec_zero_disables_recording_cap() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "--json",
+            "--quiet",
+            "start",
+            "--max-sec",
+            "0",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .output()
+        .expect("run start --max-sec 0");
+
+    assert!(out.status.success(), "start should succeed");
+    let payload: Value =
+        serde_json::from_slice(&out.stdout).expect("start --json should return valid json");
+    assert!(
+        payload.get("recording_max_sec").unwrap_or(&Value::Null).is_null(),
+        "expected unlimited recording_max_sec, got {payload}"
+    );
+    assert!(
+        payload
+            .get("recording_limit_watcher_pid")
+            .unwrap_or(&Value::Null)
+            .is_null(),
+        "unlimited start should not spawn limit watcher: {payload}"
+    );
+
+    let active: Value = serde_json::from_str(
+        &fs::read_to_string(td.path().join("active_session.json")).expect("read active"),
+    )
+    .expect("parse active");
+    assert!(
+        active.get("recording_max_sec").unwrap_or(&Value::Null).is_null(),
+        "active state should store unlimited cap: {active}"
+    );
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args(["stop", "--transcribe-cmd", "printf '' > {out_txt}"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn recording_max_sec_auto_stops_session() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_TRANSCRIBE_CMD", "printf 'auto-stop\\n' > {out_txt}")
+        .args([
+            "start",
+            "--max-sec",
+            "1",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    let session_id = active_session_id(td.path());
+    let mut stopped = false;
+    for _ in 0..40 {
+        thread::sleep(Duration::from_millis(250));
+        if !td.path().join("active_session.json").exists() {
+            stopped = true;
+            break;
+        }
+    }
+    assert!(
+        stopped,
+        "session should auto-stop after recording max-sec is reached"
+    );
+
+    let note_path = td
+        .path()
+        .join("sessions")
+        .join(&session_id)
+        .join("note.md");
+    assert!(
+        note_path.exists(),
+        "auto-stop should finalize note.md for {session_id}"
+    );
+    let note = fs::read_to_string(&note_path).expect("read note");
+    assert!(
+        note.contains("auto-stop"),
+        "auto-stop transcript missing from note:\n{note}"
+    );
 }
 
 #[test]

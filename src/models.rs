@@ -18,6 +18,11 @@ pub struct SessionState {
     #[serde(default)]
     pub transcription_watcher_pid: Option<i32>,
     #[serde(default)]
+    pub recording_limit_watcher_pid: Option<i32>,
+    /// Hard cap on capture length in seconds (`None` = unlimited).
+    #[serde(default)]
+    pub recording_max_sec: Option<f64>,
+    #[serde(default)]
     pub transcription_cursor_sec: f64,
     #[serde(default)]
     pub transcription_paused: bool,

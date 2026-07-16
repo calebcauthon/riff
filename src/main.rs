@@ -26,7 +26,7 @@ mod transcription;
 
 use crate::cli::{
     Cli, Commands, HtmlArgs, LiveArgs, ScreenshotUseArgs, StartArgs, StopArgs, ToggleArgs,
-    WatchClipboardArgs,
+    WatchClipboardArgs, WatchRecordingLimitArgs,
 };
 use crate::error::{app_error, AppError};
 use crate::history::{
@@ -287,6 +287,16 @@ fn load_riff_json_defaults(original_env_keys: &HashSet<OsString>) {
                 maybe_set_default_env(original_env_keys, "RIFF_HOOKS", joined, true);
             }
         }
+        if let Some(recording_max_sec) = riff_obj.get("recording_max_sec") {
+            if let Some(rendered) = json_config_value_to_env_string(recording_max_sec) {
+                maybe_set_default_env(
+                    original_env_keys,
+                    "RIFF_RECORDING_MAX_SEC",
+                    rendered,
+                    true,
+                );
+            }
+        }
     }
 }
 
@@ -497,6 +507,85 @@ pub(crate) fn stop_clipboard_watcher(pid: i32, cli: &Cli) {
     print_verbose(cli, format!("Clipboard watcher pid={pid} sent SIGTERM."));
 }
 
+fn monitor_recording_limit_loop(args: &WatchRecordingLimitArgs) -> Result<(), AppError> {
+    let poll = Duration::from_millis(args.poll_ms.max(50));
+    loop {
+        match load_active_state() {
+            Ok(state) if state.session_id == args.session_id => {}
+            _ => return Ok(()),
+        }
+
+        if !process_is_alive(args.ffmpeg_pid) {
+            if let Ok(exe) = env::current_exe() {
+                let _ = Command::new(exe)
+                    .arg("--quiet")
+                    .arg("stop")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
+            return Ok(());
+        }
+
+        thread::sleep(poll);
+    }
+}
+
+fn cmd_watch_recording_limit(
+    _cli: &Cli,
+    args: &WatchRecordingLimitArgs,
+) -> Result<i32, AppError> {
+    monitor_recording_limit_loop(args)?;
+    Ok(0)
+}
+
+pub(crate) fn spawn_recording_limit_watcher(
+    state: &SessionState,
+    cli: &Cli,
+) -> Option<i32> {
+    let ffmpeg_pid = state.ffmpeg_pid?;
+    if state.recording_max_sec.is_none() {
+        print_verbose(cli, "Recording limit watcher disabled (no max-sec).");
+        return None;
+    }
+
+    let exe = env::current_exe().ok()?;
+    let child = Command::new(exe)
+        .arg("--quiet")
+        .arg("watch-recording-limit")
+        .arg("--session-id")
+        .arg(&state.session_id)
+        .arg("--ffmpeg-pid")
+        .arg(ffmpeg_pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let pid = child.id() as i32;
+    print_verbose(
+        cli,
+        format!(
+            "Recording limit watcher started with pid={pid} (max_sec={:?})",
+            state.recording_max_sec
+        ),
+    );
+    Some(pid)
+}
+
+pub(crate) fn stop_recording_limit_watcher(pid: i32, cli: &Cli) {
+    if !process_is_alive(pid) {
+        return;
+    }
+    let _ = send_signal(pid, libc::SIGTERM);
+    print_verbose(
+        cli,
+        format!("Recording limit watcher pid={pid} sent SIGTERM."),
+    );
+}
+
 fn transcription_worker_enabled() -> bool {
     bool_env_enabled("RIFF_LIVE_TRANSCRIBE", false)
 }
@@ -526,6 +615,23 @@ fn env_optional_chunk_max_sec() -> Option<f64> {
         None
     } else {
         Some(raw.clamp(5.0, 300.0))
+    }
+}
+
+/// Resolve the hard recording length cap.
+/// Default is 120 seconds. Values <= 0 disable the cap.
+pub(crate) fn resolve_recording_max_sec(cli_override: Option<f64>) -> Option<f64> {
+    let raw = match cli_override {
+        Some(v) => v,
+        None => env::var("RIFF_RECORDING_MAX_SEC")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(120.0),
+    };
+    if raw <= 0.0 {
+        None
+    } else {
+        Some(raw.clamp(1.0, 7200.0))
     }
 }
 
@@ -1371,8 +1477,12 @@ fn clear_active_state() -> Result<(), AppError> {
     Ok(())
 }
 
-fn build_record_cmd(audio_path: &Path, audio_device: &str) -> Vec<String> {
-    vec![
+fn build_record_cmd(
+    audio_path: &Path,
+    audio_device: &str,
+    recording_max_sec: Option<f64>,
+) -> Vec<String> {
+    let mut cmd = vec![
         "ffmpeg".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
@@ -1387,8 +1497,13 @@ fn build_record_cmd(audio_path: &Path, audio_device: &str) -> Vec<String> {
         "16000".to_string(),
         "-c:a".to_string(),
         "pcm_s16le".to_string(),
-        audio_path.display().to_string(),
-    ]
+    ];
+    if let Some(max_sec) = recording_max_sec {
+        cmd.push("-t".to_string());
+        cmd.push(format!("{max_sec:.3}"));
+    }
+    cmd.push(audio_path.display().to_string());
+    cmd
 }
 
 fn wait_for_process_start(child: &mut Child, timeout: Duration) -> Result<bool, AppError> {
@@ -1779,6 +1894,14 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
     let transcription_watcher_alive = transcription_watcher_pid
         .map(process_is_alive)
         .unwrap_or(false);
+    let recording_limit_watcher_pid = state.recording_limit_watcher_pid;
+    let recording_limit_watcher_alive = recording_limit_watcher_pid
+        .map(process_is_alive)
+        .unwrap_or(false);
+    let recording_max_display = state
+        .recording_max_sec
+        .map(|sec| format!("{sec:.3}"))
+        .unwrap_or_else(|| "unlimited".to_string());
     let watcher_event = latest_transcription_watcher_event(Path::new(&state.events_path));
     let watcher_event_type = watcher_event
         .as_ref()
@@ -1806,13 +1929,12 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
     print_out(
         cli,
         format!(
-            "Active session: {}\nsession_dir: {}\nffmpeg_pid: {} (alive={})\nclipboard_watcher_pid: {} (alive={})\ntranscription_watcher_pid: {} (alive={})\ntranscription_watcher_event: {}{}\ntranscription_watcher_log: {}\ntranscription_cursor_sec: {:.3}\ntranscription_paused: {}{}\nbuild_id: {}",
+            "Active session: {}\nsession_dir: {}\nffmpeg_pid: {} (alive={})\nclipboard_watcher_pid: {} (alive={})\ntranscription_watcher_pid: {} (alive={})\nrecording_max_sec: {}\nrecording_limit_watcher_pid: {} (alive={})\ntranscription_watcher_event: {}{}\ntranscription_watcher_log: {}\ntranscription_cursor_sec: {:.3}\ntranscription_paused: {}{}\nbuild_id: {}",
             state.session_id,
             state.session_dir,
             pid.map(|p| p.to_string())
                 .unwrap_or_else(|| "none".to_string()),
-            alive
-            ,
+            alive,
             watcher_pid
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "none".to_string()),
@@ -1821,6 +1943,11 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "none".to_string()),
             transcription_watcher_alive,
+            recording_max_display,
+            recording_limit_watcher_pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            recording_limit_watcher_alive,
             watcher_event_type.as_deref().unwrap_or("none"),
             watcher_reason
                 .as_deref()
@@ -1849,6 +1976,9 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
             "clipboard_watcher_alive": watcher_alive,
             "transcription_watcher_pid": transcription_watcher_pid,
             "transcription_watcher_alive": transcription_watcher_alive,
+            "recording_max_sec": state.recording_max_sec.map(round3),
+            "recording_limit_watcher_pid": recording_limit_watcher_pid,
+            "recording_limit_watcher_alive": recording_limit_watcher_alive,
             "transcription_watcher_last_event": watcher_event_type,
             "transcription_watcher_last_reason": watcher_reason,
             "transcription_watcher_log_path": watcher_log_path,
@@ -2402,6 +2532,7 @@ fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
         let start_args = StartArgs {
             screenshot_dir: args.screenshot_dir.clone(),
             audio_device: args.audio_device.clone(),
+            max_sec: args.max_sec,
         };
         cmd_start(cli, &start_args)
     }
@@ -2453,6 +2584,9 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
         }
         stop_recorder(pid, cli)?;
     }
+    if let Some(pid) = old_state.recording_limit_watcher_pid {
+        stop_recording_limit_watcher(pid, cli);
+    }
     if let Some(pid) = old_state.clipboard_watcher_pid {
         stop_clipboard_watcher(pid, cli);
     }
@@ -2462,6 +2596,8 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
     let start_args = StartArgs {
         screenshot_dir: Some(PathBuf::from(old_state.screenshot_source_dir.clone())),
         audio_device: old_state.audio_device.clone(),
+        // Preserve prior cap; 0 keeps unlimited across the fork.
+        max_sec: Some(old_state.recording_max_sec.unwrap_or(0.0)),
     };
     let internal_cli = Cli {
         verbose: cli.verbose,
@@ -2574,6 +2710,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Html(args) => cmd_html(cli, args),
         Commands::ScreenshotUse(args) => cmd_screenshot_use(cli, args),
         Commands::WatchClipboard(args) => cmd_watch_clipboard(cli, args),
+        Commands::WatchRecordingLimit(args) => cmd_watch_recording_limit(cli, args),
         Commands::KillServer => cmd_kill_server(cli),
     }
 }
@@ -2608,8 +2745,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        expand_env_refs, fill_template_with_transcript, load_riff_json_defaults,
-        parse_riffrc_assignment,
+        build_record_cmd, expand_env_refs, fill_template_with_transcript, load_riff_json_defaults,
+        parse_riffrc_assignment, resolve_recording_max_sec,
     };
     use serde_json::json;
     use std::collections::HashSet;
@@ -2742,5 +2879,79 @@ mod tests {
         } else {
             std::env::remove_var("RIFF_CONFIG_JSON_FILE");
         }
+    }
+
+    #[test]
+    fn json_config_sets_recording_max_sec_default() {
+        let _guard = CONFIG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let td = tempdir().expect("tempdir");
+        let json_path = td.path().join("riff.json");
+        fs::write(
+            &json_path,
+            serde_json::to_string(&json!({
+                "riff": {
+                    "recording_max_sec": 90
+                }
+            }))
+            .expect("serialize json"),
+        )
+        .expect("write config");
+
+        let original = std::env::var_os("RIFF_RECORDING_MAX_SEC");
+        let original_path = std::env::var_os("RIFF_CONFIG_JSON_FILE");
+        std::env::remove_var("RIFF_RECORDING_MAX_SEC");
+        std::env::set_var("RIFF_CONFIG_JSON_FILE", &json_path);
+
+        let original_env_keys: HashSet<OsString> = std::env::vars_os().map(|(k, _)| k).collect();
+        load_riff_json_defaults(&original_env_keys);
+
+        assert_eq!(
+            std::env::var("RIFF_RECORDING_MAX_SEC").ok().as_deref(),
+            Some("90")
+        );
+
+        if let Some(value) = original {
+            std::env::set_var("RIFF_RECORDING_MAX_SEC", value);
+        } else {
+            std::env::remove_var("RIFF_RECORDING_MAX_SEC");
+        }
+        if let Some(value) = original_path {
+            std::env::set_var("RIFF_CONFIG_JSON_FILE", value);
+        } else {
+            std::env::remove_var("RIFF_CONFIG_JSON_FILE");
+        }
+    }
+
+    #[test]
+    fn resolve_recording_max_sec_defaults_to_two_minutes() {
+        let _guard = CONFIG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("RIFF_RECORDING_MAX_SEC");
+        std::env::remove_var("RIFF_RECORDING_MAX_SEC");
+
+        assert_eq!(resolve_recording_max_sec(None), Some(120.0));
+        assert_eq!(resolve_recording_max_sec(Some(0.0)), None);
+        assert_eq!(resolve_recording_max_sec(Some(45.0)), Some(45.0));
+        assert_eq!(resolve_recording_max_sec(Some(0.5)), Some(1.0));
+        assert_eq!(resolve_recording_max_sec(Some(9000.0)), Some(7200.0));
+
+        std::env::set_var("RIFF_RECORDING_MAX_SEC", "30");
+        assert_eq!(resolve_recording_max_sec(None), Some(30.0));
+        assert_eq!(resolve_recording_max_sec(Some(0.0)), None);
+
+        if let Some(value) = original {
+            std::env::set_var("RIFF_RECORDING_MAX_SEC", value);
+        } else {
+            std::env::remove_var("RIFF_RECORDING_MAX_SEC");
+        }
+    }
+
+    #[test]
+    fn build_record_cmd_includes_duration_cap_when_set() {
+        let with_cap = build_record_cmd(Path::new("/tmp/audio.wav"), ":0", Some(120.0));
+        assert!(with_cap.windows(2).any(|w| w[0] == "-t" && w[1] == "120.000"));
+        assert_eq!(with_cap.last().map(String::as_str), Some("/tmp/audio.wav"));
+
+        let unlimited = build_record_cmd(Path::new("/tmp/audio.wav"), ":0", None);
+        assert!(!unlimited.iter().any(|a| a == "-t"));
     }
 }

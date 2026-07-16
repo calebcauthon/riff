@@ -21,10 +21,11 @@ use crate::{
     capture_process_stats, clear_active_state, command_exists, emit_json, get_audio_duration_sec,
     load_active_state, now_iso, pause_recorder_capture, play_event_sound, print_out, print_verbose,
     process_is_alive, read_json, recorder_error_looks_like_invalid_audio_device,
-    resolve_audio_device, resolve_audio_device_uncached, resume_recorder_capture, round3,
-    save_active_state, session_stamp, spawn_clipboard_watcher, spawn_recorder,
-    spawn_transcription_watcher, stop_clipboard_watcher, stop_recorder, stop_transcription_watcher,
-    unix_now, wait_for_transcription_watcher, write_json,
+    resolve_audio_device, resolve_audio_device_uncached, resolve_recording_max_sec,
+    resume_recorder_capture, round3, save_active_state, session_stamp, spawn_clipboard_watcher,
+    spawn_recorder, spawn_recording_limit_watcher, spawn_transcription_watcher,
+    stop_clipboard_watcher, stop_recorder, stop_recording_limit_watcher,
+    stop_transcription_watcher, unix_now, wait_for_transcription_watcher, write_json,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -660,6 +661,9 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     if active_path.exists() {
         let t_stale_cleanup = Instant::now();
         let existing: SessionState = read_json(&active_path)?;
+        if let Some(pid) = existing.recording_limit_watcher_pid {
+            stop_recording_limit_watcher(pid, cli);
+        }
         if let Some(pid) = existing.clipboard_watcher_pid {
             stop_clipboard_watcher(pid, cli);
         }
@@ -701,6 +705,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     } else {
         args.audio_device.clone()
     };
+    let recording_max_sec = resolve_recording_max_sec(args.max_sec);
 
     let t_audio_device = Instant::now();
     let mut resolved_audio_device = resolve_audio_device(&requested_audio_device, cli);
@@ -714,12 +719,15 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         print_out(
             cli,
             format!(
-                "[dry-run] Planned session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}",
+                "[dry-run] Planned session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}\nrecording_max_sec: {}",
                 session_id,
                 session_dir.display(),
                 audio_path.display(),
                 screenshot_dir.display(),
                 resolved_audio_device,
+                recording_max_sec
+                    .map(|sec| format!("{sec:.3}"))
+                    .unwrap_or_else(|| "unlimited".to_string()),
             ),
         );
         emit_json(
@@ -732,6 +740,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
                 "audio_path": audio_path,
                 "screenshot_source_dir": screenshot_dir,
                 "audio_device": resolved_audio_device,
+                "recording_max_sec": recording_max_sec.map(round3),
                 "ffmpeg_pid": Value::Null,
                 "dry_run": true,
                 "state_saved": false
@@ -774,7 +783,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     let mut audio_device_retry = false;
 
     let ffmpeg_pid = {
-        let record_cmd = build_record_cmd(&audio_path, &resolved_audio_device);
+        let record_cmd = build_record_cmd(&audio_path, &resolved_audio_device, recording_max_sec);
         match spawn_recorder(&record_cmd, &ffmpeg_log_path, cli) {
             Ok(pid) => pid,
             Err(first_err)
@@ -788,7 +797,8 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
                 let _ = fs::remove_file(audio_device_cache_file());
 
                 let retry_device = resolve_audio_device_uncached(cli);
-                let retry_cmd = build_record_cmd(&audio_path, &retry_device);
+                let retry_cmd =
+                    build_record_cmd(&audio_path, &retry_device, recording_max_sec);
 
                 match spawn_recorder(&retry_cmd, &ffmpeg_log_path, cli) {
                     Ok(pid) => {
@@ -827,6 +837,8 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         audio_device: resolved_audio_device.clone(),
         clipboard_watcher_pid: None,
         transcription_watcher_pid: None,
+        recording_limit_watcher_pid: None,
+        recording_max_sec,
         transcription_cursor_sec: 0.0,
         transcription_paused: false,
         transcription_pause_started_sec: None,
@@ -867,13 +879,30 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     } else {
         elapsed_ms(t_transcription_watcher_spawn)
     };
+
+    let mut recording_limit_state_save_ms = 0.0;
+    let t_recording_limit_watcher_spawn = Instant::now();
+    let recording_limit_watcher_spawn_ms =
+        if let Some(pid) = spawn_recording_limit_watcher(&state, cli) {
+            let ms = elapsed_ms(t_recording_limit_watcher_spawn);
+            state.recording_limit_watcher_pid = Some(pid);
+            let t_recording_limit_state_save = Instant::now();
+            save_active_state(&state)?;
+            recording_limit_state_save_ms = elapsed_ms(t_recording_limit_state_save);
+            ms
+        } else {
+            elapsed_ms(t_recording_limit_watcher_spawn)
+        };
+
     let watcher_setup_ms = round3(
         initial_state_save_ms
             + clipboard_bootstrap_read_ms
             + clipboard_watcher_spawn_ms
             + clipboard_state_save_ms
             + transcription_watcher_spawn_ms
-            + transcription_state_save_ms,
+            + transcription_state_save_ms
+            + recording_limit_watcher_spawn_ms
+            + recording_limit_state_save_ms,
     );
 
     let custom_transcribe_enabled = env::var("RIFF_TRANSCRIBE_CMD")
@@ -911,12 +940,16 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "clipboard_state_save_ms": round3(clipboard_state_save_ms),
             "transcription_watcher_spawn_ms": round3(transcription_watcher_spawn_ms),
             "transcription_state_save_ms": round3(transcription_state_save_ms),
+            "recording_limit_watcher_spawn_ms": round3(recording_limit_watcher_spawn_ms),
+            "recording_limit_state_save_ms": round3(recording_limit_state_save_ms),
             "parakeet_server_warmup_ms": round3(parakeet_server_warmup_ms),
             "watcher_setup_ms": watcher_setup_ms
         },
         "audio_device_retry": audio_device_retry,
         "transcription_watcher_spawned": transcription_watcher_spawned,
         "transcription_watcher_pid": state.transcription_watcher_pid,
+        "recording_max_sec": recording_max_sec.map(round3),
+        "recording_limit_watcher_pid": state.recording_limit_watcher_pid,
         "parakeet_server_warmup_attempted": parakeet_server_warmup_attempted
     }));
 
@@ -925,13 +958,16 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     print_out(
         cli,
         format!(
-            "Started session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}\naudio_device_retry: {}\nstartup_ms: {}\nstartup_phase_ms: spawn_recorder={} watcher_setup={} parakeet_server_warmup={} audio_device={} screenshot_dir={}",
+            "Started session {}\nsession_dir: {}\naudio_path: {}\nscreenshot_source_dir: {}\naudio_device: {}\naudio_device_retry: {}\nrecording_max_sec: {}\nstartup_ms: {}\nstartup_phase_ms: spawn_recorder={} watcher_setup={} parakeet_server_warmup={} audio_device={} screenshot_dir={}",
             session_id,
             session_dir.display(),
             audio_path.display(),
             screenshot_dir.display(),
             resolved_audio_device,
             audio_device_retry,
+            recording_max_sec
+                .map(|sec| format!("{sec:.3}"))
+                .unwrap_or_else(|| "unlimited".to_string()),
             round3(start_total_ms),
             round3(spawn_recorder_ms),
             watcher_setup_ms,
@@ -952,8 +988,10 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "screenshot_source_dir": screenshot_dir,
             "audio_device": resolved_audio_device,
             "audio_device_retry": audio_device_retry,
+            "recording_max_sec": recording_max_sec.map(round3),
             "ffmpeg_pid": ffmpeg_pid,
             "transcription_watcher_pid": state.transcription_watcher_pid,
+            "recording_limit_watcher_pid": state.recording_limit_watcher_pid,
             "startup_ms": round3(start_total_ms),
             "phases": {
                 "stale_state_cleanup_ms": round3(stale_state_cleanup_ms),
@@ -969,6 +1007,8 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
                 "clipboard_state_save_ms": round3(clipboard_state_save_ms),
                 "transcription_watcher_spawn_ms": round3(transcription_watcher_spawn_ms),
                 "transcription_state_save_ms": round3(transcription_state_save_ms),
+                "recording_limit_watcher_spawn_ms": round3(recording_limit_watcher_spawn_ms),
+                "recording_limit_state_save_ms": round3(recording_limit_state_save_ms),
                 "parakeet_server_warmup_ms": round3(parakeet_server_warmup_ms),
                 "watcher_setup_ms": watcher_setup_ms
             },
@@ -1446,6 +1486,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let mut transcription_wait_ms = 0.0;
     let mut stop_flush_ms = 0.0;
     let mut stop_clipboard_watcher_ms = 0.0;
+    let mut stop_recording_limit_watcher_ms = 0.0;
     let mut append_stopping_event_ms = 0.0;
     let mut resume_before_stop_ms = 0.0;
     let mut transcription_watcher_stop_ms = 0.0;
@@ -1513,6 +1554,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     );
 
     if !cli.dry_run {
+        if let Some(pid) = state.recording_limit_watcher_pid {
+            let t_stop_recording_limit_watcher = Instant::now();
+            stop_recording_limit_watcher(pid, cli);
+            stop_recording_limit_watcher_ms = elapsed_ms(t_stop_recording_limit_watcher);
+        }
         if let Some(pid) = state.clipboard_watcher_pid {
             let t_stop_clipboard_watcher = Instant::now();
             stop_clipboard_watcher(pid, cli);
@@ -1919,6 +1965,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         "session_id": state.session_id,
         "total_ms": round3(stop_total_ms),
         "phases": {
+            "stop_recording_limit_watcher_ms": round3(stop_recording_limit_watcher_ms),
             "stop_clipboard_watcher_ms": round3(stop_clipboard_watcher_ms),
             "append_stopping_event_ms": round3(append_stopping_event_ms),
             "resume_before_stop_ms": round3(resume_before_stop_ms),
@@ -2018,6 +2065,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             "clipboard_captures": clips.len(),
             "stop_ms": round3(stop_total_ms),
             "phases": {
+                "stop_recording_limit_watcher_ms": round3(stop_recording_limit_watcher_ms),
                 "stop_clipboard_watcher_ms": round3(stop_clipboard_watcher_ms),
                 "append_stopping_event_ms": round3(append_stopping_event_ms),
                 "resume_before_stop_ms": round3(resume_before_stop_ms),
