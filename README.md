@@ -207,6 +207,9 @@ export RIFF_WEB_SERVER_IDLE_TIMEOUT_SEC=1800
 
 # optional clipboard monitor controls
 export RIFF_CLIPBOARD_MONITOR=1
+
+# hard cap on recording length (seconds); default 120, set 0 to disable
+export RIFF_RECORDING_MAX_SEC=120
 ```
 
 Or use an optional global `~/.riffrc` file (loaded automatically by `riff`):
@@ -248,6 +251,7 @@ Notes:
 - Top-level `RIFF_*` keys are loaded automatically.
 - `riff.post_transcribe_cmd` maps to `RIFF_POST_TRANSCRIBE_CMD`.
 - `riff.hooks` maps to `RIFF_HOOKS` (see [Output hooks](#output-hooks)).
+- `riff.recording_max_sec` maps to `RIFF_RECORDING_MAX_SEC`.
 
 ---
 
@@ -510,11 +514,21 @@ riff start
 Flags:
 - `--screenshot-dir <path>` override screenshot source dir
 - `--audio-device <selector>` ffmpeg avfoundation selector (default `auto`, prefers built-in Mac mic and avoids iPhone/Continuity)
+- `--max-sec <seconds>` hard cap on recording length (default `120` via `RIFF_RECORDING_MAX_SEC`; pass `0` to disable)
 
 You can also set a fixed selector:
 
 ```bash
 export RIFF_AUDIO_DEVICE=":1"
+```
+
+Recording length is hard-capped at two minutes by default so a runaway session can't balloon audio/transcription and wedge the machine. When the cap is hit, ffmpeg stops capturing and riff auto-finalizes the session (`riff stop`). Tune or disable:
+
+```bash
+export RIFF_RECORDING_MAX_SEC=120   # default
+export RIFF_RECORDING_MAX_SEC=0     # unlimited
+# or one-shot:
+riff start --max-sec 90
 ```
 
 ### Shot (capture directly into active session)

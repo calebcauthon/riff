@@ -87,6 +87,8 @@ pub enum Commands {
     Perf(PerfArgs),
     #[command(hide = true, name = "watch-clipboard")]
     WatchClipboard(WatchClipboardArgs),
+    #[command(hide = true, name = "watch-recording-limit")]
+    WatchRecordingLimit(WatchRecordingLimitArgs),
     /// Kill background helper servers (web + parakeet)
     KillServer,
 }
@@ -98,6 +100,11 @@ pub struct StartArgs {
 
     #[arg(long, default_value = "auto")]
     pub audio_device: String,
+
+    /// Hard cap on recording length in seconds.
+    /// Defaults to RIFF_RECORDING_MAX_SEC (120). Pass 0 to disable.
+    #[arg(long = "max-sec", value_name = "SEC")]
+    pub max_sec: Option<f64>,
 }
 
 #[derive(Args, Debug)]
@@ -140,6 +147,11 @@ pub struct ToggleArgs {
     /// Used when idle (start path): ffmpeg avfoundation selector
     #[arg(long, default_value = "auto")]
     pub audio_device: String,
+
+    /// Used when idle (start path): hard cap on recording length in seconds.
+    /// Defaults to RIFF_RECORDING_MAX_SEC (120). Pass 0 to disable.
+    #[arg(long = "max-sec", value_name = "SEC")]
+    pub max_sec: Option<f64>,
 
     /// Used when active (stop path): custom transcription command template
     #[arg(long)]
@@ -277,5 +289,17 @@ pub struct WatchClipboardArgs {
     pub start_id: usize,
 
     #[arg(long, default_value_t = 450)]
+    pub poll_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct WatchRecordingLimitArgs {
+    #[arg(long)]
+    pub session_id: String,
+
+    #[arg(long)]
+    pub ffmpeg_pid: i32,
+
+    #[arg(long, default_value_t = 250)]
     pub poll_ms: u64,
 }
