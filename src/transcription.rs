@@ -431,6 +431,79 @@ pub(crate) fn touch_web_server(base_url: &str) -> bool {
     }
 }
 
+/// Parse `RIFF_WEB_SERVER_URL` (or the default) into a validated `(host, port)`
+/// pair, ensuring the server only ever gets started against a loopback
+/// address. This is a structural parse (scheme/host/port) rather than a
+/// naive `split(':')`, so it correctly rejects things like IPv6 literals
+/// (`[::1]:8766`), paths/queries, and non-loopback hosts instead of silently
+/// misinterpreting them.
+fn parse_web_server_loopback_url(raw: &str) -> Result<(String, String), AppError> {
+    let invalid = |detail: &str| {
+        app_error(
+            1,
+            format!(
+                "Invalid RIFF_WEB_SERVER_URL {:?}: {}. Expected an http URL with a loopback host, e.g. http://127.0.0.1:8766",
+                raw, detail
+            ),
+        )
+    };
+
+    let rest = raw
+        .strip_prefix("http://")
+        .ok_or_else(|| invalid("only the http scheme is supported"))?;
+
+    // Disallow userinfo (user:pass@host), path, query, or fragment components;
+    // we only expect "host[:port]".
+    if rest.contains('@') || rest.contains('/') || rest.contains('?') || rest.contains('#') {
+        return Err(invalid(
+            "only a bare host[:port] is supported (no path, query, or credentials)",
+        ));
+    }
+
+    // Structural split into host and optional port. IPv6 literals are
+    // bracketed, e.g. "[::1]:8766" or bare "[::1]".
+    let (host, port) = if let Some(after_bracket) = rest.strip_prefix('[') {
+        let (host, remainder) = after_bracket
+            .split_once(']')
+            .ok_or_else(|| invalid("unterminated IPv6 literal (missing ']')"))?;
+        let port = if let Some(p) = remainder.strip_prefix(':') {
+            p
+        } else if remainder.is_empty() {
+            "8766"
+        } else {
+            return Err(invalid("unexpected characters after IPv6 literal"));
+        };
+        (host.to_string(), port.to_string())
+    } else {
+        match rest.split_once(':') {
+            Some((host, port)) => (host.to_string(), port.to_string()),
+            None => (rest.to_string(), "8766".to_string()),
+        }
+    };
+
+    if host.is_empty() {
+        return Err(invalid("host is empty"));
+    }
+
+    let is_loopback = host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || (host.starts_with("127.") && host.split('.').count() == 4 && host.parse::<std::net::Ipv4Addr>().is_ok());
+
+    if !is_loopback {
+        return Err(invalid(
+            "host must be a loopback address (127.0.0.1, localhost, or ::1)",
+        ));
+    }
+
+    if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) || port.parse::<u16>().is_err()
+    {
+        return Err(invalid("port must be a number between 0 and 65535"));
+    }
+
+    Ok((host, port))
+}
+
 fn spawn_web_server(python_bin: &str, script_path: &Path, cli: &Cli) -> Result<(), AppError> {
     let pid_file = web_server_pid_file();
     if let Some(pid) = read_pid_file(&pid_file) {
@@ -444,12 +517,7 @@ fn spawn_web_server(python_bin: &str, script_path: &Path, cli: &Cli) -> Result<(
     }
 
     let base_url = web_server_base_url();
-    let host_port = base_url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let mut parts = host_port.split(':');
-    let host = parts.next().unwrap_or("127.0.0.1");
-    let port = parts.next().unwrap_or("8766");
+    let (host, port) = parse_web_server_loopback_url(&base_url)?;
 
     let log_path = web_server_log_file();
     if let Some(parent) = log_path.parent() {
@@ -524,7 +592,8 @@ pub(crate) fn ensure_web_server(cli: &Cli, wait_ready: bool) -> bool {
         return false;
     };
 
-    if spawn_web_server(&python_bin, &script_path, cli).is_err() {
+    if let Err(e) = spawn_web_server(&python_bin, &script_path, cli) {
+        print_verbose(cli, format!("Skipping web server startup: {}", e.message));
         return false;
     }
 
@@ -1252,6 +1321,49 @@ mod hook_tests {
             parakeet_script: None,
             parakeet_model: None,
         }
+    }
+
+    #[test]
+    fn web_server_url_accepts_loopback_hosts() {
+        assert_eq!(
+            parse_web_server_loopback_url("http://127.0.0.1:8766").unwrap(),
+            ("127.0.0.1".to_string(), "8766".to_string())
+        );
+        assert_eq!(
+            parse_web_server_loopback_url("http://localhost:9000").unwrap(),
+            ("localhost".to_string(), "9000".to_string())
+        );
+        assert_eq!(
+            parse_web_server_loopback_url("http://LOCALHOST:9000").unwrap(),
+            ("LOCALHOST".to_string(), "9000".to_string())
+        );
+        assert_eq!(
+            parse_web_server_loopback_url("http://[::1]:8766").unwrap(),
+            ("::1".to_string(), "8766".to_string())
+        );
+        assert_eq!(
+            parse_web_server_loopback_url("http://[::1]").unwrap(),
+            ("::1".to_string(), "8766".to_string())
+        );
+        // No explicit port falls back to the default.
+        assert_eq!(
+            parse_web_server_loopback_url("http://127.0.0.1").unwrap(),
+            ("127.0.0.1".to_string(), "8766".to_string())
+        );
+    }
+
+    #[test]
+    fn web_server_url_rejects_non_loopback_or_malformed() {
+        assert!(parse_web_server_loopback_url("http://example.com:8766").is_err());
+        assert!(parse_web_server_loopback_url("http://0.0.0.0:8766").is_err());
+        assert!(parse_web_server_loopback_url("https://127.0.0.1:8766").is_err());
+        assert!(parse_web_server_loopback_url("127.0.0.1:8766").is_err());
+        assert!(parse_web_server_loopback_url("http://user:pass@127.0.0.1:8766").is_err());
+        assert!(parse_web_server_loopback_url("http://127.0.0.1:8766/evil").is_err());
+        assert!(parse_web_server_loopback_url("http://127.0.0.1:notaport").is_err());
+        assert!(parse_web_server_loopback_url("http://127.0.0.1:99999").is_err());
+        assert!(parse_web_server_loopback_url("http://[::1").is_err());
+        assert!(parse_web_server_loopback_url("http://").is_err());
     }
 
     #[test]

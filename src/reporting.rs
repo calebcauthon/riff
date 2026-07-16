@@ -979,8 +979,8 @@ pub(crate) fn build_html_note(
         await window.__riffSaveExcalidraw();
         setAnnotatorStatus('Saved');
         closeAnnotator();
-      }} catch (_err) {{
-        setAnnotatorStatus('Could not save scene');
+      }} catch (err) {{
+        setAnnotatorStatus(err && err.message ? err.message : 'Could not save scene');
       }}
     }});
 
@@ -1007,41 +1007,27 @@ pub(crate) fn build_html_note(
           return;
         }}
 
+        if (window.location.protocol === 'file:') {{
+          setStatus('Open via `riff html` to enable this action');
+          return;
+        }}
+
         const original = btn.textContent || 'Use for transcript';
         btn.disabled = true;
         btn.textContent = 'Applying...';
         try {{
-          const candidates = [];
-          if (window.location.protocol !== 'file:') {{
-            candidates.push('/use-screenshot');
-          }}
-          candidates.push('http://127.0.0.1:8766/use-screenshot');
-
-          let applied = false;
-          let lastError = null;
-          for (const endpoint of candidates) {{
-            try {{
-              const res = await fetch(endpoint, {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify({{
-                  session_id: sessionId,
-                  shot_id: shotId,
-                  module
-                }})
-              }});
-              const payload = await res.json().catch(() => ({{}}));
-              if (!res.ok || !payload.ok) {{
-                throw new Error(payload.error || 'Failed to apply variant');
-              }}
-              applied = true;
-              break;
-            }} catch (endpointErr) {{
-              lastError = endpointErr;
-            }}
-          }}
-          if (!applied) {{
-            throw lastError || new Error('Failed to apply variant');
+          const res = await fetch('/use-screenshot', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{
+              session_id: sessionId,
+              shot_id: shotId,
+              module
+            }})
+          }});
+          const payload = await res.json().catch(() => ({{}}));
+          if (!res.ok || !payload.ok) {{
+            throw new Error(payload.error || 'Failed to apply variant');
           }}
           setStatus(`Now using ${{module}} for Screenshot ${{shotId}}`);
           window.setTimeout(() => window.location.reload(), 450);
@@ -1132,16 +1118,6 @@ pub(crate) fn build_html_note(
         if (img) img.src = cacheBusted;
         if (link) link.href = cacheBusted;
       }});
-    }}
-
-    function saveImageEndpoints() {{
-      const endpoints = [];
-      if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {{
-        endpoints.push(`${{window.location.origin}}/save-image`);
-      }}
-      endpoints.push('http://127.0.0.1:8766/save-image');
-      endpoints.push('http://localhost:8766/save-image');
-      return [...new Set(endpoints)];
     }}
 
     function randomId(prefix) {{
@@ -1339,6 +1315,10 @@ pub(crate) fn build_html_note(
       }};
       localStorage.setItem(sceneKey(currentContext.path), JSON.stringify(payload));
 
+      if (window.location.protocol === 'file:') {{
+        throw new Error('Open via `riff html` to enable this action');
+      }}
+
       const blob = await excalidrawPkg.exportToBlob({{
         elements: excalidrawAPI.getSceneElements(),
         appState: {{
@@ -1350,34 +1330,20 @@ pub(crate) fn build_html_note(
         mimeType: 'image/png',
       }});
       const dataUrl = await blobToDataUrl(blob);
-      let lastError = '';
-      let saved = false;
-      for (const endpoint of saveImageEndpoints()) {{
-        try {{
-          const response = await fetch(endpoint, {{
-            method: 'POST',
-            headers: {{
-              'Content-Type': 'application/json',
-            }},
-            body: JSON.stringify({{
-              url: currentContext.resolvedUrl || currentContext.url,
-              absPath: currentContext.path,
-              dataUrl,
-            }}),
-          }});
-          if (!response.ok) {{
-            const body = await response.text();
-            lastError = `${{endpoint}} -> ${{response.status}} ${{body}}`;
-            continue;
-          }}
-          saved = true;
-          break;
-        }} catch (err) {{
-          lastError = `${{endpoint}} -> ${{err}}`;
-        }}
-      }}
-      if (!saved) {{
-        throw new Error(`save-image failed across endpoints: ${{lastError || 'unknown'}}`);
+      const response = await fetch('/save-image', {{
+        method: 'POST',
+        headers: {{
+          'Content-Type': 'application/json',
+        }},
+        body: JSON.stringify({{
+          url: currentContext.resolvedUrl || currentContext.url,
+          absPath: currentContext.path,
+          dataUrl,
+        }}),
+      }});
+      if (!response.ok) {{
+        const body = await response.text();
+        throw new Error(`save-image failed: ${{response.status}} ${{body}}`);
       }}
       refreshScreenshotPreview(currentContext.path, currentContext.url);
     }};
@@ -2012,6 +1978,19 @@ mod tests {
         assert!(html.contains("Original transcript (before output hooks)"));
         assert!(html.contains("um hello world"));
         assert!(html.contains("<code>perl -e 1</code>"));
+    }
+
+    #[test]
+    fn html_uses_only_relative_same_origin_api_urls() {
+        let (html, _) = sample_html();
+        // The report JS must call the API via relative paths so it always
+        // targets the origin the page was served from (no hard-coded
+        // loopback host/port that could be abused for cross-origin calls or
+        // that would break on a custom RIFF_WEB_SERVER_URL port).
+        assert!(html.contains("'/use-screenshot'"));
+        assert!(html.contains("'/save-image'"));
+        assert!(!html.contains("http://127.0.0.1:8766"));
+        assert!(!html.contains("http://localhost:8766"));
     }
 
     #[test]

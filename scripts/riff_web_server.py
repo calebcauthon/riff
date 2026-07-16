@@ -38,8 +38,20 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _validate_bind_host(host: str) -> None:
+    normalized = host.strip().lower()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    if normalized not in {"127.0.0.1", "localhost", "::1"}:
+        raise SystemExit(
+            f"riff-web: refusing to bind to non-loopback host {host!r}; "
+            "only 127.0.0.1, localhost, or ::1 are allowed"
+        )
+
+
 def main() -> int:
     args = parse_args()
+    _validate_bind_host(args.host)
     root = Path(args.root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
 
@@ -54,11 +66,63 @@ def main() -> int:
         with lock:
             return max(0.0, time.time() - last_activity["ts"])
 
+    allowed_hosts = {f"127.0.0.1:{args.port}", f"localhost:{args.port}", f"[::1]:{args.port}"}
+    allowed_origins = {
+        f"http://127.0.0.1:{args.port}",
+        f"http://localhost:{args.port}",
+        f"http://[::1]:{args.port}",
+    }
+    if args.port == 80:
+        allowed_hosts |= {"127.0.0.1", "localhost", "[::1]"}
+
     class Handler(SimpleHTTPRequestHandler):
-        def _write_cors_headers(self) -> None:
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        def _write_security_headers(self) -> None:
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self._write_csp_header()
+
+        def _write_csp_header(self) -> None:
+            # Merge frame-ancestors into any CSP already queued for this
+            # response rather than sending a second, conflicting header.
+            # Only frame-ancestors is enforced here; we deliberately avoid
+            # script-src/default-src so inline scripts in report HTML keep
+            # working.
+            buffer = getattr(self, "_headers_buffer", [])
+            prefix = b"content-security-policy:"
+            for i, raw in enumerate(buffer):
+                if raw.lower().startswith(prefix):
+                    existing = raw.decode("latin-1").split(":", 1)[1].strip().rstrip("\r\n")
+                    if "frame-ancestors" not in existing.lower():
+                        merged = f"{existing}; frame-ancestors 'none'"
+                        buffer[i] = f"Content-Security-Policy: {merged}\r\n".encode("latin-1", "strict")
+                    return
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+
+        def _check_origin_gate(self) -> bool:
+            """Return True if the request passes the same-origin/loopback gate.
+
+            Sends a 403 JSON response and returns False otherwise. Must be
+            called before any handler logic runs (no body reads, no side
+            effects) so rejected requests never trigger mutations.
+            """
+            host = self.headers.get("Host")
+            if not host or host not in allowed_hosts:
+                self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "invalid host"})
+                return False
+
+            origin = self.headers.get("Origin")
+            if origin is not None and origin not in allowed_origins:
+                self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "invalid origin"})
+                return False
+
+            sec_fetch_site = self.headers.get("Sec-Fetch-Site")
+            if sec_fetch_site == "cross-site":
+                self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "cross-site request blocked"})
+                return False
+
+            return True
 
         def _json(self, status: int, payload: dict) -> None:
             body = json.dumps(payload).encode("utf-8")
@@ -89,6 +153,9 @@ def main() -> int:
             return
 
         def do_GET(self):  # noqa: N802
+            if not self._check_origin_gate():
+                return
+
             if self.path.rstrip("/") == "/health":
                 self._json(
                     HTTPStatus.OK,
@@ -105,15 +172,25 @@ def main() -> int:
             touch()
             super().do_GET()
 
+        def do_HEAD(self):  # noqa: N802
+            if not self._check_origin_gate():
+                return
+            super().do_HEAD()
+
         def end_headers(self) -> None:  # noqa: N802
-            self._write_cors_headers()
+            self._write_security_headers()
             super().end_headers()
 
         def do_OPTIONS(self):  # noqa: N802
+            if not self._check_origin_gate():
+                return
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
 
         def do_POST(self):  # noqa: N802
+            if not self._check_origin_gate():
+                return
+
             if self.path.rstrip("/") == "/touch":
                 touch()
                 self._json(

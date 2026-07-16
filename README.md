@@ -703,6 +703,11 @@ Behavior:
   - `Copy image` button on each screenshot card (falls back to copying image path if image clipboard API is unavailable)
   - `Browse all sessions` link to `/sessions/index.html` (one transcript row per session with screenshot thumbnails)
 
+Security boundary:
+- The web server binds to loopback only (`127.0.0.1`/`localhost`/`::1`) and enforces a strict same-origin policy — cross-origin requests, including from other local web pages open in your browser, are rejected. Non-loopback serving is unsupported, since session data (transcripts, screenshots, clipboard snippets) is sensitive.
+- HTML reports opened directly as a file (`file://`) are read-only: viewing and copying still work, but server-backed actions (using a screenshot variant, saving an annotation) require opening the report via `riff html` so it's served from the loopback origin.
+- `RIFF_WEB_SERVER_URL` must be a loopback `http://` URL; custom loopback ports are supported (e.g. `http://127.0.0.1:9001`).
+
 ---
 
 ## Global flags
