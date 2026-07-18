@@ -43,6 +43,7 @@ Performance/observability logs:
 ```text
 /tmp/riff/perf.jsonl                # structured start/stop phase timings
 /tmp/riff/parakeet-server.log       # warm Parakeet server logs
+/tmp/riff/parakeet-server.sock      # Riff-owned local inference socket
 /tmp/riff/web-server.log            # local HTML web server logs
 /tmp/riff/toggle-hotkey.log         # hotkey toggle/stop/send lifecycle
 ```
@@ -145,7 +146,8 @@ brew upgrade riff
 ```
 
 Performance note:
-- `riff start` warms a local Parakeet server in the background (when enabled), so later `riff stop` calls are faster.
+- `riff start` warms a local Parakeet server on `$RIFF_ROOT/parakeet-server.sock` in the background (when enabled), so later `riff stop` calls are faster.
+- Riff validates the server's exact model, revision, device, runtime, PID, owning root, and instance before accepting a transcript.
 - `riff stop` auto-starts a local HTML web server with idle-timeout for richer session pages.
 
 Optional PATH link from a local clone:
@@ -196,9 +198,11 @@ export RIFF_REPO="$HOME/Code/riff" # adjust if your clone lives elsewhere
 export RIFF_PYTHON_BIN="$RIFF_REPO/.venv/bin/python"
 export RIFF_PARAKEET_SCRIPT="$RIFF_REPO/scripts/parakeet_transcribe.py"
 export RIFF_PARAKEET_MODEL="nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc"
+export RIFF_PARAKEET_MODEL_REVISION="main"
 # optional perf + warm server controls
 export RIFF_PARAKEET_SERVER=1
-export RIFF_PARAKEET_SERVER_URL="http://127.0.0.1:8765"
+# Optional TCP compatibility override; the default is $RIFF_ROOT/parakeet-server.sock.
+# export RIFF_PARAKEET_SERVER_URL="http://127.0.0.1:8765"
 
 # optional local HTML server controls
 export RIFF_WEB_SERVER=1

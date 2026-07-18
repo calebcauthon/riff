@@ -15,18 +15,24 @@ Server mode (keeps model loaded for faster subsequent transcriptions):
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 import re
 import shutil
+import socket
+import socketserver
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+DEFAULT_MODEL_REVISION = "main"
 
 
 @dataclass
@@ -74,11 +80,22 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "cpu", "cuda"],
         help="Inference device",
     )
+    p.add_argument(
+        "--model-revision",
+        default=os.environ.get("RIFF_PARAKEET_MODEL_REVISION", DEFAULT_MODEL_REVISION),
+        help="Requested model revision, included in server identity checks",
+    )
     p.add_argument("--serve", action="store_true", help="Run persistent HTTP server")
     p.add_argument("--watch-audio", action="store_true", help="Run incremental silence-aware chunking")
     p.add_argument("--download-model", action="store_true", help="Download/load the configured model and exit")
     p.add_argument("--host", default="127.0.0.1", help="Server host (serve mode)")
     p.add_argument("--port", type=int, default=8765, help="Server port (serve mode)")
+    p.add_argument("--unix-socket", help="Unix-domain socket path (serve mode; overrides host/port)")
+    p.add_argument(
+        "--riff-root",
+        default=os.environ.get("RIFF_ROOT", "/tmp/riff"),
+        help="Owning RIFF_ROOT, included in server identity checks",
+    )
     p.add_argument("--events-path", help="events.jsonl path (watch mode)")
     p.add_argument("--session-id", help="session id (watch mode)")
     p.add_argument("--started-at-epoch", type=float, help="session start unix epoch sec (watch mode)")
@@ -140,7 +157,7 @@ def ensure_supported_python() -> None:
         )
 
 
-def load_model(model_name: str, device: str, verbose: bool, quiet: bool):
+def load_model(model_name: str, device: str, model_revision: str, verbose: bool, quiet: bool):
     ensure_supported_python()
     try:
         import torch  # type: ignore
@@ -159,7 +176,7 @@ def load_model(model_name: str, device: str, verbose: bool, quiet: bool):
 
     t0 = time.time()
     vout(f"Loading model '{model_name}' on {map_location}", verbose, quiet)
-    revision = os.environ.get("RIFF_PARAKEET_MODEL_REVISION", "").strip()
+    revision = model_revision.strip()
     try:
         if revision:
             try:
@@ -168,8 +185,15 @@ def load_model(model_name: str, device: str, verbose: bool, quiet: bool):
                     map_location=map_location,
                     revision=revision,
                 )
-            except TypeError:
-                model = ASRModel.from_pretrained(model_name=model_name, map_location=map_location)
+            except TypeError as e:
+                if revision != DEFAULT_MODEL_REVISION:
+                    raise AppError(
+                        f"Installed NeMo cannot honor model revision '{revision}': {e}",
+                        code=21,
+                    ) from e
+                model = ASRModel.from_pretrained(
+                    model_name=model_name, map_location=map_location
+                )
         else:
             model = ASRModel.from_pretrained(model_name=model_name, map_location=map_location)
     except Exception as e:
@@ -180,11 +204,18 @@ def load_model(model_name: str, device: str, verbose: bool, quiet: bool):
             model = model.cuda()  # type: ignore[attr-defined]
         else:
             model = model.cpu()  # type: ignore[attr-defined]
-    except Exception:
-        pass
+    except Exception as e:
+        raise AppError(f"Failed to place model on '{target}': {e}", code=21) from e
+
+    model_device = str(getattr(model, "device", target)).split(":", maxsplit=1)[0]
+    if model_device != target:
+        raise AppError(
+            f"Model device mismatch after load: requested '{target}', actual '{model_device}'",
+            code=21,
+        )
 
     vout(f"Model loaded in {time.time() - t0:.2f}s", verbose, quiet)
-    return model, target
+    return model, model_device
 
 
 def normalize_transcript(raw: Any) -> str:
@@ -430,7 +461,9 @@ def run_one_shot(args: argparse.Namespace) -> int:
     out_txt = Path(args.out_txt).expanduser().resolve()
     out_txt.parent.mkdir(parents=True, exist_ok=True)
 
-    model, actual_device = load_model(args.model, args.device, args.verbose, args.quiet)
+    model, actual_device = load_model(
+        args.model, args.device, args.model_revision, args.verbose, args.quiet
+    )
     text = transcribe_path(model, audio, args.verbose, args.quiet)
     out_txt.write_text(text + "\n", encoding="utf-8")
 
@@ -477,7 +510,9 @@ def run_watch_audio(args: argparse.Namespace) -> int:
     silence_db = float(args.silence_db)
     poll_sec = max(0.2, float(args.poll_ms) / 1000.0)
 
-    model, actual_device = load_model(args.model, args.device, args.verbose, args.quiet)
+    model, actual_device = load_model(
+        args.model, args.device, args.model_revision, args.verbose, args.quiet
+    )
 
     chunk_id = 0
     next_start_sec = 0.0
@@ -609,9 +644,81 @@ def run_watch_audio(args: argparse.Namespace) -> int:
         time.sleep(poll_sec)
 
 
+PARAKEET_SERVER_PROTOCOL_VERSION = 1
+PARAKEET_REQUEST_IDENTITY_FIELDS = (
+    "protocol_version",
+    "server_instance_id",
+    "riff_root",
+    "model",
+    "model_revision",
+    "requested_device",
+    "device",
+)
+
+
+def package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def server_identity_mismatches(
+    payload: dict[str, Any], identity: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    mismatches: dict[str, dict[str, Any]] = {}
+    for field in PARAKEET_REQUEST_IDENTITY_FIELDS:
+        requested = payload.get(field)
+        actual = identity[field]
+        if requested != actual:
+            mismatches[field] = {"requested": requested, "actual": actual}
+    return mismatches
+
+
+class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    address_family = socket.AF_UNIX
+    daemon_threads = True
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "localhost"
+        self.server_port = 0
+
+
 def run_server(args: argparse.Namespace) -> int:
-    model, actual_device = load_model(args.model, args.device, args.verbose, args.quiet)
+    model, actual_device = load_model(
+        args.model, args.device, args.model_revision, args.verbose, args.quiet
+    )
     lock = threading.Lock()
+    started_at_epoch = time.time()
+    instance_id = uuid.uuid4().hex
+    riff_root = str(Path(args.riff_root).expanduser().resolve())
+    script_path = str(Path(__file__).resolve())
+    transport = "unix" if args.unix_socket else "tcp"
+    endpoint = (
+        f"unix://{Path(args.unix_socket).expanduser().resolve()}"
+        if args.unix_socket
+        else f"http://{args.host}:{args.port}"
+    )
+    identity = {
+        "protocol_version": PARAKEET_SERVER_PROTOCOL_VERSION,
+        "service": "parakeet",
+        "server_instance_id": instance_id,
+        "pid": os.getpid(),
+        "riff_root": riff_root,
+        "script_path": script_path,
+        "transport": transport,
+        "endpoint": endpoint,
+        "model": args.model,
+        "model_revision": args.model_revision.strip(),
+        "requested_device": args.device,
+        "device": actual_device,
+        "python_version": sys.version.split()[0],
+        "python_executable": str(Path(sys.executable).resolve()),
+        "nemo_version": package_version("nemo_toolkit"),
+        "torch_version": package_version("torch"),
+        "started_at_epoch": round(started_at_epoch, 3),
+    }
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code: int, payload: dict[str, Any]) -> None:
@@ -626,17 +733,12 @@ def run_server(args: argparse.Namespace) -> int:
             if args.verbose and not args.quiet:
                 super().log_message(fmt, *args_)
 
+        def address_string(self) -> str:
+            return "local"
+
         def do_GET(self) -> None:  # noqa: N802
             if self.path.rstrip("/") == "/health":
-                self._send(
-                    200,
-                    {
-                        "ok": True,
-                        "service": "parakeet",
-                        "model": args.model,
-                        "device": actual_device,
-                    },
-                )
+                self._send(200, {"ok": True, **identity})
                 return
             self._send(404, {"ok": False, "error": "not found"})
 
@@ -650,14 +752,27 @@ def run_server(args: argparse.Namespace) -> int:
                 body = self.rfile.read(raw_len) if raw_len > 0 else b"{}"
                 payload = json.loads(body.decode("utf-8"))
 
-                audio = Path(str(payload.get("audio", ""))).expanduser().resolve()
+                mismatches = server_identity_mismatches(payload, identity)
+                if mismatches:
+                    self._send(
+                        409,
+                        {
+                            "ok": False,
+                            "error": "server identity mismatch",
+                            "mismatches": mismatches,
+                            "server": identity,
+                        },
+                    )
+                    return
+
+                audio_raw = payload.get("audio")
+                if not isinstance(audio_raw, str) or not audio_raw:
+                    raise AppError("audio is required", code=2)
+                audio = Path(audio_raw).expanduser().resolve()
                 out_txt_raw = payload.get("out_txt")
                 out_txt = (
                     Path(str(out_txt_raw)).expanduser().resolve() if isinstance(out_txt_raw, str) and out_txt_raw else None
                 )
-                if not str(audio):
-                    raise AppError("audio is required", code=2)
-
                 t0 = time.time()
                 with lock:
                     text = transcribe_path(model, audio, args.verbose, args.quiet)
@@ -675,6 +790,7 @@ def run_server(args: argparse.Namespace) -> int:
                         "audio": str(audio),
                         "out_txt": str(out_txt) if out_txt else None,
                         "elapsed_sec": round(time.time() - t0, 3),
+                        "server": identity,
                     },
                 )
             except AppError as e:
@@ -682,22 +798,31 @@ def run_server(args: argparse.Namespace) -> int:
             except Exception as e:  # noqa: BLE001
                 self._send(500, {"ok": False, "error": f"internal error: {e}"})
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    out(
-        f"Parakeet server ready on http://{args.host}:{args.port} (model={args.model}, device={actual_device})",
-        args.quiet,
-    )
+    socket_path: Path | None = None
+    if args.unix_socket:
+        socket_path = Path(args.unix_socket).expanduser().resolve()
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
+        socket_path.unlink(missing_ok=True)
+        server = ThreadingUnixHTTPServer(str(socket_path), Handler)
+        socket_path.chmod(0o600)
+    else:
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
+    out(f"Parakeet server ready on {endpoint} (model={args.model}, device={actual_device})", args.quiet)
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         out("Shutting down Parakeet server", args.quiet)
     finally:
         server.server_close()
+        if socket_path is not None:
+            socket_path.unlink(missing_ok=True)
     return 0
 
 
 def download_model(args: argparse.Namespace) -> int:
-    _, actual_device = load_model(args.model, args.device, args.verbose, args.quiet)
+    _, actual_device = load_model(
+        args.model, args.device, args.model_revision, args.verbose, args.quiet
+    )
     out(f"Model ready: {args.model} (device={actual_device})", args.quiet)
     return 0
 

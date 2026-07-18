@@ -35,7 +35,7 @@ Model resolution order is:
 
 `riff setup` installs the pinned Python stack from `scripts/parakeet-requirements.txt` and pre-downloads the pinned checkpoint. The key pinned packages are NeMo Toolkit 2.4.0, PyTorch 2.7.1, and SoundFile 0.13.1. Setup requires Python 3.12; the transcription helper accepts Python 3.10-3.12. Device selection is CUDA when explicitly requested or available, otherwise CPU. On a normal Mac this means CPU inference; the code does not currently select Apple's MPS backend.
 
-The preferred inference path is the persistent local server at `127.0.0.1:8765`. Keeping the model loaded avoids paying model startup cost at every `riff stop`. If the server is disabled, unhealthy, or fails a request, Riff launches the same Python helper as a one-shot process. Both paths use the same configured model and remain local.
+The preferred inference path is the persistent local server on the Riff-owned Unix socket at `$RIFF_ROOT/parakeet-server.sock`. Keeping the model loaded avoids paying model startup cost at every `riff stop`. An explicit `RIFF_PARAKEET_SERVER_URL` retains loopback TCP compatibility for benchmarks and custom setups. Health and transcription responses carry the server instance, owning root, model revision, actual device, PID, and runtime versions; Riff requires the requested identity to match before accepting a transcript. If the server is disabled, mismatched, unhealthy, or fails a request, Riff launches the same Python helper as a one-shot process. Both paths use the same configured model and remain local.
 
 ### Experimental checkpoints
 
@@ -102,7 +102,7 @@ ffmpeg/AVFoundation       screenshots + clipboard            finalize processes
   - an optional live watcher that detects silence, extracts chunks with ffmpeg, transcribes them, and appends chunk events.
 - `scripts/riff_web_server.py` serves reports and supports local report actions such as selecting a screenshot variant or saving an annotation. It is a file/report server, not an inference service, and shuts down after an idle timeout.
 
-Both servers bind to loopback by default. PID and log files live below `RIFF_ROOT`, and `riff kill-server` stops both helpers.
+The Parakeet server uses a mode-`0600` Unix socket below `RIFF_ROOT` by default; the report server binds to loopback. PID and log files live below `RIFF_ROOT`, and `riff kill-server` stops both helpers and removes the Parakeet socket.
 
 ## Session lifecycle and data flow
 
@@ -144,6 +144,7 @@ Default layout:
   last_session.json
   perf.jsonl
   parakeet-server.{pid,log}
+  parakeet-server.sock
   web-server.{pid,log}
   sessions/
     <YYYYMMDD-HHMMSS>/
@@ -169,8 +170,8 @@ Riff reads `RIFF_*` values from three places. Precedence is process environment,
 Important switches:
 
 - `RIFF_ROOT`: session and helper state root.
-- `RIFF_PYTHON_BIN`, `RIFF_PARAKEET_SCRIPT`, `RIFF_PARAKEET_MODEL`: transcription runtime.
-- `RIFF_PARAKEET_SERVER` / `RIFF_PARAKEET_SERVER_URL`: warm inference helper; enabled by default at port 8765.
+- `RIFF_PYTHON_BIN`, `RIFF_PARAKEET_SCRIPT`, `RIFF_PARAKEET_MODEL`, `RIFF_PARAKEET_MODEL_REVISION`: transcription runtime and exact checkpoint revision.
+- `RIFF_PARAKEET_SERVER` / `RIFF_PARAKEET_SERVER_URL`: warm inference helper; enabled by default on `$RIFF_ROOT/parakeet-server.sock`, with an explicit URL selecting TCP compatibility mode.
 - `RIFF_WEB_SERVER` / `RIFF_WEB_SERVER_URL`: report helper; enabled by default at port 8766.
 - `RIFF_CLIPBOARD_MONITOR`: clipboard watcher; enabled by default.
 - `RIFF_LIVE_TRANSCRIBE`: silence-aware incremental transcription; disabled by default.
