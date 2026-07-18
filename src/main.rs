@@ -1499,7 +1499,9 @@ fn stop_recorder(pid: i32, cli: &Cli) -> Result<(), AppError> {
         if !process_is_alive(pid) {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(100));
+        // ffmpeg normally exits promptly after SIGINT. Poll frequently so a completed
+        // recorder does not add an avoidable ~100 ms bucket to the stop path.
+        thread::sleep(Duration::from_millis(10));
     }
 
     print_verbose(
