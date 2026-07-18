@@ -1,6 +1,6 @@
 [package]
 name = "riff"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 build = "build.rs"
 description = "Local-first macOS dictation CLI with screenshots, clipboard capture, and Parakeet transcription"
