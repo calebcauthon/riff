@@ -74,13 +74,6 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "cpu", "cuda"],
         help="Inference device",
     )
-    p.add_argument(
-        "--batch-size",
-        type=int,
-        default=int(os.environ.get("RIFF_PARAKEET_BATCH_SIZE", "4")),
-        help="Transcription batch size",
-    )
-
     p.add_argument("--serve", action="store_true", help="Run persistent HTTP server")
     p.add_argument("--watch-audio", action="store_true", help="Run incremental silence-aware chunking")
     p.add_argument("--download-model", action="store_true", help="Download/load the configured model and exit")
@@ -210,15 +203,13 @@ def normalize_transcript(raw: Any) -> str:
     return str(raw).strip()
 
 
-def transcribe_path(model: Any, audio: Path, batch_size: int, verbose: bool, quiet: bool) -> str:
+def transcribe_path(model: Any, audio: Path, verbose: bool, quiet: bool) -> str:
     if not audio.exists() or not audio.is_file():
         raise AppError(f"Audio file not found: {audio}", code=2)
 
     t0 = time.time()
     vout(f"Transcribing: {audio}", verbose, quiet)
     try:
-        result = model.transcribe([str(audio)], batch_size=batch_size)
-    except TypeError:
         result = model.transcribe([str(audio)])
     except Exception as e:
         raise AppError(f"Transcription failed: {e}", code=22) from e
@@ -440,7 +431,7 @@ def run_one_shot(args: argparse.Namespace) -> int:
     out_txt.parent.mkdir(parents=True, exist_ok=True)
 
     model, actual_device = load_model(args.model, args.device, args.verbose, args.quiet)
-    text = transcribe_path(model, audio, args.batch_size, args.verbose, args.quiet)
+    text = transcribe_path(model, audio, args.verbose, args.quiet)
     out_txt.write_text(text + "\n", encoding="utf-8")
 
     payload = {
@@ -535,9 +526,7 @@ def run_watch_audio(args: argparse.Namespace) -> int:
                 continue
 
             try:
-                chunk_text = transcribe_path(
-                    model, scratch_audio, args.batch_size, args.verbose, args.quiet
-                ).strip()
+                chunk_text = transcribe_path(model, scratch_audio, args.verbose, args.quiet).strip()
                 status = "ok" if chunk_text else "skipped"
                 transcript_text = join_chunk_text(transcript_text, chunk_text)
                 out_txt.parent.mkdir(parents=True, exist_ok=True)
@@ -666,14 +655,12 @@ def run_server(args: argparse.Namespace) -> int:
                 out_txt = (
                     Path(str(out_txt_raw)).expanduser().resolve() if isinstance(out_txt_raw, str) and out_txt_raw else None
                 )
-                batch_size = int(payload.get("batch_size", args.batch_size))
-
                 if not str(audio):
                     raise AppError("audio is required", code=2)
 
                 t0 = time.time()
                 with lock:
-                    text = transcribe_path(model, audio, batch_size, args.verbose, args.quiet)
+                    text = transcribe_path(model, audio, args.verbose, args.quiet)
 
                 if out_txt is not None:
                     out_txt.parent.mkdir(parents=True, exist_ok=True)

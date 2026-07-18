@@ -12,9 +12,9 @@ use crate::reporting::{
 };
 use crate::screenshots::{detect_screenshot_dir, file_mtime_epoch, move_session_screenshots};
 use crate::transcription::{
-    ensure_parakeet_server, ensure_web_server, parakeet_server_enabled,
-    resolve_parakeet_batch_size, resolve_parakeet_model, resolve_parakeet_script,
-    resolve_python_bin, run_output_hooks, run_post_transcribe_command, run_transcription,
+    ensure_parakeet_server, ensure_web_server, parakeet_server_enabled, resolve_parakeet_model,
+    resolve_parakeet_script, resolve_python_bin, run_output_hooks, run_post_transcribe_command,
+    run_transcription,
 };
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
@@ -305,15 +305,13 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
 
     let python_bin = resolve_python_bin(None);
     let model = resolve_parakeet_model(None);
-    let batch_size = resolve_parakeet_batch_size();
     let cmd_for_log = format!(
-        "{} {} --audio {} --out-txt {} --model {} --batch-size {}",
+        "{} {} --audio {} --out-txt {} --model {}",
         python_bin,
         script_path.display(),
         chunk_audio.display(),
         chunk_out_txt.display(),
-        model,
-        batch_size
+        model
     );
     print_verbose(
         cli,
@@ -328,8 +326,7 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
         let payload = json!({
             "audio": chunk_audio,
             "out_txt": chunk_out_txt,
-            "model": model,
-            "batch_size": batch_size
+            "model": model
         })
         .to_string();
         let server_out = Command::new("curl")
@@ -367,7 +364,6 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
                                 "method": "parakeet_server",
                                 "server": base_url,
                                 "model": model,
-                                "batch_size": batch_size,
                                 "elapsed_sec": parsed.get("elapsed_sec").and_then(|v| v.as_f64()),
                             }),
                         );
@@ -419,8 +415,6 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
         .arg(chunk_out_txt)
         .arg("--model")
         .arg(&model)
-        .arg("--batch-size")
-        .arg(batch_size.to_string())
         .output();
 
     match output {
@@ -434,7 +428,6 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
                 "status": "ok",
                 "method": "parakeet_python",
                 "model": model,
-                "batch_size": batch_size,
                 "script": script_path.display().to_string(),
             });
             if let Some(err) = server_error {

@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_PARAKEET_MODEL: &str = "nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc";
 const DEFAULT_PARAKEET_SERVER_WAIT_READY_SEC: u64 = 30;
-const DEFAULT_PARAKEET_BATCH_SIZE: u32 = 4;
 
 fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
@@ -149,14 +148,6 @@ pub(crate) fn resolve_parakeet_model(explicit: Option<&str>) -> String {
     }
 
     DEFAULT_PARAKEET_MODEL.to_string()
-}
-
-pub(crate) fn resolve_parakeet_batch_size() -> u32 {
-    env::var("RIFF_PARAKEET_BATCH_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(DEFAULT_PARAKEET_BATCH_SIZE)
 }
 
 pub(crate) fn resolve_parakeet_script(explicit: Option<&Path>) -> Option<PathBuf> {
@@ -548,7 +539,6 @@ fn transcribe_via_parakeet_server(
     audio_path: &Path,
     out_txt: &Path,
     model: &str,
-    batch_size: u32,
 ) -> Result<(String, Value), Value> {
     if !command_exists("curl") {
         return Err(json!({
@@ -561,8 +551,7 @@ fn transcribe_via_parakeet_server(
     let payload = json!({
         "audio": audio_path,
         "out_txt": out_txt,
-        "model": model,
-        "batch_size": batch_size
+        "model": model
     })
     .to_string();
 
@@ -636,7 +625,6 @@ fn transcribe_via_parakeet_server(
             "method": "parakeet_server",
             "server": base_url,
             "model": model,
-            "batch_size": batch_size,
             "elapsed_sec": parsed.get("elapsed_sec").and_then(|v| v.as_f64()),
         }),
     ))
@@ -774,10 +762,8 @@ pub(crate) fn run_transcription(
 
     let python_bin = resolve_python_bin(stop_args.python_bin.as_deref());
     let model = resolve_parakeet_model(stop_args.parakeet_model.as_deref());
-    let batch_size = resolve_parakeet_batch_size();
     perf.insert("python_bin".to_string(), json!(python_bin.clone()));
     perf.insert("model".to_string(), json!(model.clone()));
-    perf.insert("batch_size".to_string(), json!(batch_size));
     perf.insert(
         "script_path".to_string(),
         json!(script_path.display().to_string()),
@@ -826,13 +812,7 @@ pub(crate) fn run_transcription(
 
         if server_health_after {
             let t_server_request = Instant::now();
-            match transcribe_via_parakeet_server(
-                &base_url,
-                &audio_path,
-                &out_txt,
-                &model,
-                batch_size,
-            ) {
+            match transcribe_via_parakeet_server(&base_url, &audio_path, &out_txt, &model) {
                 Ok((txt, meta)) => {
                     perf_mark(&mut perf, "server_request_ms", t_server_request);
                     if !txt.is_empty() {
@@ -866,13 +846,12 @@ pub(crate) fn run_transcription(
     }
 
     let cmd_for_log = format!(
-        "{} {} --audio {} --out-txt {} --model {} --batch-size {}",
+        "{} {} --audio {} --out-txt {} --model {}",
         shell_escape(&python_bin),
         shell_escape(&script_path.display().to_string()),
         shell_escape(&audio_path.display().to_string()),
         shell_escape(&out_txt.display().to_string()),
-        shell_escape(&model),
-        batch_size
+        shell_escape(&model)
     );
 
     print_verbose(
@@ -889,8 +868,6 @@ pub(crate) fn run_transcription(
         .arg(&out_txt)
         .arg("--model")
         .arg(&model)
-        .arg("--batch-size")
-        .arg(batch_size.to_string())
         .output();
     perf_mark(&mut perf, "python_transcribe_ms", t_python);
 
@@ -914,7 +891,6 @@ pub(crate) fn run_transcription(
                 "cmd": cmd_for_log,
                 "script": script_path,
                 "model": model,
-                "batch_size": batch_size,
             });
             if let Some(server_error_meta) = server_error {
                 if let Some(obj) = meta.as_object_mut() {

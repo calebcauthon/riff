@@ -227,7 +227,6 @@ record = {
     "stop_phases": phases,
     "transcription_method": trans.get("method"),
     "transcription_status": trans.get("status"),
-    "batch_size": trans.get("batch_size"),
     "server_health_before": tperf.get("server_health_before"),
     "server_health_after": tperf.get("server_health_after"),
     "server_ensure_ms": tperf.get("server_ensure_ms"),
