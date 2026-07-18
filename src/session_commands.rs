@@ -322,7 +322,7 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
 
     let mut server_error: Option<Value> = None;
     if parakeet_server_enabled() && command_exists("curl") {
-        ensure_parakeet_server(&python_bin, &script_path, &model, cli, true);
+        ensure_parakeet_server(&python_bin, &script_path, &model, cli, true, None, "chunk");
         let base_url =
             env::var("RIFF_PARAKEET_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8765".into());
         let payload = json!({
@@ -655,6 +655,11 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     let mut transcription_state_save_ms = 0.0;
     let mut parakeet_server_warmup_ms = 0.0;
     let mut parakeet_server_warmup_attempted = false;
+    let mut parakeet_server_warmup = json!({
+        "outcome": "disabled",
+        "instance_id": Value::Null,
+        "pid": Value::Null,
+    });
 
     let active_path = active_state_file();
     if active_path.exists() {
@@ -885,7 +890,16 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             let t_parakeet_server_warmup = Instant::now();
             let python_bin = resolve_python_bin(None);
             let model = resolve_parakeet_model(None);
-            ensure_parakeet_server(&python_bin, &script_path, &model, cli, false);
+            let warmup = ensure_parakeet_server(
+                &python_bin,
+                &script_path,
+                &model,
+                cli,
+                false,
+                Some(&session_id),
+                "start",
+            );
+            parakeet_server_warmup = warmup.as_json();
             parakeet_server_warmup_attempted = true;
             parakeet_server_warmup_ms = elapsed_ms(t_parakeet_server_warmup);
         }
@@ -917,7 +931,8 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         "audio_device_retry": audio_device_retry,
         "transcription_watcher_spawned": transcription_watcher_spawned,
         "transcription_watcher_pid": state.transcription_watcher_pid,
-        "parakeet_server_warmup_attempted": parakeet_server_warmup_attempted
+        "parakeet_server_warmup_attempted": parakeet_server_warmup_attempted,
+        "parakeet_server_warmup": parakeet_server_warmup
     }));
 
     play_event_sound("start", cli);
@@ -973,6 +988,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
                 "watcher_setup_ms": watcher_setup_ms
             },
             "parakeet_server_warmup_attempted": parakeet_server_warmup_attempted,
+            "parakeet_server_warmup": parakeet_server_warmup,
             "dry_run": false,
             "state_saved": true
         }),

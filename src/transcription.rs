@@ -2,8 +2,8 @@ use crate::cli::{Cli, StopArgs};
 use crate::error::{app_error, AppError};
 use crate::models::SessionState;
 use crate::paths::{
-    parakeet_server_log_file, parakeet_server_pid_file, root_dir, web_server_log_file,
-    web_server_pid_file,
+    parakeet_server_log_file, parakeet_server_pid_file, perf_log_file, root_dir,
+    web_server_log_file, web_server_pid_file,
 };
 use crate::setup::default_user_runtime_dir;
 use crate::{
@@ -18,7 +18,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_PARAKEET_MODEL: &str = "nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc";
 const DEFAULT_PARAKEET_SERVER_WAIT_READY_SEC: u64 = 30;
@@ -211,6 +211,45 @@ fn parakeet_server_transcribe_url(base: &str) -> String {
     format!("{}/transcribe", base.trim_end_matches('/'))
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ParakeetServerWarmup {
+    pub(crate) outcome: &'static str,
+    pub(crate) instance_id: Option<String>,
+    pub(crate) pid: Option<i32>,
+}
+
+impl ParakeetServerWarmup {
+    fn new(outcome: &'static str, instance_id: Option<String>, pid: Option<i32>) -> Self {
+        Self {
+            outcome,
+            instance_id,
+            pid,
+        }
+    }
+
+    pub(crate) fn as_json(&self) -> Value {
+        json!({
+            "outcome": self.outcome,
+            "instance_id": self.instance_id,
+            "pid": self.pid,
+        })
+    }
+}
+
+enum ParakeetServerSpawn {
+    Spawned {
+        pid: i32,
+        instance_id: String,
+    },
+    AlreadyRunning {
+        pid: i32,
+    },
+    Failed {
+        error: AppError,
+        instance_id: Option<String>,
+    },
+}
+
 pub(crate) fn check_parakeet_server_health(base_url: &str) -> bool {
     if !command_exists("curl") {
         return false;
@@ -235,7 +274,9 @@ fn spawn_parakeet_server(
     script_path: &Path,
     model: &str,
     cli: &Cli,
-) -> Result<i32, AppError> {
+    trigger_session_id: Option<&str>,
+    trigger_action: &str,
+) -> ParakeetServerSpawn {
     let pid_file = parakeet_server_pid_file();
     if let Some(pid) = read_pid_file(&pid_file) {
         if process_is_alive(pid) {
@@ -243,7 +284,7 @@ fn spawn_parakeet_server(
                 cli,
                 format!("Parakeet server process already running (pid={})", pid),
             );
-            return Ok(pid);
+            return ParakeetServerSpawn::AlreadyRunning { pid };
         }
     }
 
@@ -259,14 +300,24 @@ fn spawn_parakeet_server(
     if let Some(parent) = log_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| app_error(1, format!("Failed to open {}: {e}", log_path.display())))?;
-    let log_file_err = log_file
-        .try_clone()
-        .map_err(|e| app_error(1, format!("Failed to clone server log file handle: {e}")))?;
+    let log_file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(file) => file,
+        Err(e) => {
+            return ParakeetServerSpawn::Failed {
+                error: app_error(1, format!("Failed to open {}: {e}", log_path.display())),
+                instance_id: None,
+            }
+        }
+    };
+    let log_file_err = match log_file.try_clone() {
+        Ok(file) => file,
+        Err(e) => {
+            return ParakeetServerSpawn::Failed {
+                error: app_error(1, format!("Failed to clone server log file handle: {e}")),
+                instance_id: None,
+            }
+        }
+    };
 
     print_verbose(
         cli,
@@ -276,7 +327,13 @@ fn spawn_parakeet_server(
         ),
     );
 
-    let child = Command::new(python_bin)
+    let instance_seed_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let instance_id = format!("{instance_seed_ms}-{}", std::process::id());
+    let mut command = Command::new(python_bin);
+    command
         .arg(script_path)
         .arg("--serve")
         .arg("--host")
@@ -285,14 +342,42 @@ fn spawn_parakeet_server(
         .arg(port)
         .arg("--model")
         .arg(model)
+        .arg("--startup-instance-id")
+        .arg(&instance_id)
+        .arg("--startup-trigger-action")
+        .arg(trigger_action)
+        .arg("--startup-perf-log")
+        .arg(perf_log_file())
         .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_file_err))
-        .spawn()
-        .map_err(|e| app_error(1, format!("Failed to start Parakeet server: {e}")))?;
+        .stderr(Stdio::from(log_file_err));
+    if let Some(session_id) = trigger_session_id {
+        command.arg("--startup-trigger-session-id").arg(session_id);
+    }
+
+    // Capture this at the last possible point before spawn so Python can include
+    // interpreter/bootstrap time in the cross-process startup clock.
+    let spawn_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1000.0;
+    command
+        .arg("--startup-spawn-epoch-ms")
+        .arg(format!("{spawn_epoch_ms:.3}"));
+
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return ParakeetServerSpawn::Failed {
+                error: app_error(1, format!("Failed to start Parakeet server: {e}")),
+                instance_id: Some(instance_id),
+            }
+        }
+    };
 
     let pid = child.id() as i32;
     write_pid_file(&pid_file, pid);
-    Ok(pid)
+    ParakeetServerSpawn::Spawned { pid, instance_id }
 }
 
 pub(crate) fn ensure_parakeet_server(
@@ -301,28 +386,42 @@ pub(crate) fn ensure_parakeet_server(
     model: &str,
     cli: &Cli,
     wait_ready: bool,
-) {
+    trigger_session_id: Option<&str>,
+    trigger_action: &str,
+) -> ParakeetServerWarmup {
     if !parakeet_server_enabled() {
-        return;
+        return ParakeetServerWarmup::new("disabled", None, None);
     }
 
     let base_url = parakeet_server_base_url();
     if check_parakeet_server_health(&base_url) {
-        return;
+        return ParakeetServerWarmup::new("already_healthy", None, None);
     }
 
-    let spawned_pid = match spawn_parakeet_server(python_bin, script_path, model, cli) {
-        Ok(pid) => Some(pid),
-        Err(e) => {
+    let warmup = match spawn_parakeet_server(
+        python_bin,
+        script_path,
+        model,
+        cli,
+        trigger_session_id,
+        trigger_action,
+    ) {
+        ParakeetServerSpawn::Spawned { pid, instance_id } => {
+            ParakeetServerWarmup::new("spawned", Some(instance_id), Some(pid))
+        }
+        ParakeetServerSpawn::AlreadyRunning { pid } => {
+            ParakeetServerWarmup::new("still_starting", None, Some(pid))
+        }
+        ParakeetServerSpawn::Failed { error, instance_id } => {
             print_verbose(
                 cli,
-                format!("Failed to start Parakeet server: {}", e.message),
+                format!("Failed to start Parakeet server: {}", error.message),
             );
-            None
+            ParakeetServerWarmup::new("spawn_failed", instance_id, None)
         }
     };
-    if !wait_ready {
-        return;
+    if !wait_ready || warmup.outcome == "spawn_failed" {
+        return warmup;
     }
 
     let deadline = Instant::now() + Duration::from_secs(parakeet_server_wait_ready_timeout_sec());
@@ -330,9 +429,9 @@ pub(crate) fn ensure_parakeet_server(
     while Instant::now() < deadline {
         if check_parakeet_server_health(&base_url) {
             print_verbose(cli, format!("Parakeet server ready at {}", base_url));
-            return;
+            return warmup;
         }
-        if let Some(pid) = spawned_pid {
+        if let Some(pid) = warmup.pid {
             if !process_is_alive(pid) {
                 saw_dead_server_process = true;
                 print_verbose(
@@ -356,6 +455,7 @@ pub(crate) fn ensure_parakeet_server(
             saw_dead_server_process
         ),
     );
+    warmup
 }
 
 fn web_server_enabled() -> bool {
@@ -804,7 +904,20 @@ pub(crate) fn run_transcription(
         );
 
         let t_server_ensure = Instant::now();
-        ensure_parakeet_server(&python_bin, &script_path, &model, cli, true);
+        let trigger_session_id = audio_path
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str());
+        let server_warmup = ensure_parakeet_server(
+            &python_bin,
+            &script_path,
+            &model,
+            cli,
+            true,
+            trigger_session_id,
+            "stop",
+        );
+        perf.insert("server_warmup".to_string(), server_warmup.as_json());
         perf_mark(&mut perf, "server_ensure_ms", t_server_ensure);
 
         let t_server_health_after = Instant::now();

@@ -33,6 +33,7 @@ from typing import Any
 class AppError(Exception):
     message: str
     code: int = 1
+    failed_phase: str | None = None
 
     def __str__(self) -> str:
         return self.message
@@ -86,6 +87,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--download-model", action="store_true", help="Download/load the configured model and exit")
     p.add_argument("--host", default="127.0.0.1", help="Server host (serve mode)")
     p.add_argument("--port", type=int, default=8765, help="Server port (serve mode)")
+    p.add_argument("--startup-instance-id", help=argparse.SUPPRESS)
+    p.add_argument("--startup-spawn-epoch-ms", type=float, help=argparse.SUPPRESS)
+    p.add_argument("--startup-trigger-session-id", help=argparse.SUPPRESS)
+    p.add_argument("--startup-trigger-action", help=argparse.SUPPRESS)
+    p.add_argument("--startup-perf-log", help=argparse.SUPPRESS)
     p.add_argument("--events-path", help="events.jsonl path (watch mode)")
     p.add_argument("--session-id", help="session id (watch mode)")
     p.add_argument("--started-at-epoch", type=float, help="session start unix epoch sec (watch mode)")
@@ -147,8 +153,63 @@ def ensure_supported_python() -> None:
         )
 
 
-def load_model(model_name: str, device: str, verbose: bool, quiet: bool):
+def round_ms(value: float) -> float:
+    return round(max(value, 0.0), 3)
+
+
+def append_startup_event(perf_log: str | None, payload: dict[str, Any]) -> None:
+    if not perf_log:
+        return
+    path = Path(perf_log)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        # Startup records are small enough for a single append write.
+        os.write(fd, encoded)
+    finally:
+        os.close(fd)
+
+
+def startup_event(
+    args: argparse.Namespace,
+    status: str,
+    phases: dict[str, float],
+    device: str,
+    *,
+    failed_phase: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    spawn_epoch_ms = args.startup_spawn_epoch_ms or (time.time() * 1000.0)
+    payload: dict[str, Any] = {
+        "ts": iso_now(),
+        "action": "parakeet_server_startup",
+        "status": status,
+        "instance_id": args.startup_instance_id,
+        "trigger_session_id": args.startup_trigger_session_id,
+        "trigger_action": args.startup_trigger_action,
+        "pid": os.getpid(),
+        "model": args.model,
+        "device": device,
+        "total_ms": round_ms((time.time() * 1000.0) - spawn_epoch_ms),
+        "phases": {name: round_ms(value) for name, value in phases.items()},
+    }
+    if failed_phase is not None:
+        payload["failed_phase"] = failed_phase
+    if error is not None:
+        payload["error"] = error
+    return payload
+
+
+def load_model(
+    model_name: str,
+    device: str,
+    verbose: bool,
+    quiet: bool,
+    startup_phases: dict[str, float] | None = None,
+):
     ensure_supported_python()
+    import_started = time.perf_counter()
     try:
         import torch  # type: ignore
         from nemo.collections.asr.models import ASRModel  # type: ignore
@@ -159,12 +220,16 @@ def load_model(model_name: str, device: str, verbose: bool, quiet: bool):
             "Install with: pip install -r scripts/parakeet-requirements.txt\n"
             f"Import error: {type(e).__name__}: {e}",
             code=20,
+            failed_phase="dependency_import",
         ) from e
+    finally:
+        if startup_phases is not None:
+            startup_phases["dependency_import_ms"] = (time.perf_counter() - import_started) * 1000.0
 
     target = choose_device(device)
     map_location = "cuda" if target == "cuda" else "cpu"
 
-    t0 = time.time()
+    t0 = time.perf_counter()
     vout(f"Loading model '{model_name}' on {map_location}", verbose, quiet)
     revision = os.environ.get("RIFF_PARAKEET_MODEL_REVISION", "").strip()
     try:
@@ -180,8 +245,16 @@ def load_model(model_name: str, device: str, verbose: bool, quiet: bool):
         else:
             model = ASRModel.from_pretrained(model_name=model_name, map_location=map_location)
     except Exception as e:
-        raise AppError(f"Failed to load Parakeet model '{model_name}': {e}", code=21) from e
+        raise AppError(
+            f"Failed to load Parakeet model '{model_name}': {e}",
+            code=21,
+            failed_phase="model_load",
+        ) from e
+    finally:
+        if startup_phases is not None:
+            startup_phases["model_load_ms"] = (time.perf_counter() - t0) * 1000.0
 
+    placement_started = time.perf_counter()
     try:
         if target == "cuda":
             model = model.cuda()  # type: ignore[attr-defined]
@@ -189,8 +262,11 @@ def load_model(model_name: str, device: str, verbose: bool, quiet: bool):
             model = model.cpu()  # type: ignore[attr-defined]
     except Exception:
         pass
+    finally:
+        if startup_phases is not None:
+            startup_phases["model_placement_ms"] = (time.perf_counter() - placement_started) * 1000.0
 
-    vout(f"Model loaded in {time.time() - t0:.2f}s", verbose, quiet)
+    vout(f"Model loaded in {time.perf_counter() - t0:.2f}s", verbose, quiet)
     return model, target
 
 
@@ -621,8 +697,33 @@ def run_watch_audio(args: argparse.Namespace) -> int:
 
 
 def run_server(args: argparse.Namespace) -> int:
-    model, actual_device = load_model(args.model, args.device, args.verbose, args.quiet)
+    spawn_epoch_ms = args.startup_spawn_epoch_ms or (time.time() * 1000.0)
+    phases: dict[str, float] = {
+        "python_bootstrap_ms": round_ms((time.time() * 1000.0) - spawn_epoch_ms),
+    }
+    actual_device = args.device
+    try:
+        model, actual_device = load_model(
+            args.model,
+            args.device,
+            args.verbose,
+            args.quiet,
+            startup_phases=phases,
+        )
+    except AppError as e:
+        event = startup_event(
+            args,
+            "error",
+            phases,
+            actual_device,
+            failed_phase=e.failed_phase or "python_bootstrap",
+            error=str(e),
+        )
+        append_startup_event(args.startup_perf_log, event)
+        raise
+
     lock = threading.Lock()
+    startup_payload: dict[str, Any] = {}
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code: int, payload: dict[str, Any]) -> None:
@@ -646,6 +747,7 @@ def run_server(args: argparse.Namespace) -> int:
                         "service": "parakeet",
                         "model": args.model,
                         "device": actual_device,
+                        "startup": startup_payload,
                     },
                 )
                 return
@@ -695,7 +797,24 @@ def run_server(args: argparse.Namespace) -> int:
             except Exception as e:  # noqa: BLE001
                 self._send(500, {"ok": False, "error": f"internal error: {e}"})
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    bind_started = time.perf_counter()
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
+    except Exception as e:  # noqa: BLE001
+        phases["server_bind_ms"] = (time.perf_counter() - bind_started) * 1000.0
+        event = startup_event(
+            args,
+            "error",
+            phases,
+            actual_device,
+            failed_phase="server_bind",
+            error=f"{type(e).__name__}: {e}",
+        )
+        append_startup_event(args.startup_perf_log, event)
+        raise AppError(f"Failed to bind Parakeet server at {args.host}:{args.port}: {e}", code=24) from e
+    phases["server_bind_ms"] = (time.perf_counter() - bind_started) * 1000.0
+    startup_payload.update(startup_event(args, "ready", phases, actual_device))
+    append_startup_event(args.startup_perf_log, startup_payload)
     out(
         f"Parakeet server ready on http://{args.host}:{args.port} (model={args.model}, device={actual_device})",
         args.quiet,

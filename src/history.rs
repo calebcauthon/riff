@@ -386,7 +386,8 @@ pub(crate) fn cmd_perf(cli: &Cli, args: &PerfArgs) -> Result<i32, AppError> {
                 "recent": [],
                 "summary": {
                     "start": {"count": 0},
-                    "stop": {"count": 0}
+                    "stop": {"count": 0},
+                    "parakeet_server_startup": {"count": 0, "error_count": 0}
                 }
             }),
         );
@@ -403,6 +404,27 @@ pub(crate) fn cmd_perf(cli: &Cli, args: &PerfArgs) -> Result<i32, AppError> {
         })
         .cloned()
         .collect::<Vec<_>>();
+    let parakeet_startup_events = events
+        .iter()
+        .filter(|e| e.get("action").and_then(|v| v.as_str()) == Some("parakeet_server_startup"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let parakeet_ready_events = parakeet_startup_events
+        .iter()
+        .filter(|e| e.get("status").and_then(|v| v.as_str()) == Some("ready"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut parakeet_startup_summary =
+        compute_total_stats(&parakeet_ready_events, "parakeet_server_startup");
+    if let Some(summary) = parakeet_startup_summary.as_object_mut() {
+        summary.insert(
+            "error_count".to_string(),
+            json!(parakeet_startup_events
+                .iter()
+                .filter(|e| e.get("status").and_then(|v| v.as_str()) == Some("error"))
+                .count()),
+        );
+    }
 
     let mut recent = perf_events
         .iter()
@@ -445,6 +467,29 @@ pub(crate) fn cmd_perf(cli: &Cli, args: &PerfArgs) -> Result<i32, AppError> {
                 fmt(stop_summary.get("p95_ms").and_then(|v| v.as_f64())),
             ),
         );
+        print_out(
+            cli,
+            format!(
+                "parakeet cold start: count={} avg={}ms p50={}ms p95={}ms errors={}",
+                parakeet_startup_summary
+                    .get("count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                fmt(parakeet_startup_summary
+                    .get("avg_ms")
+                    .and_then(|v| v.as_f64())),
+                fmt(parakeet_startup_summary
+                    .get("p50_ms")
+                    .and_then(|v| v.as_f64())),
+                fmt(parakeet_startup_summary
+                    .get("p95_ms")
+                    .and_then(|v| v.as_f64())),
+                parakeet_startup_summary
+                    .get("error_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            ),
+        );
         print_out(cli, "recent:");
         for event in &recent {
             let ts = event.get("ts").and_then(|v| v.as_str()).unwrap_or("-");
@@ -475,7 +520,8 @@ pub(crate) fn cmd_perf(cli: &Cli, args: &PerfArgs) -> Result<i32, AppError> {
             "recent": recent,
             "summary": {
                 "start": compute_total_stats(&perf_events, "start"),
-                "stop": compute_total_stats(&perf_events, "stop")
+                "stop": compute_total_stats(&perf_events, "stop"),
+                "parakeet_server_startup": parakeet_startup_summary
             }
         }),
     );
