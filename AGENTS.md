@@ -100,6 +100,8 @@ ffmpeg/AVFoundation       screenshots + clipboard            finalize processes
   - one-shot transcription of an audio file;
   - a persistent `/health` + `/transcribe` HTTP server with one loaded model;
   - an optional live watcher that detects silence, extracts chunks with ffmpeg, transcribes them, and appends chunk events.
+
+In server mode, Rust passes a correlated startup instance ID, spawn timestamp, trigger, and `perf.jsonl` path. Python records one durable `parakeet_server_startup` event after binding or on import/model/bind failure, and exposes the successful startup timing object through `/health`. This records the full cold start without making `riff start` wait for readiness.
 - `scripts/riff_web_server.py` serves reports and supports local report actions such as selecting a screenshot variant or saving an annotation. It is a file/report server, not an inference service, and shuts down after an idle timeout.
 
 The Parakeet server uses a mode-`0600` Unix socket below `RIFF_ROOT` by default; the report server binds to loopback. PID and log files live below `RIFF_ROOT`, and `riff kill-server` stops both helpers and removes the Parakeet socket.
@@ -110,7 +112,7 @@ The Parakeet server uses a mode-`0600` Unix socket below `RIFF_ROOT` by default;
 
 `riff start` refuses to overlap a live session, creates `sessions/<timestamp>/`, detects the macOS screenshot folder and audio input, and starts ffmpeg with AVFoundation. Audio is written as 16 kHz, mono, 16-bit PCM WAV.
 
-It then writes `active_session.json`, starts a clipboard watcher by default, optionally starts live transcription when `RIFF_LIVE_TRANSCRIBE=1`, and begins warming the Parakeet server in the background. The clipboard watcher is another invocation of the Riff binary that polls `pbpaste` and appends changed, non-empty text to `events.jsonl` with an audio-relative timestamp.
+It then writes `active_session.json`, starts a clipboard watcher by default, optionally starts live transcription when `RIFF_LIVE_TRANSCRIBE=1`, and begins warming the Parakeet server in the background. Start returns a structured warmup outcome immediately; a newly spawned Python server later appends its correlated ready/error event. The clipboard watcher is another invocation of the Riff binary that polls `pbpaste` and appends changed, non-empty text to `events.jsonl` with an audio-relative timestamp.
 
 ### 2. Capture during the session
 
@@ -142,7 +144,7 @@ Default layout:
 /tmp/riff/
   active_session.json             # present only while recording
   last_session.json
-  perf.jsonl
+  perf.jsonl                       # start/stop and Parakeet cold-start timing events
   parakeet-server.{pid,log}
   parakeet-server.sock
   web-server.{pid,log}

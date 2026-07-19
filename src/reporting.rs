@@ -520,7 +520,10 @@ fn build_hooks_section_html(transcription_meta: &Value, pre_hook_core: Option<&s
             let detail_html = if detail.is_empty() {
                 String::new()
             } else {
-                format!(" <span class=\"hook-detail\">{}</span>", html_escape(&detail))
+                format!(
+                    " <span class=\"hook-detail\">{}</span>",
+                    html_escape(&detail)
+                )
             };
             hook_items.push_str(&format!(
                 r#"<li><span class="hook-badge {badge}">{status}</span><code>{cmd}</code>{detail}</li>"#,
@@ -550,7 +553,9 @@ fn build_hooks_section_html(transcription_meta: &Value, pre_hook_core: Option<&s
         None => String::new(),
     };
 
-    format!(r#"<section class="panel"><h2>Output hooks</h2>{hooks_list_html}{original_html}</section>"#)
+    format!(
+        r#"<section class="panel"><h2>Output hooks</h2>{hooks_list_html}{original_html}</section>"#
+    )
 }
 
 pub(crate) fn build_html_note(
@@ -691,7 +696,11 @@ pub(crate) fn build_html_note(
 
     let post_core = transcript_core.trim().to_string();
     let pre_hook_core = pre_hook_transcript
-        .map(|t| strip_leading_annotation_source_block(t.trim()).trim().to_string())
+        .map(|t| {
+            strip_leading_annotation_source_block(t.trim())
+                .trim()
+                .to_string()
+        })
         .filter(|core| !core.is_empty() && *core != post_core);
     let hooks_section = build_hooks_section_html(transcription_meta, pre_hook_core.as_deref());
 

@@ -79,7 +79,7 @@ On `stop`, riff:
 Performance/observability logs:
 
 ```text
-/tmp/riff/perf.jsonl                # structured start/stop phase timings
+/tmp/riff/perf.jsonl                # start/stop and Parakeet cold-start timings
 /tmp/riff/parakeet-server.log       # warm Parakeet server logs
 /tmp/riff/parakeet-server.sock      # Riff-owned local inference socket
 /tmp/riff/web-server.log            # local HTML web server logs
@@ -184,7 +184,7 @@ brew upgrade riff
 ```
 
 Performance note:
-- `riff start` warms a local Parakeet server on `$RIFF_ROOT/parakeet-server.sock` in the background (when enabled), so later `riff stop` calls are faster.
+- `riff start` warms a local Parakeet server on `$RIFF_ROOT/parakeet-server.sock` in the background (when enabled), reports whether it spawned or reused an instance, and does not wait for readiness, so later `riff stop` calls are faster.
 - Riff validates the server's exact model, revision, device, runtime, PID, owning root, and instance before accepting a transcript.
 - `riff stop` auto-starts a local HTML web server with idle-timeout for richer session pages.
 
@@ -658,7 +658,7 @@ riff perf        # recent 40 records
 riff perf 100    # recent 100 records
 ```
 
-Summarizes `start`/`stop` timings from `/tmp/riff/perf.jsonl` (count, avg, p50, p95) and shows recent entries with dominant phase.
+Summarizes `start`/`stop` timings from `/tmp/riff/perf.jsonl` (count, avg, p50, p95), reports Parakeet cold-start readiness separately, and shows recent command entries with dominant phase. `riff perf --json` exposes that distribution at `summary.parakeet_server_startup`.
 
 `riff start` now also prints a short `startup_phase_ms` line, and `riff stop` prints `stop_phase_ms`, so you can spot the blocking phase immediately from the command output. The perf log now includes finer-grained phase timings for state setup, watcher startup/shutdown, screenshot movement, transcript generation, note rendering, and final writes.
 
@@ -771,7 +771,7 @@ riff --json status
 
 ## Latency instrumentation
 
-Every start/stop writes structured timings to:
+Every start/stop writes structured timings to the perf log. A newly spawned Parakeet server also appends one correlated `parakeet_server_startup` record when it binds or fails:
 
 ```bash
 cat /tmp/riff/perf.jsonl
@@ -785,6 +785,8 @@ tail -f /tmp/riff/perf.jsonl
 
 Focus on these fields:
 - start: `phases.spawn_recorder_ms`
+- start: `parakeet_server_warmup.outcome` and `instance_id` (`already_healthy`, `spawned`, `still_starting`, `disabled`, or `spawn_failed`)
+- Parakeet startup: `status`, `total_ms`, and `phases` (Python bootstrap, dependency imports, model load/placement, and server bind)
 - stop: `phases.transcribe_ms` (usually the biggest)
 - stop: `phases.web_server_ms` (local HTML server startup/health)
 - stop: `phases.generate_index_ms` (sessions index rebuild cost)

@@ -1,6 +1,6 @@
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -517,6 +517,217 @@ fn perf_reports_no_records_when_empty() {
         .assert()
         .success()
         .stdout(predicates::str::contains("No perf records found."));
+}
+
+#[test]
+fn perf_json_reports_parakeet_startup_separately() {
+    let td = tempdir().expect("tempdir");
+    fs::write(
+        td.path().join("perf.jsonl"),
+        concat!(
+            "{\"action\":\"start\",\"total_ms\":100.0}\n",
+            "{\"action\":\"parakeet_server_startup\",\"status\":\"ready\",\"total_ms\":8000.0}\n",
+            "{\"action\":\"parakeet_server_startup\",\"status\":\"ready\",\"total_ms\":10000.0}\n",
+            "{\"action\":\"parakeet_server_startup\",\"status\":\"error\",\"total_ms\":5000.0}\n"
+        ),
+    )
+    .expect("write perf log");
+
+    cmd_with_root(td.path())
+        .arg("perf")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "parakeet cold start: count=2 avg=9000.0ms p50=10000.0ms p95=10000.0ms errors=1",
+        ));
+
+    let out = cmd_with_root(td.path())
+        .args(["--json", "--quiet", "perf"])
+        .output()
+        .expect("run perf --json");
+    assert!(out.status.success());
+    let payload: Value = serde_json::from_slice(&out.stdout).expect("parse perf json");
+    let summary = &payload["summary"]["parakeet_server_startup"];
+    assert_eq!(summary["count"].as_u64(), Some(2));
+    assert_eq!(summary["avg_ms"].as_f64(), Some(9000.0));
+    assert_eq!(summary["p50_ms"].as_f64(), Some(10000.0));
+    assert_eq!(summary["p95_ms"].as_f64(), Some(10000.0));
+    assert_eq!(summary["error_count"].as_u64(), Some(1));
+    assert_eq!(payload["summary"]["start"]["avg_ms"].as_f64(), Some(100.0));
+}
+
+#[test]
+fn start_with_healthy_parakeet_reports_no_cold_start() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+    let marker = td.path().join("python-invoked");
+    let parakeet_script = td.path().join("fake_parakeet.py");
+    fs::write(&parakeet_script, "# fake\n").expect("write fake parakeet script");
+    let canonical_root = fs::canonicalize(td.path()).expect("canonicalize temp root");
+    let canonical_script = fs::canonicalize(&parakeet_script).expect("canonicalize fake script");
+    let health = json!({
+        "ok": true,
+        "protocol_version": 1,
+        "service": "parakeet",
+        "server_instance_id": "healthy-test-instance",
+        "pid": 123,
+        "riff_root": canonical_root.display().to_string(),
+        "script_path": canonical_script.display().to_string(),
+        "transport": "unix",
+        "endpoint": format!("unix://{}", canonical_root.join("parakeet-server.sock").display()),
+        "model": "nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc",
+        "model_revision": "main",
+        "requested_device": "auto",
+        "device": "cpu",
+        "python_version": "3.12.0",
+        "python_executable": fake_bin.join("python3").display().to_string(),
+        "nemo_version": "2.4.0",
+        "torch_version": "2.7.1",
+        "started_at_epoch": 1.0
+    });
+    write_executable(
+        &fake_bin.join("curl"),
+        &format!("#!/usr/bin/env bash\nprintf '%s\\n' '{}'\n", health),
+    );
+    write_executable(
+        &fake_bin.join("python3"),
+        &format!(
+            "#!/usr/bin/env bash\nprintf invoked > '{}'\n",
+            marker.display()
+        ),
+    );
+
+    let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_PARAKEET_SERVER", "1")
+        .env("RIFF_CLIPBOARD_MONITOR", "0")
+        .env("RIFF_PYTHON_BIN", fake_bin.join("python3"))
+        .env("RIFF_PARAKEET_SCRIPT", &parakeet_script)
+        .env(
+            "RIFF_PARAKEET_MODEL",
+            "nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc",
+        )
+        .args([
+            "--json",
+            "--quiet",
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .output()
+        .expect("run start");
+    assert!(out.status.success());
+    let payload: Value = serde_json::from_slice(&out.stdout).expect("parse start json");
+    assert_eq!(
+        payload["parakeet_server_warmup"]["outcome"].as_str(),
+        Some("already_healthy")
+    );
+    assert!(!marker.exists(), "healthy server should not spawn Python");
+    let perf = fs::read_to_string(td.path().join("perf.jsonl")).expect("read perf log");
+    assert_eq!(
+        perf.lines()
+            .filter(|line| line.contains("parakeet_server_startup"))
+            .count(),
+        0
+    );
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args(["stop", "--transcribe-cmd", "printf '' > {out_txt}"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cold_start_returns_immediately_and_correlates_readiness_event() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+    let parakeet_script = td.path().join("fake_parakeet.py");
+    fs::write(&parakeet_script, "# fake\n").expect("write fake parakeet script");
+    write_executable(&fake_bin.join("curl"), "#!/usr/bin/env bash\nexit 22\n");
+    write_executable(
+        &fake_bin.join("python3"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+shift
+instance=""
+session=""
+action=""
+perf_log=""
+model=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --startup-instance-id) instance="$2"; shift 2 ;;
+    --startup-trigger-session-id) session="$2"; shift 2 ;;
+    --startup-trigger-action) action="$2"; shift 2 ;;
+    --startup-perf-log) perf_log="$2"; shift 2 ;;
+    --model) model="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '{"action":"parakeet_server_startup","status":"ready","instance_id":"%s","trigger_session_id":"%s","trigger_action":"%s","pid":%s,"model":"%s","device":"cpu","total_ms":1.0,"phases":{"python_bootstrap_ms":1.0}}\n' "$instance" "$session" "$action" "$$" "$model" >> "$perf_log"
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+"#,
+    );
+
+    let started = std::time::Instant::now();
+    let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_PARAKEET_SERVER", "1")
+        .env("RIFF_CLIPBOARD_MONITOR", "0")
+        .env("RIFF_PYTHON_BIN", fake_bin.join("python3"))
+        .env("RIFF_PARAKEET_SCRIPT", &parakeet_script)
+        .args([
+            "--json",
+            "--quiet",
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .output()
+        .expect("run start");
+    assert!(out.status.success());
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let payload: Value = serde_json::from_slice(&out.stdout).expect("parse start json");
+    let warmup = &payload["parakeet_server_warmup"];
+    assert_eq!(warmup["outcome"].as_str(), Some("spawned"));
+    let instance_id = warmup["instance_id"].as_str().expect("instance id");
+    let session_id = payload["session_id"].as_str().expect("session id");
+
+    let perf_path = td.path().join("perf.jsonl");
+    for _ in 0..100 {
+        let ready = fs::read_to_string(&perf_path)
+            .map(|text| text.contains("parakeet_server_startup"))
+            .unwrap_or(false);
+        if ready {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let events = fs::read_to_string(&perf_path).expect("read perf log");
+    let startup_events = events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["action"] == "parakeet_server_startup")
+        .collect::<Vec<_>>();
+    assert_eq!(startup_events.len(), 1);
+    assert_eq!(startup_events[0]["instance_id"], instance_id);
+    assert_eq!(startup_events[0]["trigger_session_id"], session_id);
+    assert_eq!(startup_events[0]["trigger_action"], "start");
+    assert_eq!(startup_events[0]["pid"], warmup["pid"]);
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args(["stop", "--transcribe-cmd", "printf '' > {out_txt}"])
+        .assert()
+        .success();
+    cmd_with_root(td.path())
+        .arg("kill-server")
+        .assert()
+        .success();
 }
 
 #[test]

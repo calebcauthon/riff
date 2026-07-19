@@ -31,6 +31,7 @@ The working benchmark became:
 - Tightened recorder start polling from `50ms` to `20ms`.
 - Cached the resolved watcher Python binary so live-transcription start does not repeatedly probe Torch/NeMo dependencies.
 - Added non-blocking Parakeet server warmup on `start`.
+- Added correlated Parakeet cold-start readiness/error events written asynchronously by the Python server, with bootstrap, dependency import, model load/placement, and bind timings.
 
 ### Shutdown optimizations
 

@@ -2,8 +2,8 @@ use crate::cli::{Cli, StopArgs};
 use crate::error::{app_error, AppError};
 use crate::models::SessionState;
 use crate::paths::{
-    parakeet_server_log_file, parakeet_server_pid_file, parakeet_server_socket_file, root_dir,
-    web_server_log_file, web_server_pid_file,
+    parakeet_server_log_file, parakeet_server_pid_file, parakeet_server_socket_file, perf_log_file,
+    root_dir, web_server_log_file, web_server_pid_file,
 };
 use crate::setup::default_user_runtime_dir;
 use crate::{
@@ -19,7 +19,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_PARAKEET_MODEL: &str = "nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc";
 const DEFAULT_PARAKEET_MODEL_REVISION: &str = "main";
@@ -421,6 +421,66 @@ fn get_valid_parakeet_server_identity(
     Ok(identity)
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ParakeetServerWarmup {
+    pub(crate) outcome: &'static str,
+    pub(crate) instance_id: Option<String>,
+    pub(crate) pid: Option<i32>,
+    pub(crate) identity: Option<ParakeetServerIdentity>,
+}
+
+impl ParakeetServerWarmup {
+    fn new(outcome: &'static str, instance_id: Option<String>, pid: Option<i32>) -> Self {
+        Self {
+            outcome,
+            instance_id,
+            pid,
+            identity: None,
+        }
+    }
+
+    fn with_identity(mut self, identity: ParakeetServerIdentity) -> Self {
+        self.instance_id = Some(identity.server_instance_id.clone());
+        self.pid = Some(identity.pid);
+        self.identity = Some(identity);
+        self
+    }
+
+    pub(crate) fn as_json(&self) -> Value {
+        json!({
+            "outcome": self.outcome,
+            "instance_id": self.instance_id,
+            "pid": self.pid,
+        })
+    }
+}
+
+enum ParakeetServerSpawn {
+    Spawned {
+        pid: i32,
+        instance_id: String,
+    },
+    Failed {
+        error: AppError,
+        instance_id: Option<String>,
+    },
+}
+
+fn warmup_from_spawn(spawn: ParakeetServerSpawn, cli: &Cli) -> ParakeetServerWarmup {
+    match spawn {
+        ParakeetServerSpawn::Spawned { pid, instance_id } => {
+            ParakeetServerWarmup::new("spawned", Some(instance_id), Some(pid))
+        }
+        ParakeetServerSpawn::Failed { error, instance_id } => {
+            print_verbose(
+                cli,
+                format!("Failed to start Parakeet server: {}", error.message),
+            );
+            ParakeetServerWarmup::new("spawn_failed", instance_id, None)
+        }
+    }
+}
+
 pub(crate) fn check_parakeet_server_health(base_url: &str) -> bool {
     get_valid_parakeet_server_identity(base_url, None, None).is_ok()
 }
@@ -484,7 +544,9 @@ fn spawn_parakeet_server(
     script_path: &Path,
     model: &str,
     cli: &Cli,
-) -> Result<i32, AppError> {
+    trigger_session_id: Option<&str>,
+    trigger_action: &str,
+) -> ParakeetServerSpawn {
     let pid_file = parakeet_server_pid_file();
     let base_url = parakeet_server_base_url();
 
@@ -492,14 +554,24 @@ fn spawn_parakeet_server(
     if let Some(parent) = log_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| app_error(1, format!("Failed to open {}: {e}", log_path.display())))?;
-    let log_file_err = log_file
-        .try_clone()
-        .map_err(|e| app_error(1, format!("Failed to clone server log file handle: {e}")))?;
+    let log_file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(file) => file,
+        Err(e) => {
+            return ParakeetServerSpawn::Failed {
+                error: app_error(1, format!("Failed to open {}: {e}", log_path.display())),
+                instance_id: None,
+            }
+        }
+    };
+    let log_file_err = match log_file.try_clone() {
+        Ok(file) => file,
+        Err(e) => {
+            return ParakeetServerSpawn::Failed {
+                error: app_error(1, format!("Failed to clone server log file handle: {e}")),
+                instance_id: None,
+            }
+        }
+    };
 
     print_verbose(
         cli,
@@ -509,6 +581,11 @@ fn spawn_parakeet_server(
         ),
     );
 
+    let instance_seed_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let instance_id = format!("{instance_seed_ms}-{}", std::process::id());
     let mut command = Command::new(python_bin);
     command
         .arg(script_path)
@@ -520,7 +597,13 @@ fn spawn_parakeet_server(
         .arg("--model-revision")
         .arg(resolve_parakeet_model_revision())
         .arg("--riff-root")
-        .arg(normalized_path(&root_dir()));
+        .arg(normalized_path(&root_dir()))
+        .arg("--startup-instance-id")
+        .arg(&instance_id)
+        .arg("--startup-trigger-action")
+        .arg(trigger_action)
+        .arg("--startup-perf-log")
+        .arg(perf_log_file());
     if let Some(socket_path) = parakeet_server_unix_socket(&base_url) {
         command.arg("--unix-socket").arg(socket_path);
     } else {
@@ -534,15 +617,37 @@ fn spawn_parakeet_server(
             .arg("--port")
             .arg(parts.next().unwrap_or("8765"));
     }
-    let child = command
+    command
         .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_file_err))
-        .spawn()
-        .map_err(|e| app_error(1, format!("Failed to start Parakeet server: {e}")))?;
+        .stderr(Stdio::from(log_file_err));
+    if let Some(session_id) = trigger_session_id {
+        command.arg("--startup-trigger-session-id").arg(session_id);
+    }
+
+    // Capture this at the last possible point before spawn so Python can include
+    // interpreter/bootstrap time in the cross-process startup clock.
+    let spawn_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1000.0;
+    command
+        .arg("--startup-spawn-epoch-ms")
+        .arg(format!("{spawn_epoch_ms:.3}"));
+
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return ParakeetServerSpawn::Failed {
+                error: app_error(1, format!("Failed to start Parakeet server: {e}")),
+                instance_id: Some(instance_id),
+            }
+        }
+    };
 
     let pid = child.id() as i32;
     write_pid_file(&pid_file, pid);
-    Ok(pid)
+    ParakeetServerSpawn::Spawned { pid, instance_id }
 }
 
 pub(crate) fn ensure_parakeet_server(
@@ -551,26 +656,30 @@ pub(crate) fn ensure_parakeet_server(
     model: &str,
     cli: &Cli,
     wait_ready: bool,
-) -> Option<ParakeetServerIdentity> {
+    trigger_session_id: Option<&str>,
+    trigger_action: &str,
+) -> ParakeetServerWarmup {
     if !parakeet_server_enabled() {
-        return None;
+        return ParakeetServerWarmup::new("disabled", None, None);
     }
 
     let base_url = parakeet_server_base_url();
     match get_valid_parakeet_server_identity(&base_url, Some(model), Some(script_path)) {
-        Ok(identity) => return Some(identity),
+        Ok(identity) => {
+            return ParakeetServerWarmup::new("already_healthy", None, None).with_identity(identity)
+        }
         Err(reason) => print_verbose(
             cli,
             format!("Parakeet server is not usable at {base_url}: {reason}"),
         ),
     }
 
-    let mut spawned_pid = None;
+    let mut existing_pid = None;
     if let Ok(identity) = query_parakeet_server_identity(&base_url) {
         if identity_owned_by_current_root(&identity, &base_url) {
             if !stop_mismatched_owned_server(&identity, &base_url, cli) {
                 print_verbose(cli, "Could not stop mismatched Riff-owned Parakeet server.");
-                return None;
+                return ParakeetServerWarmup::new("spawn_failed", None, Some(identity.pid));
             }
         } else {
             print_verbose(
@@ -581,11 +690,11 @@ pub(crate) fn ensure_parakeet_server(
                     serde_json::to_string(&identity).unwrap_or_default()
                 ),
             );
-            return None;
+            return ParakeetServerWarmup::new("spawn_failed", None, Some(identity.pid));
         }
     } else if let Some(pid) = read_pid_file(&parakeet_server_pid_file()) {
         if process_is_alive(pid) && process_matches_parakeet_server(pid, script_path, model) {
-            spawned_pid = Some(pid);
+            existing_pid = Some(pid);
             print_verbose(
                 cli,
                 format!("Waiting for existing Parakeet server process pid={pid}"),
@@ -598,20 +707,23 @@ pub(crate) fn ensure_parakeet_server(
         }
     }
 
-    if spawned_pid.is_none() {
-        spawned_pid = match spawn_parakeet_server(python_bin, script_path, model, cli) {
-            Ok(pid) => Some(pid),
-            Err(e) => {
-                print_verbose(
-                    cli,
-                    format!("Failed to start Parakeet server: {}", e.message),
-                );
-                None
-            }
-        };
-    }
-    if !wait_ready {
-        return None;
+    let mut warmup = if let Some(pid) = existing_pid {
+        ParakeetServerWarmup::new("still_starting", None, Some(pid))
+    } else {
+        warmup_from_spawn(
+            spawn_parakeet_server(
+                python_bin,
+                script_path,
+                model,
+                cli,
+                trigger_session_id,
+                trigger_action,
+            ),
+            cli,
+        )
+    };
+    if !wait_ready || warmup.outcome == "spawn_failed" {
+        return warmup;
     }
 
     let deadline = Instant::now() + Duration::from_secs(parakeet_server_wait_ready_timeout_sec());
@@ -632,7 +744,7 @@ pub(crate) fn ensure_parakeet_server(
                             identity.device
                         ),
                     );
-                    return Some(identity);
+                    return warmup.with_identity(identity);
                 }
                 Err(reason)
                     if identity_owned_by_current_root(&identity, &base_url)
@@ -646,16 +758,20 @@ pub(crate) fn ensure_parakeet_server(
                         break;
                     }
                     restarted_mismatched_server = true;
-                    spawned_pid = match spawn_parakeet_server(python_bin, script_path, model, cli) {
-                        Ok(pid) => Some(pid),
-                        Err(e) => {
-                            print_verbose(
-                                cli,
-                                format!("Failed to restart Parakeet server: {}", e.message),
-                            );
-                            break;
-                        }
-                    };
+                    warmup = warmup_from_spawn(
+                        spawn_parakeet_server(
+                            python_bin,
+                            script_path,
+                            model,
+                            cli,
+                            trigger_session_id,
+                            trigger_action,
+                        ),
+                        cli,
+                    );
+                    if warmup.outcome == "spawn_failed" {
+                        break;
+                    }
                     continue;
                 }
                 Err(reason) => {
@@ -666,7 +782,7 @@ pub(crate) fn ensure_parakeet_server(
                 }
             }
         }
-        if let Some(pid) = spawned_pid {
+        if let Some(pid) = warmup.pid {
             if !process_is_alive(pid) {
                 saw_dead_server_process = true;
                 print_verbose(
@@ -690,7 +806,7 @@ pub(crate) fn ensure_parakeet_server(
             saw_dead_server_process
         ),
     );
-    None
+    warmup
 }
 
 fn web_server_enabled() -> bool {
@@ -1197,10 +1313,21 @@ pub(crate) fn run_transcription(
         }
 
         let t_server_ensure = Instant::now();
-        let server_identity = match identity_before {
-            Ok(identity) => Some(identity),
-            Err(_) => ensure_parakeet_server(&python_bin, &script_path, &model, cli, true),
-        };
+        let trigger_session_id = audio_path
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str());
+        let server_warmup = ensure_parakeet_server(
+            &python_bin,
+            &script_path,
+            &model,
+            cli,
+            true,
+            trigger_session_id,
+            "stop",
+        );
+        perf.insert("server_warmup".to_string(), server_warmup.as_json());
+        let server_identity = server_warmup.identity;
         perf_mark(&mut perf, "server_ensure_ms", t_server_ensure);
 
         let server_health_after = server_identity.is_some();

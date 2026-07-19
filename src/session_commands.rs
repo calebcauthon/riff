@@ -109,7 +109,10 @@ fn build_hook_metadata(
 /// One-line, human-readable summary of the output-hook chain for the `stop`
 /// command output.
 fn format_output_hooks_summary(meta: &Value, pre_chars: usize, post_chars: usize) -> String {
-    let status = meta.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let status = meta
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
     match status {
         "skipped" => {
             let reason = meta.get("reason").and_then(|v| v.as_str()).unwrap_or("");
@@ -321,8 +324,9 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
     let mut server_error: Option<Value> = None;
     if parakeet_server_enabled() && command_exists("curl") {
         let base_url = parakeet_server_base_url();
-        if let Some(identity) = ensure_parakeet_server(&python_bin, &script_path, &model, cli, true)
-        {
+        let warmup =
+            ensure_parakeet_server(&python_bin, &script_path, &model, cli, true, None, "chunk");
+        if let Some(identity) = warmup.identity.as_ref() {
             match transcribe_via_parakeet_server(
                 &base_url,
                 chunk_audio,
@@ -577,6 +581,11 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     let mut transcription_state_save_ms = 0.0;
     let mut parakeet_server_warmup_ms = 0.0;
     let mut parakeet_server_warmup_attempted = false;
+    let mut parakeet_server_warmup = json!({
+        "outcome": "disabled",
+        "instance_id": Value::Null,
+        "pid": Value::Null,
+    });
 
     let active_path = active_state_file();
     if active_path.exists() {
@@ -807,7 +816,16 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             let t_parakeet_server_warmup = Instant::now();
             let python_bin = resolve_python_bin(None);
             let model = resolve_parakeet_model(None);
-            let _ = ensure_parakeet_server(&python_bin, &script_path, &model, cli, false);
+            let warmup = ensure_parakeet_server(
+                &python_bin,
+                &script_path,
+                &model,
+                cli,
+                false,
+                Some(&session_id),
+                "start",
+            );
+            parakeet_server_warmup = warmup.as_json();
             parakeet_server_warmup_attempted = true;
             parakeet_server_warmup_ms = elapsed_ms(t_parakeet_server_warmup);
         }
@@ -839,7 +857,8 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         "audio_device_retry": audio_device_retry,
         "transcription_watcher_spawned": transcription_watcher_spawned,
         "transcription_watcher_pid": state.transcription_watcher_pid,
-        "parakeet_server_warmup_attempted": parakeet_server_warmup_attempted
+        "parakeet_server_warmup_attempted": parakeet_server_warmup_attempted,
+        "parakeet_server_warmup": parakeet_server_warmup
     }));
 
     play_event_sound("start", cli);
@@ -895,6 +914,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
                 "watcher_setup_ms": watcher_setup_ms
             },
             "parakeet_server_warmup_attempted": parakeet_server_warmup_attempted,
+            "parakeet_server_warmup": parakeet_server_warmup,
             "dry_run": false,
             "state_saved": true
         }),
@@ -1890,8 +1910,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         play_event_sound("stop", cli);
     }
 
-    let output_hooks_summary =
-        format_output_hooks_summary(&output_hooks_meta, pre_hook_chars, transcript_raw.chars().count());
+    let output_hooks_summary = format_output_hooks_summary(
+        &output_hooks_meta,
+        pre_hook_chars,
+        transcript_raw.chars().count(),
+    );
     print_out(
         cli,
         format!(
