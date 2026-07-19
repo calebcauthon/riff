@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" width="1200" height="760" role="img" aria-labelledby="title desc">
   <title id="title">Riff workflow animated comic strip</title>
-  <desc id="desc">Six animated comic panels show a person working, pressing a hotkey, speaking, capturing screenshots, opening Claude Code, and inserting the transcript with two images.</desc>
+  <desc id="desc">Five animated comic panels show a person pressing a hotkey, speaking, capturing screenshots, finishing the recording, and inserting the transcript with two images into Claude Code.</desc>
 
   <defs>
     <filter id="inkShadow" x="-10%" y="-10%" width="125%" height="130%">
@@ -11,8 +11,7 @@
     <clipPath id="p2"><rect width="368" height="300" rx="10"/></clipPath>
     <clipPath id="p3"><rect width="368" height="300" rx="10"/></clipPath>
     <clipPath id="p4"><rect width="368" height="300" rx="10"/></clipPath>
-    <clipPath id="p5"><rect width="368" height="300" rx="10"/></clipPath>
-    <clipPath id="p6"><rect width="368" height="300" rx="10"/></clipPath>
+    <clipPath id="p5"><rect width="760" height="300" rx="10"/></clipPath>
   </defs>
 
   <style>
@@ -43,12 +42,11 @@
     <rect x="416" y="106" width="368" height="300" rx="10"/>
     <rect x="808" y="106" width="368" height="300" rx="10"/>
     <rect x="24" y="430" width="368" height="300" rx="10"/>
-    <rect x="416" y="430" width="368" height="300" rx="10"/>
-    <rect x="808" y="430" width="368" height="300" rx="10"/>
+    <rect x="416" y="430" width="760" height="300" rx="10"/>
   </g>
 
-  <!-- PANEL 1: WORK -->
-  <g clip-path="url(#p1)" transform="translate(24 106)">
+  <!-- Removed opening work panel, retained invisibly for easy source-level reuse. -->
+  <g display="none" clip-path="url(#p1)" transform="translate(24 106)">
     <rect width="368" height="300" fill="#f4efe6"/>
     <rect x="14" y="14" width="92" height="28" rx="14" fill="#101a1f"/>
     <text x="60" y="33" text-anchor="middle" class="display label">1 • WORK</text>
@@ -85,11 +83,11 @@
     </g>
   </g>
 
-  <!-- PANEL 2: TAP -->
-  <g clip-path="url(#p2)" transform="translate(416 106)">
+  <!-- PANEL 1: TAP -->
+  <g clip-path="url(#p1)" transform="translate(24 106)">
     <rect width="368" height="300" fill="#e7efe9"/>
     <rect x="14" y="14" width="112" height="28" rx="14" fill="#101a1f"/>
-    <text x="70" y="33" text-anchor="middle" class="display label">2 • START</text>
+    <text x="70" y="33" text-anchor="middle" class="display label">1 • START</text>
     <text x="14" y="65" class="display panelTitle">PRESS THE RIFF HOTKEY.</text>
     <text x="14" y="84" class="body panelCopy">The computer starts listening.</text>
 
@@ -124,11 +122,11 @@
     <text x="184" y="283" text-anchor="middle" class="mono" fill="#73d5c7" font-size="10">⌥ R → riff toggle</text>
   </g>
 
-  <!-- PANEL 3: SPEAK -->
-  <g clip-path="url(#p3)" transform="translate(808 106)">
+  <!-- PANEL 2: SPEAK -->
+  <g clip-path="url(#p2)" transform="translate(416 106)">
     <rect width="368" height="300" fill="#f4efe6"/>
     <rect x="14" y="14" width="112" height="28" rx="14" fill="#101a1f"/>
-    <text x="70" y="33" text-anchor="middle" class="display label">3 • SPEAK</text>
+    <text x="70" y="33" text-anchor="middle" class="display label">2 • SPEAK</text>
     <text x="14" y="65" class="display panelTitle">THE COMPUTER LISTENS.</text>
     <text x="14" y="84" class="body panelCopy">He keeps working while he talks.</text>
 
@@ -160,11 +158,11 @@
     </g>
   </g>
 
-  <!-- PANEL 4: CAPTURE -->
-  <g clip-path="url(#p4)" transform="translate(24 430)">
+  <!-- PANEL 3: CAPTURE -->
+  <g clip-path="url(#p3)" transform="translate(808 106)">
     <rect width="368" height="300" fill="#ede8f7"/>
     <rect x="14" y="14" width="132" height="28" rx="14" fill="#101a1f"/>
-    <text x="80" y="33" text-anchor="middle" class="display label">4 • CAPTURE</text>
+    <text x="80" y="33" text-anchor="middle" class="display label">3 • CAPTURE</text>
     <text x="14" y="65" class="display panelTitle">QUICKLY TAKE SCREENSHOTS.</text>
     <text x="14" y="84" class="body panelCopy">Use the hotkey without breaking your flow.</text>
 
@@ -192,11 +190,11 @@
     <text x="184" y="282" text-anchor="middle" class="mono" fill="#c8b9ef" font-size="10">⌥ S → riff shot • listening continues</text>
   </g>
 
-  <!-- PANEL 5: CLAUDE CODE -->
-  <g clip-path="url(#p5)" transform="translate(416 430)">
+  <!-- PANEL 4: CLAUDE CODE -->
+  <g clip-path="url(#p4)" transform="translate(24 430)">
     <rect width="368" height="300" fill="#e9e2da"/>
     <rect x="14" y="14" width="158" height="28" rx="14" fill="#101a1f"/>
-    <text x="93" y="33" text-anchor="middle" class="display label">5 • CLAUDE CODE</text>
+    <text x="93" y="33" text-anchor="middle" class="display label">4 • CLAUDE CODE</text>
     <text x="14" y="65" class="display panelTitle">PRESS A HOTKEY WHEN YOU'RE DONE.</text>
     <text x="14" y="84" class="body panelCopy">Riff stops listening and sends the session.</text>
 
@@ -221,42 +219,51 @@
     <text x="148" y="275" class="mono" fill="#6c777a" font-size="9">toggle + send-images</text>
   </g>
 
-  <!-- PANEL 6: CONTEXT ARRIVES -->
-  <g clip-path="url(#p6)" transform="translate(808 430)">
-    <rect width="368" height="300" fill="#dfeae5"/>
+  <!-- PANEL 5: CONTEXT ARRIVES — double-width payoff panel. -->
+  <g clip-path="url(#p5)" transform="translate(416 430)">
+    <rect width="760" height="300" fill="#dfeae5"/>
     <rect x="14" y="14" width="132" height="28" rx="14" fill="#101a1f"/>
-    <text x="80" y="33" text-anchor="middle" class="display label">6 • ARRIVE</text>
-    <text x="14" y="62" class="display panelTitle" font-size="16.5">CLAUDE GETS THE TRANSCRIPT</text>
-    <text x="14" y="82" class="display panelTitle" font-size="16.5">AND SCREENSHOTS.</text>
+    <text x="80" y="33" text-anchor="middle" class="display label">5 • ARRIVE</text>
+    <text x="164" y="36" class="display panelTitle" font-size="22">CLAUDE GETS THE TRANSCRIPT AND SCREENSHOTS.</text>
 
-    <rect x="16" y="101" width="336" height="184" rx="8" fill="#172329" stroke="#101a1f" stroke-width="3"/>
-    <rect x="16" y="101" width="336" height="24" rx="8" fill="#243238"/>
-    <circle cx="28" cy="113" r="3" fill="#bf7558"/><circle cx="39" cy="113" r="3" fill="#d7ac4c"/><circle cx="50" cy="113" r="3" fill="#56b88c"/>
-    <text x="65" y="117" class="body" fill="#e9e2da" font-size="10">Claude Code — project</text>
-    <text x="31" y="149" class="mono" fill="#d08a6d" font-size="11">❯</text>
+    <rect x="16" y="55" width="728" height="230" rx="8" fill="#172329" stroke="#101a1f" stroke-width="3"/>
+    <rect x="16" y="55" width="728" height="26" rx="8" fill="#243238"/>
+    <circle cx="29" cy="68" r="3" fill="#bf7558"/><circle cx="40" cy="68" r="3" fill="#d7ac4c"/><circle cx="51" cy="68" r="3" fill="#56b88c"/>
+    <text x="67" y="72" class="body" fill="#e9e2da" font-size="11">Claude Code — project</text>
+    <text x="34" y="108" class="mono" fill="#d08a6d" font-size="14">❯</text>
     <g>
       <animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;0.08;0.84;0.96;1" dur="5s" repeatCount="indefinite"/>
-      <text x="48" y="149" class="mono" fill="#d9e1df" font-size="9.5">Update this dashboard using my notes.</text>
-      <text x="48" y="165" class="mono" fill="#d9e1df" font-size="9.5">Simplify the chart and headline.</text>
+      <text x="55" y="108" class="mono" fill="#d9e1df" font-size="12">Update this dashboard using my notes.</text>
+      <text x="55" y="129" class="mono" fill="#d9e1df" font-size="12">Simplify the chart and make the headline clearer.</text>
     </g>
     <g>
       <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.12;0.22;0.86;1" dur="5s" repeatCount="indefinite"/>
       <animateTransform attributeName="transform" type="translate" values="0 7;0 7;0 0;0 0;0 7" keyTimes="0;0.12;0.22;0.86;1" dur="5s" repeatCount="indefinite"/>
-      <rect x="48" y="183" width="125" height="72" rx="7" fill="#213038" stroke="#66777d"/>
-      <rect x="59" y="193" width="48" height="37" rx="4" fill="#d4e3df"/>
-      <path d="M65 224 L74 213 L83 219 L98 199" fill="none" stroke="#229f91" stroke-width="3"/>
-      <text x="59" y="246" class="mono" fill="#809196" font-size="8.5">Screenshot 1</text>
-      <rect x="185" y="183" width="125" height="72" rx="7" fill="#213038" stroke="#66777d"/>
-      <rect x="196" y="193" width="48" height="37" rx="4" fill="#ddd5ef"/>
-      <rect x="204" y="215" width="6" height="10" fill="#9d83e2"/><rect x="216" y="205" width="6" height="20" fill="#8064ce"/><rect x="228" y="197" width="6" height="28" fill="#6748bf"/>
-      <text x="196" y="246" class="mono" fill="#809196" font-size="8.5">Screenshot 2</text>
+      <rect x="48" y="147" width="260" height="112" rx="8" fill="#213038" stroke="#66777d"/>
+      <rect x="62" y="161" width="96" height="70" rx="5" fill="#d4e3df"/>
+      <path d="M72 218 L86 198 L102 208 L124 174 L148 190" fill="none" stroke="#229f91" stroke-width="5" stroke-linecap="round"/>
+      <text x="177" y="180" class="mono" fill="#d9e1df" font-size="11">Screenshot 1</text>
+      <text x="177" y="201" class="mono" fill="#809196" font-size="9.5">dashboard overview</text>
+      <rect x="177" y="218" width="105" height="6" rx="3" fill="#506169"/>
+      <rect x="177" y="232" width="81" height="6" rx="3" fill="#506169"/>
+
+      <rect x="326" y="147" width="260" height="112" rx="8" fill="#213038" stroke="#66777d"/>
+      <rect x="340" y="161" width="96" height="70" rx="5" fill="#ddd5ef"/>
+      <rect x="354" y="205" width="12" height="19" fill="#9d83e2"/><rect x="377" y="184" width="12" height="40" fill="#8064ce"/><rect x="400" y="169" width="12" height="55" fill="#6748bf"/>
+      <text x="455" y="180" class="mono" fill="#d9e1df" font-size="11">Screenshot 2</text>
+      <text x="455" y="201" class="mono" fill="#809196" font-size="9.5">chart detail</text>
+      <rect x="455" y="218" width="105" height="6" rx="3" fill="#506169"/>
+      <rect x="455" y="232" width="76" height="6" rx="3" fill="#506169"/>
     </g>
     <g>
       <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.22;0.32;0.88;1" dur="5s" repeatCount="indefinite"/>
-      <rect x="48" y="264" width="105" height="18" rx="9" fill="#173e3d" stroke="#229f91"/>
-      <text x="100" y="276" text-anchor="middle" class="mono" fill="#73d5c7" font-size="8">2 images attached</text>
+      <rect x="608" y="148" width="118" height="48" rx="12" fill="#173e3d" stroke="#229f91" stroke-width="2"/>
+      <text x="667" y="168" text-anchor="middle" class="display" fill="#73d5c7" font-size="10">2 IMAGES</text>
+      <text x="667" y="184" text-anchor="middle" class="display" fill="#73d5c7" font-size="10">ATTACHED</text>
+      <rect x="608" y="210" width="118" height="35" rx="10" fill="#2c2448" stroke="#8064ce"/>
+      <text x="667" y="232" text-anchor="middle" class="display" fill="#c8b9ef" font-size="10">READY TO SEND</text>
     </g>
-    <rect x="326" y="264" width="7" height="16" fill="#d9e1df"><animate attributeName="opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></rect>
+    <rect x="716" y="256" width="8" height="17" fill="#d9e1df"><animate attributeName="opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></rect>
   </g>
 
   <text x="24" y="750" class="body" fill="#789096" font-size="11">Every panel moves continuously. Read left-to-right, top-to-bottom—or take in the whole workflow at once.</text>
