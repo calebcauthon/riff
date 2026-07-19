@@ -4,7 +4,45 @@ Local-first dictation CLI for macOS. Riff records a short voice session, collect
 
 Privacy model: session audio, screenshots, clipboard snippets, transcripts, and reports stay on your machine unless you explicitly move or share them. The Parakeet setup may download model/runtime dependencies from their upstream package/model hosts.
 
-Workflow:
+![Animated comic strip showing the complete Riff workflow from speaking and taking screenshots to sending everything into Claude Code](assets/riff-comic.gif)
+
+## Quickstart
+
+Install riff and provision its private local transcription runtime:
+
+```bash
+brew install calebcauthon/riff/riff
+riff setup
+riff doctor
+```
+
+`riff setup` is a one-time step that installs the transcription packages and downloads the Parakeet model. macOS may ask for microphone, screen-recording, or Accessibility access when you first use the related features.
+
+Start talking, optionally capture screenshots, then stop to transcribe:
+
+```bash
+riff start
+riff shot    # optional: select a region to attach to this session
+riff stop
+```
+
+Those commands are useful for setup and testing, but riff is designed to disappear behind global hotkeys during everyday use. With Raycast, Alfred, skhd, Hammerspoon, Keyboard Maestro, or a similar launcher, bind keys of your choice to:
+
+```bash
+riff --quiet toggle    # start or stop listening
+riff --quiet shot      # capture screen context while talking
+riff --quiet toggle && riff --quiet send-images  # stop and paste everything
+```
+
+For example, the overview above uses `⌥ R` for start/stop, `⌥ S` for screenshots, and `⌥ ↩` to stop and insert the transcript plus screenshots into Claude Code. Choose any keys you like. See [Hotkeys](#hotkeys) for complete examples, including stop-and-paste and opening the HTML report.
+
+Your transcript and local HTML report are now under `/tmp/riff/sessions/<session-id>/`. Print the latest transcript with `riff copy`, paste it into the focused app with `riff send`, or open the report with `riff html`.
+
+For the underlying command-by-command flow:
+
+![riff terminal quickstart: install, dictate, capture a screenshot, and send the transcript](assets/riff-demo.gif)
+
+## How it works
 
 1. `riff start` (or `riff toggle` when idle)
 2. Take screenshots with `riff shot` (recommended) or normal `Cmd+Shift+4`

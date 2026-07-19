@@ -1,0 +1,205 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 440" width="780" height="440" role="img" aria-labelledby="title desc">
+  <title id="title">riff terminal quickstart</title>
+  <desc id="desc">Animated terminal demo showing riff installation, setup, dictation, screenshot capture, transcription, and sending the transcript.</desc>
+
+  <defs>
+    <linearGradient id="canvas" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#08131b"/>
+      <stop offset="55%" stop-color="#071015"/>
+      <stop offset="100%" stop-color="#0c171b"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#253139"/>
+      <stop offset="100%" stop-color="#182229"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="75%" cy="25%" r="70%">
+      <stop offset="0%" stop-color="#2dd4bf" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="145%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.58"/>
+    </filter>
+    <clipPath id="window">
+      <rect x="24" y="24" width="732" height="392" rx="14"/>
+    </clipPath>
+
+    <clipPath id="clipInstall"><rect x="66" y="84" width="0" height="28"><animate attributeName="width" values="0;0;346;346;346;0;0" keyTimes="0;0.025;0.13;0.29;0.94;0.97;1" dur="16s" repeatCount="indefinite"/></rect></clipPath>
+    <clipPath id="clipSetup"><rect x="66" y="196" width="0" height="28"><animate attributeName="width" values="0;0;94;94;94;0;0" keyTimes="0;0.17;0.22;0.29;0.94;0.97;1" dur="16s" repeatCount="indefinite"/></rect></clipPath>
+    <clipPath id="clipStart"><rect x="66" y="84" width="0" height="28"><animate attributeName="width" values="0;0;94;94;94;0;0" keyTimes="0;0.35;0.40;0.66;0.94;0.97;1" dur="16s" repeatCount="indefinite"/></rect></clipPath>
+    <clipPath id="clipShot"><rect x="66" y="196" width="0" height="28"><animate attributeName="width" values="0;0;84;84;84;0;0" keyTimes="0;0.46;0.51;0.66;0.94;0.97;1" dur="16s" repeatCount="indefinite"/></rect></clipPath>
+    <clipPath id="clipStop"><rect x="66" y="276" width="0" height="28"><animate attributeName="width" values="0;0;84;84;84;0;0" keyTimes="0;0.56;0.61;0.66;0.94;0.97;1" dur="16s" repeatCount="indefinite"/></rect></clipPath>
+    <clipPath id="clipCopy"><rect x="66" y="84" width="0" height="28"><animate attributeName="width" values="0;0;84;84;84;0;0" keyTimes="0;0.71;0.76;0.93;0.94;0.97;1" dur="16s" repeatCount="indefinite"/></rect></clipPath>
+    <clipPath id="clipSend"><rect x="66" y="252" width="0" height="28"><animate attributeName="width" values="0;0;84;84;84;0;0" keyTimes="0;0.82;0.87;0.93;0.94;0.97;1" dur="16s" repeatCount="indefinite"/></rect></clipPath>
+  </defs>
+
+  <style>
+    <![CDATA[
+      .terminal-text {
+        font-family: ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Mono", Consolas, "Courier New", monospace;
+        font-size: 15px;
+        font-weight: 500;
+      }
+      .title-text {
+        fill: #91a0aa;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-size: 13px;
+        font-weight: 550;
+      }
+      .prompt { fill: #2dd4bf; }
+      .command { fill: #f0f6f6; }
+      .success { fill: #7ee787; }
+      .info { fill: #7dd3fc; }
+      .accent { fill: #c4b5fd; }
+      .muted { fill: #7b8b95; }
+      .quote { fill: #d7e1e5; }
+      .cursor { fill: #5eead4; }
+    ]]>
+  </style>
+
+  <rect width="780" height="440" fill="#03080b"/>
+  <rect width="780" height="440" fill="url(#glow)"/>
+  <rect x="24" y="24" width="732" height="392" rx="14" fill="url(#canvas)" stroke="#31414b" stroke-width="1" filter="url(#shadow)"/>
+
+  <g clip-path="url(#window)">
+    <rect x="24" y="24" width="732" height="44" fill="url(#bar)"/>
+    <circle cx="50" cy="46" r="6" fill="#ff5f57"/>
+    <circle cx="70" cy="46" r="6" fill="#febc2e"/>
+    <circle cx="90" cy="46" r="6" fill="#28c840"/>
+    <text x="390" y="51" text-anchor="middle" class="title-text">riff — local dictation</text>
+    <line x1="24" y1="68" x2="756" y2="68" stroke="#31414b"/>
+
+    <g class="terminal-text">
+      <!-- Scene 1: install and provision -->
+      <g>
+        <animate attributeName="opacity" values="1;1;0;0;0;0;1" keyTimes="0;0.31;0.33;0.94;0.97;0.995;1" dur="16s" repeatCount="indefinite"/>
+
+        <text x="44" y="104"><tspan class="prompt">❯</tspan></text>
+        <text x="66" y="104" class="command" clip-path="url(#clipInstall)">brew install calebcauthon/riff/riff</text>
+        <rect x="412" y="90" width="8" height="18" class="cursor">
+          <animate attributeName="opacity" values="0;0;1;0;1;0;1;0;0;0" keyTimes="0;0.025;0.04;0.065;0.085;0.105;0.125;0.145;0.15;1" dur="16s" repeatCount="indefinite"/>
+          <animate attributeName="x" values="66;66;412;412" keyTimes="0;0.025;0.13;1" dur="16s" repeatCount="indefinite"/>
+        </rect>
+
+        <text x="44" y="144">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.135;0.15;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="info">==&gt;</tspan><tspan dx="10" class="muted">Installing riff and dependencies</tspan>
+        </text>
+        <text x="44" y="176" class="success">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.15;0.165;1" dur="16s" repeatCount="indefinite"/>
+          ✓ riff installed
+        </text>
+
+        <text x="44" y="216">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.165;0.17;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="prompt">❯</tspan>
+        </text>
+        <text x="66" y="216" class="command" clip-path="url(#clipSetup)">riff setup</text>
+        <rect x="160" y="202" width="8" height="18" class="cursor">
+          <animate attributeName="opacity" values="0;0;1;0;1;0;1;0;0;0" keyTimes="0;0.17;0.18;0.19;0.20;0.21;0.22;0.235;0.24;1" dur="16s" repeatCount="indefinite"/>
+          <animate attributeName="x" values="66;66;160;160" keyTimes="0;0.17;0.22;1" dur="16s" repeatCount="indefinite"/>
+        </rect>
+        <text x="44" y="256">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.225;0.24;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="info">↓</tspan><tspan dx="12" class="muted">Preparing private Parakeet runtime</tspan>
+        </text>
+        <text x="44" y="288" class="success">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.245;0.265;1" dur="16s" repeatCount="indefinite"/>
+          ✓ Setup complete — transcription stays local
+        </text>
+        <text x="44" y="328">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.27;0.28;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="prompt">❯</tspan>
+        </text>
+        <rect x="66" y="314" width="8" height="18" class="cursor">
+          <animate attributeName="opacity" values="0;0;1;0;1;0;1;0;0;0" keyTimes="0;0.28;0.285;0.295;0.30;0.31;0.315;0.32;0.325;1" dur="16s" repeatCount="indefinite"/>
+        </rect>
+      </g>
+
+      <!-- Scene 2: record, capture, and transcribe -->
+      <g>
+        <animate attributeName="opacity" values="0;0;1;1;0;0;0" keyTimes="0;0.32;0.33;0.67;0.69;0.94;1" dur="16s" repeatCount="indefinite"/>
+
+        <text x="44" y="104"><tspan class="prompt">❯</tspan></text>
+        <text x="66" y="104" class="command" clip-path="url(#clipStart)">riff start</text>
+        <rect x="160" y="90" width="8" height="18" class="cursor">
+          <animate attributeName="opacity" values="0;0;1;0;1;0;1;0;0;0" keyTimes="0;0.35;0.36;0.37;0.38;0.39;0.40;0.415;0.42;1" dur="16s" repeatCount="indefinite"/>
+          <animate attributeName="x" values="66;66;160;160" keyTimes="0;0.35;0.40;1" dur="16s" repeatCount="indefinite"/>
+        </rect>
+        <text x="44" y="144">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.405;0.42;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="success">●</tspan><tspan dx="12" class="quote">Started session 20260718-101530</tspan>
+        </text>
+        <g>
+          <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.41;0.42;0.60;0.62;1" dur="16s" repeatCount="indefinite"/>
+          <rect x="44" y="164" width="4" height="10" rx="2" fill="#2dd4bf"><animate attributeName="height" values="10;22;8;30;12;24;10" dur="1.1s" repeatCount="indefinite"/><animate attributeName="y" values="164;158;165;154;163;157;164" dur="1.1s" repeatCount="indefinite"/></rect>
+          <rect x="54" y="158" width="4" height="22" rx="2" fill="#38bdf8"><animate attributeName="height" values="22;8;28;12;24;10;22" dur="0.9s" repeatCount="indefinite"/><animate attributeName="y" values="158;165;155;163;157;164;158" dur="0.9s" repeatCount="indefinite"/></rect>
+          <rect x="64" y="162" width="4" height="14" rx="2" fill="#a78bfa"><animate attributeName="height" values="14;28;10;24;8;20;14" dur="1.2s" repeatCount="indefinite"/><animate attributeName="y" values="162;155;164;157;165;159;162" dur="1.2s" repeatCount="indefinite"/></rect>
+          <text x="82" y="176" class="muted">listening locally…</text>
+        </g>
+
+        <text x="44" y="216">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.45;0.46;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="prompt">❯</tspan>
+        </text>
+        <text x="66" y="216" class="command" clip-path="url(#clipShot)">riff shot</text>
+        <text x="44" y="248" class="success">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.515;0.53;1" dur="16s" repeatCount="indefinite"/>
+          ✓ Captured screenshot 1
+        </text>
+
+        <text x="44" y="296">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.55;0.56;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="prompt">❯</tspan>
+        </text>
+        <text x="66" y="296" class="command" clip-path="url(#clipStop)">riff stop</text>
+        <text x="44" y="336">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.615;0.635;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="success">✓</tspan><tspan dx="12" class="quote">Stopped and transcribed session</tspan>
+        </text>
+        <text x="44" y="368">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.635;0.65;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="accent">note:</tspan><tspan dx="10" class="info">/tmp/riff/sessions/20260718-101530/note.md</tspan>
+        </text>
+      </g>
+
+      <!-- Scene 3: inspect and send -->
+      <g>
+        <animate attributeName="opacity" values="0;0;1;1;0;0;0" keyTimes="0;0.68;0.69;0.93;0.95;0.99;1" dur="16s" repeatCount="indefinite"/>
+
+        <text x="44" y="104"><tspan class="prompt">❯</tspan></text>
+        <text x="66" y="104" class="command" clip-path="url(#clipCopy)">riff copy</text>
+        <rect x="150" y="90" width="8" height="18" class="cursor">
+          <animate attributeName="opacity" values="0;0;1;0;1;0;1;0;0;0" keyTimes="0;0.71;0.72;0.73;0.74;0.75;0.76;0.775;0.78;1" dur="16s" repeatCount="indefinite"/>
+          <animate attributeName="x" values="66;66;150;150" keyTimes="0;0.71;0.76;1" dur="16s" repeatCount="indefinite"/>
+        </rect>
+
+        <g>
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.765;0.79;1" dur="16s" repeatCount="indefinite"/>
+          <rect x="44" y="128" width="680" height="92" rx="8" fill="#101c22" stroke="#253842"/>
+          <rect x="44" y="128" width="3" height="92" rx="1.5" fill="#a78bfa"/>
+          <text x="62" y="158" class="quote">Ship the Homebrew update with a quickstart,</text>
+          <text x="62" y="186" class="quote">plus a terminal demo that shows the full flow.</text>
+          <text x="62" y="208" class="muted">[Screenshot 1]</text>
+        </g>
+
+        <text x="44" y="272">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.81;0.82;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="prompt">❯</tspan>
+        </text>
+        <text x="66" y="272" class="command" clip-path="url(#clipSend)">riff send</text>
+        <text x="44" y="320">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.875;0.895;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="success">✓</tspan><tspan dx="12" class="quote">Sent transcript to focused app.</tspan>
+        </text>
+        <text x="44" y="360" class="muted">
+          <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.89;0.905;1" dur="16s" repeatCount="indefinite"/>
+          Your voice, screenshots, and notes never leave your Mac.
+        </text>
+        <text x="44" y="392">
+          <animate attributeName="opacity" values="0;0;1;0;1;0;1;0;0" keyTimes="0;0.90;0.905;0.915;0.92;0.93;0.935;0.94;1" dur="16s" repeatCount="indefinite"/>
+          <tspan class="prompt">❯</tspan>
+        </text>
+      </g>
+    </g>
+  </g>
+</svg>

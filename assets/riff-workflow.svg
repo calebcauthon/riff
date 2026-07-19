@@ -1,0 +1,388 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" width="900" height="520" role="img" aria-labelledby="title desc">
+  <title id="title">From speaking at your computer to a Claude Code prompt</title>
+  <desc id="desc">A person taps a global hotkey, speaks while taking screenshots, switches to Claude Code, then presses one key to insert the transcript and screenshots.</desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#07141b"/>
+      <stop offset="52%" stop-color="#0a1820"/>
+      <stop offset="100%" stop-color="#102128"/>
+    </linearGradient>
+    <radialGradient id="ambient" cx="70%" cy="20%" r="75%">
+      <stop offset="0%" stop-color="#2dd4bf" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#14252d"/>
+      <stop offset="100%" stop-color="#0e1b22"/>
+    </linearGradient>
+    <linearGradient id="shirt" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="claudeBar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#b56f52"/>
+      <stop offset="100%" stop-color="#d5976d"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000000" flood-opacity="0.42"/>
+    </filter>
+    <filter id="softGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <clipPath id="monitorScreen">
+      <rect x="67" y="126" width="510" height="278" rx="5"/>
+    </clipPath>
+    <g id="keyboardCloseup">
+      <rect x="20" y="106" width="860" height="374" fill="#071116"/>
+      <rect x="118" y="164" width="664" height="240" rx="24" fill="#cbd5d7" stroke="#eef5f5" stroke-width="3" filter="url(#shadow)"/>
+      <rect x="140" y="184" width="620" height="198" rx="16" fill="#b8c4c7"/>
+      <g fill="#e5ebec" stroke="#87979e" stroke-width="1.5">
+        <rect x="154" y="198" width="52" height="48" rx="7"/><rect x="214" y="198" width="52" height="48" rx="7"/><rect x="274" y="198" width="52" height="48" rx="7"/><rect x="334" y="198" width="52" height="48" rx="7"/><rect x="394" y="198" width="52" height="48" rx="7"/><rect x="454" y="198" width="52" height="48" rx="7"/><rect x="514" y="198" width="52" height="48" rx="7"/><rect x="574" y="198" width="52" height="48" rx="7"/><rect x="634" y="198" width="52" height="48" rx="7"/><rect x="694" y="198" width="52" height="48" rx="7"/>
+        <rect x="174" y="258" width="52" height="48" rx="7"/><rect x="234" y="258" width="52" height="48" rx="7"/><rect x="294" y="258" width="52" height="48" rx="7"/><rect x="354" y="258" width="52" height="48" rx="7"/><rect x="414" y="258" width="52" height="48" rx="7"/><rect x="474" y="258" width="52" height="48" rx="7"/><rect x="534" y="258" width="52" height="48" rx="7"/><rect x="594" y="258" width="52" height="48" rx="7"/>
+        <rect x="154" y="318" width="100" height="50" rx="7"/><rect x="264" y="318" width="100" height="50" rx="7"/><rect x="374" y="318" width="236" height="50" rx="7"/><rect x="620" y="318" width="126" height="50" rx="7"/>
+      </g>
+      <g class="ui" fill="#52646c" font-size="16" font-weight="700" text-anchor="middle">
+        <text x="180" y="228">Q</text><text x="240" y="228">W</text><text x="300" y="228">E</text><text x="360" y="228">R</text><text x="420" y="228">T</text><text x="480" y="228">Y</text><text x="540" y="228">U</text><text x="600" y="228">I</text><text x="660" y="228">O</text><text x="720" y="228">P</text>
+        <text x="200" y="288">A</text><text x="260" y="288">S</text><text x="320" y="288">D</text><text x="380" y="288">F</text><text x="440" y="288">G</text><text x="500" y="288">H</text><text x="560" y="288">J</text><text x="620" y="288">K</text>
+        <text x="204" y="349">⌥ option</text><text x="314" y="349">⌘</text><text x="683" y="349">↩ return</text>
+      </g>
+    </g>
+  </defs>
+
+  <style>
+    <![CDATA[
+      .ui { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .mono { font-family: ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Mono", Consolas, monospace; }
+      .headline { fill: #f0f7f7; font-size: 24px; font-weight: 720; letter-spacing: -0.3px; }
+      .eyebrow { fill: #5eead4; font-size: 11px; font-weight: 760; letter-spacing: 1.5px; }
+      .body { fill: #aabac2; font-size: 14px; font-weight: 500; }
+      .small { fill: #8da0aa; font-size: 11px; font-weight: 550; }
+      .screenTitle { fill: #e8f0f2; font-size: 14px; font-weight: 700; }
+      .screenText { fill: #a9b9c0; font-size: 11px; font-weight: 500; }
+      .hotkey { fill: #f7fbfb; font-size: 16px; font-weight: 760; }
+      .command { fill: #7dd3fc; font-size: 10px; font-weight: 620; }
+      .terminal { fill: #dce7e7; font-size: 12px; font-weight: 500; }
+      .terminalMuted { fill: #72858e; font-size: 11px; font-weight: 500; }
+      .success { fill: #86efac; }
+      .accent { fill: #c4b5fd; }
+    ]]>
+  </style>
+
+  <rect width="900" height="520" fill="url(#background)"/>
+  <rect width="900" height="520" fill="url(#ambient)"/>
+  <path d="M0 450 C180 420 350 475 530 445 C700 417 800 430 900 410 V520 H0Z" fill="#061016" opacity="0.72"/>
+
+  <text x="48" y="40" class="ui eyebrow">RIFF • FROM VOICE TO CLAUDE CODE</text>
+
+  <!-- Computer and desk -->
+  <g filter="url(#shadow)">
+    <rect x="48" y="106" width="548" height="318" rx="14" fill="#263740" stroke="#3c505b"/>
+    <rect x="58" y="116" width="528" height="298" rx="8" fill="#071116"/>
+    <rect x="67" y="126" width="510" height="278" rx="5" fill="url(#screen)"/>
+    <circle cx="322" cy="415" r="3" fill="#647983"/>
+    <path d="M287 424 H357 L369 455 H275 Z" fill="#263740"/>
+    <rect x="244" y="453" width="156" height="10" rx="5" fill="#344852"/>
+  </g>
+
+  <rect x="20" y="462" width="860" height="18" rx="9" fill="#20313a"/>
+  <rect x="0" y="480" width="900" height="40" fill="#0a151b"/>
+
+  <!-- Person seated at the computer -->
+  <g>
+    <ellipse cx="744" cy="478" rx="125" ry="18" fill="#03090d" opacity="0.5"/>
+    <path d="M690 302 C676 329 672 390 684 480 H827 C828 410 817 340 788 308 C761 286 716 285 690 302Z" fill="url(#shirt)"/>
+    <path d="M754 298 C752 318 760 329 774 335 C787 330 793 318 792 299Z" fill="#c9825f"/>
+    <ellipse cx="758" cy="230" rx="61" ry="76" fill="#d99a72"/>
+    <path d="M699 233 C695 173 729 142 772 146 C818 151 837 190 819 239 C810 207 793 189 764 181 C746 201 725 218 699 233Z" fill="#17242b"/>
+    <path d="M705 218 C695 210 688 217 692 236 C695 250 703 254 709 246Z" fill="#d99a72"/>
+    <path d="M798 225 C806 217 815 223 811 241 C808 255 801 258 795 250Z" fill="#d99a72"/>
+    <circle cx="739" cy="234" r="3" fill="#24343b"/>
+    <circle cx="781" cy="234" r="3" fill="#24343b"/>
+    <path d="M696 331 C660 353 633 378 616 410" fill="none" stroke="#d99a72" stroke-width="24" stroke-linecap="round"/>
+    <path d="M616 410 C644 416 682 418 715 415" fill="none" stroke="#d99a72" stroke-width="19" stroke-linecap="round"/>
+    <ellipse cx="721" cy="415" rx="18" ry="11" fill="#d99a72"/>
+  </g>
+
+  <!-- Keyboard beneath his hand -->
+  <g transform="translate(600 424) skewX(-12)">
+    <rect width="174" height="32" rx="7" fill="#d6e0e2" opacity="0.92"/>
+    <g fill="#71828a" opacity="0.72">
+      <rect x="10" y="7" width="13" height="7" rx="2"/><rect x="28" y="7" width="13" height="7" rx="2"/><rect x="46" y="7" width="13" height="7" rx="2"/><rect x="64" y="7" width="13" height="7" rx="2"/><rect x="82" y="7" width="13" height="7" rx="2"/><rect x="100" y="7" width="13" height="7" rx="2"/><rect x="118" y="7" width="13" height="7" rx="2"/><rect x="136" y="7" width="13" height="7" rx="2"/>
+      <rect x="17" y="19" width="13" height="7" rx="2"/><rect x="35" y="19" width="13" height="7" rx="2"/><rect x="53" y="19" width="13" height="7" rx="2"/><rect x="71" y="19" width="56" height="7" rx="2"/><rect x="132" y="19" width="13" height="7" rx="2"/>
+    </g>
+  </g>
+
+  <!-- Scene 1: sitting at the computer -->
+  <g class="ui">
+    <animate attributeName="opacity" values="1;1;0;0;0;0;1" keyTimes="0;0.16;0.17;0.95;0.97;0.995;1" dur="20s" repeatCount="indefinite"/>
+    <text x="48" y="76" class="headline">You're already working at your computer.</text>
+    <text x="48" y="96" class="body">Riff stays out of the way until you need it.</text>
+
+    <g clip-path="url(#monitorScreen)">
+      <rect x="67" y="126" width="510" height="278" fill="#f2f5f5"/>
+      <rect x="67" y="126" width="510" height="34" fill="#dbe3e5"/>
+      <circle cx="86" cy="143" r="4" fill="#f87171"/><circle cx="100" cy="143" r="4" fill="#fbbf24"/><circle cx="114" cy="143" r="4" fill="#4ade80"/>
+      <text x="137" y="147" class="screenTitle" fill="#40505a">Product dashboard</text>
+      <rect x="89" y="181" width="140" height="88" rx="8" fill="#d9e6e7"/>
+      <path d="M106 247 L128 221 L153 232 L184 195 L213 208" fill="none" stroke="#0d9488" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="247" y="181" width="140" height="88" rx="8" fill="#e7e1f7"/>
+      <rect x="270" y="229" width="16" height="24" rx="3" fill="#a78bfa"/><rect x="297" y="210" width="16" height="43" rx="3" fill="#8b5cf6"/><rect x="324" y="193" width="16" height="60" rx="3" fill="#7c3aed"/><rect x="351" y="219" width="16" height="34" rx="3" fill="#c4b5fd"/>
+      <rect x="405" y="181" width="140" height="88" rx="8" fill="#d8e8f7"/>
+      <circle cx="475" cy="225" r="29" fill="none" stroke="#60a5fa" stroke-width="13" stroke-dasharray="108 75" transform="rotate(-90 475 225)"/>
+      <rect x="89" y="291" width="456" height="78" rx="8" fill="#e2e8ea"/>
+      <rect x="108" y="311" width="250" height="7" rx="3" fill="#9faeb2"/><rect x="108" y="329" width="386" height="7" rx="3" fill="#aeb9bc"/><rect x="108" y="347" width="326" height="7" rx="3" fill="#aeb9bc"/>
+    </g>
+    <path d="M750 263 Q763 270 776 261" fill="none" stroke="#8a4f42" stroke-width="3" stroke-linecap="round"/>
+  </g>
+
+  <!-- Close-up 1: press the listening hotkey -->
+  <g class="ui">
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.17;0.171;0.23;0.231;1" dur="20s" repeatCount="indefinite"/>
+    <text x="48" y="76" class="headline">He taps his Riff hotkey.</text>
+    <text x="48" y="96" class="body">A global shortcut starts listening—no terminal needed.</text>
+    <use href="#keyboardCloseup"/>
+    <text x="50" y="139" class="eyebrow">CLOSE-UP • HANDS ON KEYBOARD</text>
+
+    <rect x="154" y="318" width="100" height="50" rx="7" fill="#173f40" stroke="#5eead4" stroke-width="3"/>
+    <text x="204" y="349" text-anchor="middle" class="hotkey">⌥ option</text>
+    <rect x="334" y="198" width="52" height="48" rx="7" fill="#173f40" stroke="#5eead4" stroke-width="3">
+      <animate attributeName="fill" values="#173f40;#2dd4bf;#173f40" keyTimes="0;0.48;1" dur="1.15s" repeatCount="indefinite"/>
+    </rect>
+    <text x="360" y="228" text-anchor="middle" class="hotkey">R</text>
+
+    <path d="M214 500 Q218 418 232 372" fill="none" stroke="#d99a72" stroke-width="58" stroke-linecap="round"/>
+    <ellipse cx="238" cy="360" rx="47" ry="36" fill="#d99a72"/>
+    <path d="M228 354 Q209 346 202 340" fill="none" stroke="#d99a72" stroke-width="22" stroke-linecap="round"/>
+    <path d="M430 500 Q414 405 403 340" fill="none" stroke="#d99a72" stroke-width="58" stroke-linecap="round"/>
+    <ellipse cx="398" cy="320" rx="44" ry="34" fill="#d99a72"/>
+    <g>
+      <animateTransform attributeName="transform" type="translate" values="0 0;0 9;0 0" keyTimes="0;0.5;1" dur="1.15s" repeatCount="indefinite"/>
+      <path d="M386 307 Q374 278 366 247" fill="none" stroke="#d99a72" stroke-width="24" stroke-linecap="round"/>
+      <ellipse cx="363" cy="239" rx="15" ry="12" fill="#d99a72"/>
+    </g>
+    <rect x="346" y="420" width="208" height="38" rx="19" fill="#10272a" stroke="#2dd4bf"/>
+    <text x="450" y="444" text-anchor="middle" class="mono command" style="font-size:12px">⌥ R  →  riff toggle</text>
+  </g>
+
+  <!-- Scene 2: computer listens while he speaks -->
+  <g class="ui">
+    <animate attributeName="opacity" values="0;0;1;1;0;0;0" keyTimes="0;0.23;0.24;0.40;0.41;0.95;1" dur="20s" repeatCount="indefinite"/>
+    <text x="48" y="76" class="headline">The computer listens while he talks.</text>
+    <text x="48" y="96" class="body">He speaks naturally while staying in the app he was already using.</text>
+
+    <g clip-path="url(#monitorScreen)">
+      <rect x="67" y="126" width="510" height="278" fill="#f2f5f5"/>
+      <rect x="67" y="126" width="510" height="34" fill="#dbe3e5"/>
+      <circle cx="86" cy="143" r="4" fill="#f87171"/><circle cx="100" cy="143" r="4" fill="#fbbf24"/><circle cx="114" cy="143" r="4" fill="#4ade80"/>
+      <text x="137" y="147" class="screenTitle" fill="#40505a">Product dashboard</text>
+      <rect x="89" y="181" width="140" height="88" rx="8" fill="#d9e6e7"/>
+      <path d="M106 247 L128 221 L153 232 L184 195 L213 208" fill="none" stroke="#0d9488" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="247" y="181" width="140" height="88" rx="8" fill="#e7e1f7"/>
+      <rect x="270" y="229" width="16" height="24" rx="3" fill="#a78bfa"/><rect x="297" y="210" width="16" height="43" rx="3" fill="#8b5cf6"/><rect x="324" y="193" width="16" height="60" rx="3" fill="#7c3aed"/><rect x="351" y="219" width="16" height="34" rx="3" fill="#c4b5fd"/>
+      <rect x="405" y="181" width="140" height="88" rx="8" fill="#d8e8f7"/>
+      <circle cx="475" cy="225" r="29" fill="none" stroke="#60a5fa" stroke-width="13" stroke-dasharray="108 75" transform="rotate(-90 475 225)"/>
+      <rect x="89" y="291" width="456" height="78" rx="8" fill="#e2e8ea"/>
+      <rect x="108" y="311" width="250" height="7" rx="3" fill="#9faeb2"/><rect x="108" y="329" width="386" height="7" rx="3" fill="#aeb9bc"/><rect x="108" y="347" width="326" height="7" rx="3" fill="#aeb9bc"/>
+
+      <rect x="369" y="174" width="180" height="36" rx="18" fill="#10272a" stroke="#2dd4bf"/>
+      <circle cx="390" cy="192" r="6" fill="#4ade80"><animate attributeName="opacity" values="1;0.35;1" dur="1.2s" repeatCount="indefinite"/></circle>
+      <text x="405" y="196" class="eyebrow" style="font-size:10px">COMPUTER LISTENING</text>
+    </g>
+
+    <ellipse cx="763" cy="263" rx="8" ry="4" fill="#713f36"><animate attributeName="ry" values="3;7;3;5;3" dur="1.4s" repeatCount="indefinite"/></ellipse>
+    <g fill="none" stroke="#5eead4" stroke-width="3" stroke-linecap="round">
+      <path d="M674 253 Q655 261 644 278"><animate attributeName="opacity" values="0.2;1;0.2" dur="1.2s" repeatCount="indefinite"/></path>
+      <path d="M666 243 Q636 255 622 283"><animate attributeName="opacity" values="0.2;1;0.2" begin="0.18s" dur="1.2s" repeatCount="indefinite"/></path>
+      <path d="M657 232 Q618 249 600 288"><animate attributeName="opacity" values="0.2;1;0.2" begin="0.36s" dur="1.2s" repeatCount="indefinite"/></path>
+    </g>
+    <g>
+      <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.25;0.27;0.40;0.41;1" dur="20s" repeatCount="indefinite"/>
+      <path d="M710 308 L751 269 L737 322 Z" fill="#f5fbfa" stroke="#5eead4" stroke-width="2"/>
+      <rect x="584" y="300" width="286" height="94" rx="18" fill="#f5fbfa" stroke="#5eead4" stroke-width="2"/>
+      <text x="608" y="334" fill="#18323a" font-size="14" font-weight="650">“Let's simplify this chart</text>
+      <text x="608" y="359" fill="#18323a" font-size="14" font-weight="650">and make the headline clearer…”</text>
+    </g>
+  </g>
+
+  <!-- Close-up 2: press the screenshot hotkey -->
+  <g class="ui">
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.41;0.411;0.47;0.471;1" dur="20s" repeatCount="indefinite"/>
+    <text x="48" y="76" class="headline">He taps the screenshot hotkey—without stopping.</text>
+    <text x="48" y="96" class="body">His voice keeps recording while he captures the screen.</text>
+    <use href="#keyboardCloseup"/>
+    <text x="50" y="139" class="eyebrow">CLOSE-UP • HANDS ON KEYBOARD</text>
+
+    <rect x="154" y="318" width="100" height="50" rx="7" fill="#2c2448" stroke="#a78bfa" stroke-width="3"/>
+    <text x="204" y="349" text-anchor="middle" class="hotkey">⌥ option</text>
+    <rect x="234" y="258" width="52" height="48" rx="7" fill="#2c2448" stroke="#a78bfa" stroke-width="3">
+      <animate attributeName="fill" values="#2c2448;#8b5cf6;#2c2448" keyTimes="0;0.48;1" dur="1.15s" repeatCount="indefinite"/>
+    </rect>
+    <text x="260" y="288" text-anchor="middle" class="hotkey">S</text>
+
+    <path d="M214 500 Q218 418 232 372" fill="none" stroke="#d99a72" stroke-width="58" stroke-linecap="round"/>
+    <ellipse cx="238" cy="360" rx="47" ry="36" fill="#d99a72"/>
+    <path d="M228 354 Q209 346 202 340" fill="none" stroke="#d99a72" stroke-width="22" stroke-linecap="round"/>
+    <path d="M442 500 Q390 422 351 375" fill="none" stroke="#d99a72" stroke-width="58" stroke-linecap="round"/>
+    <ellipse cx="339" cy="359" rx="46" ry="35" fill="#d99a72"/>
+    <g>
+      <animateTransform attributeName="transform" type="translate" values="0 0;0 9;0 0" keyTimes="0;0.5;1" dur="1.15s" repeatCount="indefinite"/>
+      <path d="M321 348 Q292 326 270 303" fill="none" stroke="#d99a72" stroke-width="24" stroke-linecap="round"/>
+      <ellipse cx="265" cy="296" rx="15" ry="12" fill="#d99a72"/>
+    </g>
+    <rect x="346" y="420" width="208" height="38" rx="19" fill="#211d35" stroke="#a78bfa"/>
+    <text x="450" y="444" text-anchor="middle" class="mono command" style="font-size:12px">⌥ S  →  riff shot</text>
+  </g>
+
+  <!-- Scene 3: speak while taking screenshots -->
+  <g class="ui">
+    <animate attributeName="opacity" values="0;0;1;1;0;0;0" keyTimes="0;0.47;0.48;0.62;0.63;0.95;1" dur="20s" repeatCount="indefinite"/>
+    <text x="48" y="76" class="headline">He keeps speaking as each screenshot is captured.</text>
+    <text x="48" y="96" class="body">Riff remembers each image at the moment he talks about it.</text>
+
+    <g clip-path="url(#monitorScreen)">
+      <rect x="67" y="126" width="510" height="278" fill="#eef2f3"/>
+      <rect x="67" y="126" width="510" height="34" fill="#dce3e5"/>
+      <circle cx="86" cy="143" r="4" fill="#f87171"/><circle cx="100" cy="143" r="4" fill="#fbbf24"/><circle cx="114" cy="143" r="4" fill="#4ade80"/>
+      <text x="137" y="147" class="screenTitle" fill="#40505a">Product dashboard</text>
+      <rect x="89" y="181" width="140" height="88" rx="8" fill="#d9e6e7"/>
+      <path d="M106 247 L128 221 L153 232 L184 195 L213 208" fill="none" stroke="#0d9488" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="247" y="181" width="140" height="88" rx="8" fill="#e7e1f7"/>
+      <rect x="270" y="229" width="16" height="24" rx="3" fill="#a78bfa"/><rect x="297" y="210" width="16" height="43" rx="3" fill="#8b5cf6"/><rect x="324" y="193" width="16" height="60" rx="3" fill="#7c3aed"/><rect x="351" y="219" width="16" height="34" rx="3" fill="#c4b5fd"/>
+      <rect x="405" y="181" width="140" height="88" rx="8" fill="#d8e8f7"/>
+      <circle cx="475" cy="225" r="29" fill="none" stroke="#60a5fa" stroke-width="13" stroke-dasharray="108 75" transform="rotate(-90 475 225)"/>
+      <rect x="89" y="291" width="456" height="78" rx="8" fill="#e2e8ea"/>
+      <rect x="108" y="311" width="250" height="7" rx="3" fill="#9faeb2"/><rect x="108" y="329" width="386" height="7" rx="3" fill="#aeb9bc"/><rect x="108" y="347" width="326" height="7" rx="3" fill="#aeb9bc"/>
+
+      <rect x="76" y="168" width="322" height="114" rx="5" fill="none" stroke="#8b5cf6" stroke-width="3" stroke-dasharray="8 5">
+        <animate attributeName="stroke-dashoffset" values="0;-26" dur="1s" repeatCount="indefinite"/>
+      </rect>
+      <circle cx="76" cy="168" r="5" fill="#c4b5fd"/><circle cx="398" cy="168" r="5" fill="#c4b5fd"/><circle cx="76" cy="282" r="5" fill="#c4b5fd"/><circle cx="398" cy="282" r="5" fill="#c4b5fd"/>
+
+      <rect x="335" y="334" width="214" height="50" rx="10" fill="#10272a" stroke="#2dd4bf"/>
+      <rect x="349" y="345" width="39" height="28" rx="4" fill="#d9e6e7" stroke="#a78bfa"/>
+      <path d="M354 367 L361 358 L368 362 L377 351 L384 356" fill="none" stroke="#0d9488" stroke-width="2"/>
+      <rect x="395" y="345" width="39" height="28" rx="4" fill="#e7e1f7" stroke="#a78bfa"/>
+      <rect x="402" y="359" width="5" height="8" fill="#8b5cf6"/><rect x="411" y="353" width="5" height="14" fill="#7c3aed"/><rect x="420" y="348" width="5" height="19" fill="#a78bfa"/>
+      <text x="447" y="354" class="eyebrow" style="font-size:9px">2 CAPTURED</text>
+      <text x="447" y="371" class="small">while he talks</text>
+    </g>
+
+    <ellipse cx="763" cy="263" rx="8" ry="4" fill="#713f36"><animate attributeName="ry" values="3;7;3;5;3" dur="1.4s" repeatCount="indefinite"/></ellipse>
+    <g fill="none" stroke="#5eead4" stroke-width="3" stroke-linecap="round">
+      <path d="M674 253 Q655 261 644 278"><animate attributeName="opacity" values="0.2;1;0.2" dur="1.2s" repeatCount="indefinite"/></path>
+      <path d="M666 243 Q636 255 622 283"><animate attributeName="opacity" values="0.2;1;0.2" begin="0.18s" dur="1.2s" repeatCount="indefinite"/></path>
+    </g>
+    <g>
+      <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.49;0.51;0.62;0.63;1" dur="20s" repeatCount="indefinite"/>
+      <path d="M710 308 L751 269 L737 322 Z" fill="#faf8ff" stroke="#a78bfa" stroke-width="2"/>
+      <rect x="584" y="300" width="286" height="94" rx="18" fill="#faf8ff" stroke="#a78bfa" stroke-width="2"/>
+      <text x="608" y="334" fill="#28213f" font-size="14" font-weight="650">“…and use these two examples</text>
+      <text x="608" y="359" fill="#28213f" font-size="14" font-weight="650">as the visual reference.”</text>
+    </g>
+  </g>
+
+  <!-- Scene 4: switch to Claude Code -->
+  <g class="ui">
+    <animate attributeName="opacity" values="0;0;1;1;0;0;0" keyTimes="0;0.62;0.63;0.74;0.75;0.95;1" dur="20s" repeatCount="indefinite"/>
+    <text x="48" y="76" class="headline">Then he switches to Claude Code.</text>
+    <text x="48" y="96" class="body">The terminal is ready. His captured session is waiting in Riff.</text>
+
+    <g clip-path="url(#monitorScreen)">
+      <rect x="67" y="126" width="510" height="278" fill="#10181d"/>
+      <rect x="67" y="126" width="510" height="34" fill="#1a252b"/>
+      <circle cx="86" cy="143" r="4" fill="#f87171"/><circle cx="100" cy="143" r="4" fill="#fbbf24"/><circle cx="114" cy="143" r="4" fill="#4ade80"/>
+      <text x="137" y="147" class="screenTitle">Claude Code — project</text>
+      <rect x="88" y="181" width="468" height="63" rx="10" fill="#151f24" stroke="#32434b"/>
+      <rect x="88" y="181" width="4" height="63" rx="2" fill="url(#claudeBar)"/>
+      <text x="108" y="207" class="mono terminal">Claude Code</text>
+      <text x="108" y="229" class="mono terminalMuted">Ready for your next prompt</text>
+      <text x="94" y="287" class="mono terminal" fill="#d5976d">❯</text>
+      <rect x="114" y="274" width="8" height="18" fill="#dce7e7"><animate attributeName="opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></rect>
+    </g>
+    <path d="M750 263 Q763 270 776 261" fill="none" stroke="#8a4f42" stroke-width="3" stroke-linecap="round"/>
+  </g>
+
+  <!-- Close-up 3: press the send-session hotkey -->
+  <g class="ui">
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.74;0.741;0.80;0.801;1" dur="20s" repeatCount="indefinite"/>
+    <text x="48" y="76" class="headline">One more hotkey stops and sends the session.</text>
+    <text x="48" y="96" class="body">Riff transcribes locally, then hands the words and images to Claude Code.</text>
+    <use href="#keyboardCloseup"/>
+    <text x="50" y="139" class="eyebrow">CLOSE-UP • HANDS ON KEYBOARD</text>
+
+    <rect x="154" y="318" width="100" height="50" rx="7" fill="#3a2821" stroke="#d5976d" stroke-width="3"/>
+    <text x="204" y="349" text-anchor="middle" class="hotkey">⌥ option</text>
+    <rect x="620" y="318" width="126" height="50" rx="7" fill="#3a2821" stroke="#d5976d" stroke-width="3">
+      <animate attributeName="fill" values="#3a2821;#b56f52;#3a2821" keyTimes="0;0.48;1" dur="1.15s" repeatCount="indefinite"/>
+    </rect>
+    <text x="683" y="349" text-anchor="middle" class="hotkey">↩ return</text>
+
+    <path d="M214 500 Q218 418 232 372" fill="none" stroke="#d99a72" stroke-width="58" stroke-linecap="round"/>
+    <ellipse cx="238" cy="360" rx="47" ry="36" fill="#d99a72"/>
+    <path d="M228 354 Q209 346 202 340" fill="none" stroke="#d99a72" stroke-width="22" stroke-linecap="round"/>
+    <path d="M694 500 Q657 426 621 389" fill="none" stroke="#d99a72" stroke-width="58" stroke-linecap="round"/>
+    <ellipse cx="610" cy="373" rx="46" ry="35" fill="#d99a72"/>
+    <g>
+      <animateTransform attributeName="transform" type="translate" values="0 0;0 9;0 0" keyTimes="0;0.5;1" dur="1.15s" repeatCount="indefinite"/>
+      <path d="M625 365 Q650 355 676 349" fill="none" stroke="#d99a72" stroke-width="24" stroke-linecap="round"/>
+      <ellipse cx="684" cy="347" rx="15" ry="12" fill="#d99a72"/>
+    </g>
+    <rect x="300" y="420" width="300" height="38" rx="19" fill="#2b201c" stroke="#d5976d"/>
+    <text x="450" y="444" text-anchor="middle" class="mono command" style="font-size:12px">⌥ ↩  →  toggle + send-images</text>
+  </g>
+
+  <!-- Scene 5: transcript and screenshots appear in Claude Code -->
+  <g class="ui">
+    <animate attributeName="opacity" values="0;0;1;1;0;0;0" keyTimes="0;0.80;0.805;0.98;0.99;0.995;1" dur="20s" repeatCount="indefinite"/>
+    <text x="48" y="76" class="headline">His transcript and screenshots appear in Claude Code.</text>
+    <text x="48" y="96" class="body">The complete context lands in Claude Code, ready to send.</text>
+
+    <g clip-path="url(#monitorScreen)">
+      <rect x="67" y="126" width="510" height="278" fill="#10181d"/>
+      <rect x="67" y="126" width="510" height="34" fill="#1a252b"/>
+      <circle cx="86" cy="143" r="4" fill="#f87171"/><circle cx="100" cy="143" r="4" fill="#fbbf24"/><circle cx="114" cy="143" r="4" fill="#4ade80"/>
+      <text x="137" y="147" class="screenTitle">Claude Code — project</text>
+
+      <text x="88" y="188" class="mono terminal" fill="#d5976d">❯</text>
+      <g>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.805;0.815;0.98;0.99;1" dur="20s" repeatCount="indefinite"/>
+        <text x="110" y="188" class="mono terminal">Update this dashboard using the changes I described.</text>
+        <text x="110" y="209" class="mono terminal">Simplify the chart and make the headline clearer.</text>
+      </g>
+
+      <g>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.815;0.825;0.98;0.99;1" dur="20s" repeatCount="indefinite"/>
+        <rect x="110" y="230" width="204" height="106" rx="9" fill="#182329" stroke="#536871"/>
+        <rect x="122" y="242" width="76" height="58" rx="5" fill="#d9e6e7"/>
+        <path d="M130 292 L143 274 L155 282 L174 255 L190 266" fill="none" stroke="#0d9488" stroke-width="4" stroke-linecap="round"/>
+        <text x="122" y="320" class="mono terminalMuted">Screenshot 1</text>
+
+        <rect x="328" y="230" width="204" height="106" rx="9" fill="#182329" stroke="#536871"/>
+        <rect x="340" y="242" width="76" height="58" rx="5" fill="#e7e1f7"/>
+        <rect x="351" y="279" width="10" height="13" rx="2" fill="#a78bfa"/><rect x="369" y="266" width="10" height="26" rx="2" fill="#8b5cf6"/><rect x="387" y="252" width="10" height="40" rx="2" fill="#7c3aed"/>
+        <text x="340" y="320" class="mono terminalMuted">Screenshot 2</text>
+      </g>
+
+      <g>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.825;0.835;0.98;0.99;1" dur="20s" repeatCount="indefinite"/>
+        <rect x="110" y="354" width="132" height="28" rx="14" fill="#1c302c" stroke="#4ade80"/>
+        <text x="176" y="372" text-anchor="middle" class="mono command" fill="#86efac">2 images attached</text>
+        <rect x="254" y="354" width="8" height="18" fill="#dce7e7"><animate attributeName="opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/></rect>
+      </g>
+    </g>
+
+    <path d="M750 263 Q763 270 776 261" fill="none" stroke="#8a4f42" stroke-width="3" stroke-linecap="round"/>
+  </g>
+
+  <!-- Persistent story beats -->
+  <g class="ui" transform="translate(48 493)">
+    <circle cx="5" cy="0" r="4" fill="#5eead4"/><text x="18" y="4" class="small">TAP</text>
+    <line x1="62" y1="0" x2="110" y2="0" stroke="#3b515b" stroke-width="2"/>
+    <circle cx="119" cy="0" r="4" fill="#5eead4"/><text x="132" y="4" class="small">SPEAK</text>
+    <line x1="187" y1="0" x2="235" y2="0" stroke="#3b515b" stroke-width="2"/>
+    <circle cx="244" cy="0" r="4" fill="#c4b5fd"/><text x="257" y="4" class="small">SCREENSHOTS</text>
+    <line x1="354" y1="0" x2="402" y2="0" stroke="#3b515b" stroke-width="2"/>
+    <circle cx="411" cy="0" r="4" fill="#d5976d"/><text x="424" y="4" class="small">CLAUDE CODE</text>
+  </g>
+</svg>
