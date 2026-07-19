@@ -38,15 +38,6 @@ The working benchmark became:
 - Changed clipboard watcher shutdown to send `SIGTERM` and return immediately.
 - Added a WAV-header fast path for duration lookup so common WAV sessions avoid `ffprobe`.
 
-### Transcription tuning
-
-- Added `RIFF_PARAKEET_BATCH_SIZE`.
-- Switched the default batch size from `1` to `4`.
-- Threaded batch size through:
-  - server transcription
-  - one-shot transcription
-  - chunk/manual transcription
-
 ## Benchmark Notes
 
 The earlier harnesses were misleading because they often changed the runtime path:

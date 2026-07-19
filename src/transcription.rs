@@ -2,14 +2,15 @@ use crate::cli::{Cli, StopArgs};
 use crate::error::{app_error, AppError};
 use crate::models::SessionState;
 use crate::paths::{
-    parakeet_server_log_file, parakeet_server_pid_file, root_dir, web_server_log_file,
-    web_server_pid_file,
+    parakeet_server_log_file, parakeet_server_pid_file, parakeet_server_socket_file, root_dir,
+    web_server_log_file, web_server_pid_file,
 };
 use crate::setup::default_user_runtime_dir;
 use crate::{
     command_exists, fill_template, fill_template_with_transcript, print_verbose, process_is_alive,
-    read_pid_file, round3, shell_escape, write_pid_file,
+    read_pid_file, round3, send_signal, shell_escape, write_pid_file,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::env;
@@ -21,8 +22,30 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_PARAKEET_MODEL: &str = "nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc";
+const DEFAULT_PARAKEET_MODEL_REVISION: &str = "main";
 const DEFAULT_PARAKEET_SERVER_WAIT_READY_SEC: u64 = 30;
-const DEFAULT_PARAKEET_BATCH_SIZE: u32 = 4;
+const PARAKEET_SERVER_PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ParakeetServerIdentity {
+    protocol_version: u32,
+    service: String,
+    server_instance_id: String,
+    pid: i32,
+    riff_root: String,
+    script_path: String,
+    transport: String,
+    endpoint: String,
+    model: String,
+    model_revision: String,
+    requested_device: String,
+    device: String,
+    python_version: String,
+    python_executable: String,
+    nemo_version: String,
+    torch_version: String,
+    started_at_epoch: f64,
+}
 
 fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
@@ -151,14 +174,6 @@ pub(crate) fn resolve_parakeet_model(explicit: Option<&str>) -> String {
     DEFAULT_PARAKEET_MODEL.to_string()
 }
 
-pub(crate) fn resolve_parakeet_batch_size() -> u32 {
-    env::var("RIFF_PARAKEET_BATCH_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(DEFAULT_PARAKEET_BATCH_SIZE)
-}
-
 pub(crate) fn resolve_parakeet_script(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = explicit {
         return Some(path.to_path_buf());
@@ -192,7 +207,59 @@ pub(crate) fn parakeet_server_enabled() -> bool {
 }
 
 pub(crate) fn parakeet_server_base_url() -> String {
-    env::var("RIFF_PARAKEET_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8765".to_string())
+    env::var("RIFF_PARAKEET_SERVER_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| format!("unix://{}", normalized_path(&parakeet_server_socket_file())))
+}
+
+fn resolve_parakeet_model_revision() -> String {
+    env::var("RIFF_PARAKEET_MODEL_REVISION")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_PARAKEET_MODEL_REVISION.to_string())
+}
+
+fn resolve_parakeet_requested_device() -> String {
+    env::var("RIFF_PARAKEET_DEVICE")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| matches!(v.as_str(), "auto" | "cpu" | "cuda"))
+        .unwrap_or_else(|| "auto".to_string())
+}
+
+fn normalized_path(path: &Path) -> String {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical.display().to_string();
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        if let Ok(canonical_parent) = fs::canonicalize(parent) {
+            return canonical_parent.join(name).display().to_string();
+        }
+    }
+    path.display().to_string()
+}
+
+fn parakeet_server_unix_socket(base_url: &str) -> Option<PathBuf> {
+    base_url.strip_prefix("unix://").map(PathBuf::from)
+}
+
+fn parakeet_server_request_url(base_url: &str, route: &str) -> String {
+    if parakeet_server_unix_socket(base_url).is_some() {
+        format!("http://localhost/{route}")
+    } else {
+        format!("{}/{route}", base_url.trim_end_matches('/'))
+    }
+}
+
+fn parakeet_curl_command(base_url: &str) -> Command {
+    let mut cmd = Command::new("curl");
+    if let Some(socket_path) = parakeet_server_unix_socket(base_url) {
+        cmd.arg("--unix-socket").arg(socket_path);
+    }
+    cmd
 }
 
 fn parakeet_server_wait_ready_timeout_sec() -> u64 {
@@ -204,30 +271,212 @@ fn parakeet_server_wait_ready_timeout_sec() -> u64 {
 }
 
 fn parakeet_server_health_url(base: &str) -> String {
-    format!("{}/health", base.trim_end_matches('/'))
+    parakeet_server_request_url(base, "health")
 }
 
 fn parakeet_server_transcribe_url(base: &str) -> String {
-    format!("{}/transcribe", base.trim_end_matches('/'))
+    parakeet_server_request_url(base, "transcribe")
+}
+
+fn query_parakeet_server_identity(base_url: &str) -> Result<ParakeetServerIdentity, String> {
+    if !command_exists("curl") {
+        return Err("curl not found".to_string());
+    }
+
+    let out = parakeet_curl_command(base_url)
+        .args(["-sS", "--max-time", "0.5", "--fail"])
+        .arg(parakeet_server_health_url(base_url))
+        .output()
+        .map_err(|e| format!("health request failed: {e}"))?;
+
+    if !out.status.success() {
+        return Err(format!(
+            "health request returned {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    let parsed: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("health returned invalid JSON: {e}"))?;
+    if parsed.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("health returned ok=false: {parsed}"));
+    }
+    serde_json::from_value(parsed).map_err(|e| format!("health identity is incomplete: {e}"))
+}
+
+fn validate_parakeet_server_identity(
+    identity: &ParakeetServerIdentity,
+    model: Option<&str>,
+    script_path: Option<&Path>,
+) -> Result<(), String> {
+    let expected_root = normalized_path(&root_dir());
+    let expected_revision = resolve_parakeet_model_revision();
+    let expected_device = resolve_parakeet_requested_device();
+    let mut mismatches = Vec::new();
+
+    if identity.protocol_version != PARAKEET_SERVER_PROTOCOL_VERSION {
+        mismatches.push(format!(
+            "protocol_version expected={} actual={}",
+            PARAKEET_SERVER_PROTOCOL_VERSION, identity.protocol_version
+        ));
+    }
+    if identity.service != "parakeet" {
+        mismatches.push(format!(
+            "service expected=parakeet actual={}",
+            identity.service
+        ));
+    }
+    if identity.riff_root != expected_root {
+        mismatches.push(format!(
+            "riff_root expected={expected_root} actual={}",
+            identity.riff_root
+        ));
+    }
+    if let Some(model) = model {
+        if identity.model != model {
+            mismatches.push(format!("model expected={model} actual={}", identity.model));
+        }
+        if identity.model_revision != expected_revision {
+            mismatches.push(format!(
+                "model_revision expected={expected_revision} actual={}",
+                identity.model_revision
+            ));
+        }
+        if identity.requested_device != expected_device {
+            mismatches.push(format!(
+                "requested_device expected={expected_device} actual={}",
+                identity.requested_device
+            ));
+        }
+        if expected_device != "auto" && identity.device != expected_device {
+            mismatches.push(format!(
+                "device expected={expected_device} actual={}",
+                identity.device
+            ));
+        }
+    }
+    if let Some(script_path) = script_path {
+        let expected_script = normalized_path(script_path);
+        if identity.script_path != expected_script {
+            mismatches.push(format!(
+                "script_path expected={expected_script} actual={}",
+                identity.script_path
+            ));
+        }
+    }
+    for (field, value) in [
+        ("server_instance_id", identity.server_instance_id.as_str()),
+        ("device", identity.device.as_str()),
+        ("python_version", identity.python_version.as_str()),
+        ("python_executable", identity.python_executable.as_str()),
+        ("nemo_version", identity.nemo_version.as_str()),
+        ("torch_version", identity.torch_version.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            mismatches.push(format!("{field} is empty"));
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(mismatches.join(", "))
+    }
+}
+
+fn validate_parakeet_server_endpoint(
+    identity: &ParakeetServerIdentity,
+    base_url: &str,
+) -> Result<(), String> {
+    let expected_endpoint = base_url.trim_end_matches('/');
+    let expected_transport = if parakeet_server_unix_socket(base_url).is_some() {
+        "unix"
+    } else {
+        "tcp"
+    };
+    if identity.transport != expected_transport {
+        return Err(format!(
+            "transport expected={expected_transport} actual={}",
+            identity.transport
+        ));
+    }
+    if identity.endpoint.trim_end_matches('/') != expected_endpoint {
+        return Err(format!(
+            "endpoint expected={expected_endpoint} actual={}",
+            identity.endpoint
+        ));
+    }
+    Ok(())
+}
+
+fn get_valid_parakeet_server_identity(
+    base_url: &str,
+    model: Option<&str>,
+    script_path: Option<&Path>,
+) -> Result<ParakeetServerIdentity, String> {
+    let identity = query_parakeet_server_identity(base_url)?;
+    validate_parakeet_server_identity(&identity, model, script_path)?;
+    validate_parakeet_server_endpoint(&identity, base_url)?;
+    Ok(identity)
 }
 
 pub(crate) fn check_parakeet_server_health(base_url: &str) -> bool {
-    if !command_exists("curl") {
+    get_valid_parakeet_server_identity(base_url, None, None).is_ok()
+}
+
+fn identity_owned_by_current_root(identity: &ParakeetServerIdentity, base_url: &str) -> bool {
+    identity.protocol_version == PARAKEET_SERVER_PROTOCOL_VERSION
+        && identity.service == "parakeet"
+        && identity.riff_root == normalized_path(&root_dir())
+        && identity.transport == "unix"
+        && identity.endpoint == base_url
+}
+
+fn stop_mismatched_owned_server(
+    identity: &ParakeetServerIdentity,
+    base_url: &str,
+    cli: &Cli,
+) -> bool {
+    if !identity_owned_by_current_root(identity, base_url) || identity.pid <= 0 {
         return false;
     }
-
-    let out = Command::new("curl")
-        .args(["-sS", "--max-time", "0.5", "--fail"])
-        .arg(parakeet_server_health_url(base_url))
-        .output();
-
-    match out {
-        Ok(o) if o.status.success() => {
-            let body = String::from_utf8_lossy(&o.stdout).to_string();
-            body.contains("\"ok\": true") || body.contains("\"ok\":true")
-        }
-        _ => false,
+    print_verbose(
+        cli,
+        format!(
+            "Stopping mismatched Riff-owned Parakeet server pid={} instance={} model={} device={}",
+            identity.pid, identity.server_instance_id, identity.model, identity.device
+        ),
+    );
+    if send_signal(identity.pid, libc::SIGTERM).is_err() {
+        return false;
     }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if !process_is_alive(identity.pid) {
+            let _ = fs::remove_file(parakeet_server_pid_file());
+            let _ = fs::remove_file(parakeet_server_socket_file());
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+fn process_matches_parakeet_server(pid: i32, script_path: &Path, model: &str) -> bool {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let command = String::from_utf8_lossy(&output.stdout);
+    command.contains(&normalized_path(script_path))
+        && command.contains("--serve")
+        && command.contains(model)
 }
 
 fn spawn_parakeet_server(
@@ -237,23 +486,7 @@ fn spawn_parakeet_server(
     cli: &Cli,
 ) -> Result<i32, AppError> {
     let pid_file = parakeet_server_pid_file();
-    if let Some(pid) = read_pid_file(&pid_file) {
-        if process_is_alive(pid) {
-            print_verbose(
-                cli,
-                format!("Parakeet server process already running (pid={})", pid),
-            );
-            return Ok(pid);
-        }
-    }
-
     let base_url = parakeet_server_base_url();
-    let host_port = base_url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let mut parts = host_port.split(':');
-    let host = parts.next().unwrap_or("127.0.0.1");
-    let port = parts.next().unwrap_or("8765");
 
     let log_path = parakeet_server_log_file();
     if let Some(parent) = log_path.parent() {
@@ -276,15 +509,32 @@ fn spawn_parakeet_server(
         ),
     );
 
-    let child = Command::new(python_bin)
+    let mut command = Command::new(python_bin);
+    command
         .arg(script_path)
         .arg("--serve")
-        .arg("--host")
-        .arg(host)
-        .arg("--port")
-        .arg(port)
         .arg("--model")
         .arg(model)
+        .arg("--device")
+        .arg(resolve_parakeet_requested_device())
+        .arg("--model-revision")
+        .arg(resolve_parakeet_model_revision())
+        .arg("--riff-root")
+        .arg(normalized_path(&root_dir()));
+    if let Some(socket_path) = parakeet_server_unix_socket(&base_url) {
+        command.arg("--unix-socket").arg(socket_path);
+    } else {
+        let host_port = base_url
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        let mut parts = host_port.split(':');
+        command
+            .arg("--host")
+            .arg(parts.next().unwrap_or("127.0.0.1"))
+            .arg("--port")
+            .arg(parts.next().unwrap_or("8765"));
+    }
+    let child = command
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_file_err))
         .spawn()
@@ -301,36 +551,120 @@ pub(crate) fn ensure_parakeet_server(
     model: &str,
     cli: &Cli,
     wait_ready: bool,
-) {
+) -> Option<ParakeetServerIdentity> {
     if !parakeet_server_enabled() {
-        return;
+        return None;
     }
 
     let base_url = parakeet_server_base_url();
-    if check_parakeet_server_health(&base_url) {
-        return;
+    match get_valid_parakeet_server_identity(&base_url, Some(model), Some(script_path)) {
+        Ok(identity) => return Some(identity),
+        Err(reason) => print_verbose(
+            cli,
+            format!("Parakeet server is not usable at {base_url}: {reason}"),
+        ),
     }
 
-    let spawned_pid = match spawn_parakeet_server(python_bin, script_path, model, cli) {
-        Ok(pid) => Some(pid),
-        Err(e) => {
+    let mut spawned_pid = None;
+    if let Ok(identity) = query_parakeet_server_identity(&base_url) {
+        if identity_owned_by_current_root(&identity, &base_url) {
+            if !stop_mismatched_owned_server(&identity, &base_url, cli) {
+                print_verbose(cli, "Could not stop mismatched Riff-owned Parakeet server.");
+                return None;
+            }
+        } else {
             print_verbose(
                 cli,
-                format!("Failed to start Parakeet server: {}", e.message),
+                format!(
+                    "Refusing to replace Parakeet server not owned by RIFF_ROOT {}: {}",
+                    normalized_path(&root_dir()),
+                    serde_json::to_string(&identity).unwrap_or_default()
+                ),
             );
-            None
+            return None;
         }
-    };
+    } else if let Some(pid) = read_pid_file(&parakeet_server_pid_file()) {
+        if process_is_alive(pid) && process_matches_parakeet_server(pid, script_path, model) {
+            spawned_pid = Some(pid);
+            print_verbose(
+                cli,
+                format!("Waiting for existing Parakeet server process pid={pid}"),
+            );
+        } else if process_is_alive(pid) {
+            print_verbose(
+                cli,
+                format!("Ignoring PID file for unrelated process pid={pid}"),
+            );
+        }
+    }
+
+    if spawned_pid.is_none() {
+        spawned_pid = match spawn_parakeet_server(python_bin, script_path, model, cli) {
+            Ok(pid) => Some(pid),
+            Err(e) => {
+                print_verbose(
+                    cli,
+                    format!("Failed to start Parakeet server: {}", e.message),
+                );
+                None
+            }
+        };
+    }
     if !wait_ready {
-        return;
+        return None;
     }
 
     let deadline = Instant::now() + Duration::from_secs(parakeet_server_wait_ready_timeout_sec());
     let mut saw_dead_server_process = false;
+    let mut restarted_mismatched_server = false;
     while Instant::now() < deadline {
-        if check_parakeet_server_health(&base_url) {
-            print_verbose(cli, format!("Parakeet server ready at {}", base_url));
-            return;
+        if let Ok(identity) = query_parakeet_server_identity(&base_url) {
+            match validate_parakeet_server_identity(&identity, Some(model), Some(script_path)) {
+                Ok(()) => {
+                    print_verbose(
+                        cli,
+                        format!(
+                            "Parakeet server ready at {} (pid={}, instance={}, model={}, device={})",
+                            base_url,
+                            identity.pid,
+                            identity.server_instance_id,
+                            identity.model,
+                            identity.device
+                        ),
+                    );
+                    return Some(identity);
+                }
+                Err(reason)
+                    if identity_owned_by_current_root(&identity, &base_url)
+                        && !restarted_mismatched_server =>
+                {
+                    print_verbose(
+                        cli,
+                        format!("Replacing mismatched Parakeet server after startup: {reason}"),
+                    );
+                    if !stop_mismatched_owned_server(&identity, &base_url, cli) {
+                        break;
+                    }
+                    restarted_mismatched_server = true;
+                    spawned_pid = match spawn_parakeet_server(python_bin, script_path, model, cli) {
+                        Ok(pid) => Some(pid),
+                        Err(e) => {
+                            print_verbose(
+                                cli,
+                                format!("Failed to restart Parakeet server: {}", e.message),
+                            );
+                            break;
+                        }
+                    };
+                    continue;
+                }
+                Err(reason) => {
+                    print_verbose(cli, format!("Parakeet server identity mismatch: {reason}"));
+                    if !identity_owned_by_current_root(&identity, &base_url) {
+                        break;
+                    }
+                }
+            }
         }
         if let Some(pid) = spawned_pid {
             if !process_is_alive(pid) {
@@ -356,6 +690,7 @@ pub(crate) fn ensure_parakeet_server(
             saw_dead_server_process
         ),
     );
+    None
 }
 
 fn web_server_enabled() -> bool {
@@ -543,12 +878,12 @@ pub(crate) fn ensure_web_server(cli: &Cli, wait_ready: bool) -> bool {
     false
 }
 
-fn transcribe_via_parakeet_server(
+pub(crate) fn transcribe_via_parakeet_server(
     base_url: &str,
     audio_path: &Path,
     out_txt: &Path,
     model: &str,
-    batch_size: u32,
+    expected_identity: &ParakeetServerIdentity,
 ) -> Result<(String, Value), Value> {
     if !command_exists("curl") {
         return Err(json!({
@@ -561,15 +896,19 @@ fn transcribe_via_parakeet_server(
     let payload = json!({
         "audio": audio_path,
         "out_txt": out_txt,
+        "protocol_version": PARAKEET_SERVER_PROTOCOL_VERSION,
+        "server_instance_id": expected_identity.server_instance_id,
+        "riff_root": normalized_path(&root_dir()),
         "model": model,
-        "batch_size": batch_size
+        "model_revision": resolve_parakeet_model_revision(),
+        "requested_device": resolve_parakeet_requested_device(),
+        "device": expected_identity.device,
     })
     .to_string();
 
-    let out = Command::new("curl")
+    let out = parakeet_curl_command(base_url)
         .args([
             "-sS",
-            "--fail",
             "-X",
             "POST",
             "-H",
@@ -622,6 +961,50 @@ fn transcribe_via_parakeet_server(
         }));
     }
 
+    let actual_identity = match parsed
+        .get("server")
+        .cloned()
+        .ok_or_else(|| "missing server identity".to_string())
+        .and_then(|value| {
+            serde_json::from_value::<ParakeetServerIdentity>(value)
+                .map_err(|e| format!("invalid server identity: {e}"))
+        }) {
+        Ok(identity) => identity,
+        Err(reason) => {
+            return Err(json!({
+                "status": "error",
+                "method": "parakeet_server",
+                "reason": reason,
+                "response": parsed,
+            }))
+        }
+    };
+    if let Err(reason) = validate_parakeet_server_identity(&actual_identity, Some(model), None) {
+        return Err(json!({
+            "status": "error",
+            "method": "parakeet_server",
+            "reason": format!("response server identity mismatch: {reason}"),
+            "server_identity": actual_identity,
+        }));
+    }
+    if let Err(reason) = validate_parakeet_server_endpoint(&actual_identity, base_url) {
+        return Err(json!({
+            "status": "error",
+            "method": "parakeet_server",
+            "reason": format!("response server endpoint mismatch: {reason}"),
+            "server_identity": actual_identity,
+        }));
+    }
+    if actual_identity.server_instance_id != expected_identity.server_instance_id {
+        return Err(json!({
+            "status": "error",
+            "method": "parakeet_server",
+            "reason": "server instance changed between health check and transcription",
+            "expected_instance_id": expected_identity.server_instance_id,
+            "actual_instance_id": actual_identity.server_instance_id,
+        }));
+    }
+
     let txt = parsed
         .get("text")
         .and_then(|v| v.as_str())
@@ -635,8 +1018,10 @@ fn transcribe_via_parakeet_server(
             "status": "ok",
             "method": "parakeet_server",
             "server": base_url,
-            "model": model,
-            "batch_size": batch_size,
+            "model": actual_identity.model,
+            "model_revision": actual_identity.model_revision,
+            "device": actual_identity.device,
+            "server_identity": actual_identity,
             "elapsed_sec": parsed.get("elapsed_sec").and_then(|v| v.as_f64()),
         }),
     ))
@@ -774,10 +1159,8 @@ pub(crate) fn run_transcription(
 
     let python_bin = resolve_python_bin(stop_args.python_bin.as_deref());
     let model = resolve_parakeet_model(stop_args.parakeet_model.as_deref());
-    let batch_size = resolve_parakeet_batch_size();
     perf.insert("python_bin".to_string(), json!(python_bin.clone()));
     perf.insert("model".to_string(), json!(model.clone()));
-    perf.insert("batch_size".to_string(), json!(batch_size));
     perf.insert(
         "script_path".to_string(),
         json!(script_path.display().to_string()),
@@ -792,7 +1175,9 @@ pub(crate) fn run_transcription(
         perf.insert("server_url".to_string(), json!(base_url.clone()));
 
         let t_server_health_before = Instant::now();
-        let server_health_before = check_parakeet_server_health(&base_url);
+        let identity_before =
+            get_valid_parakeet_server_identity(&base_url, Some(&model), Some(&script_path));
+        let server_health_before = identity_before.is_ok();
         perf_mark(
             &mut perf,
             "server_health_before_check_ms",
@@ -802,36 +1187,46 @@ pub(crate) fn run_transcription(
             "server_health_before".to_string(),
             json!(server_health_before),
         );
+        match &identity_before {
+            Ok(identity) => {
+                perf.insert("server_identity_before".to_string(), json!(identity));
+            }
+            Err(reason) => {
+                perf.insert("server_health_before_error".to_string(), json!(reason));
+            }
+        }
 
         let t_server_ensure = Instant::now();
-        ensure_parakeet_server(&python_bin, &script_path, &model, cli, true);
+        let server_identity = match identity_before {
+            Ok(identity) => Some(identity),
+            Err(_) => ensure_parakeet_server(&python_bin, &script_path, &model, cli, true),
+        };
         perf_mark(&mut perf, "server_ensure_ms", t_server_ensure);
 
-        let t_server_health_after = Instant::now();
-        let server_health_after = check_parakeet_server_health(&base_url);
-        perf_mark(
-            &mut perf,
-            "server_health_after_check_ms",
-            t_server_health_after,
-        );
+        let server_health_after = server_identity.is_some();
+        perf.insert("server_health_after_check_ms".to_string(), json!(0.0));
         perf.insert(
             "server_health_after".to_string(),
             json!(server_health_after),
         );
 
-        if let Some(pid) = read_pid_file(&parakeet_server_pid_file()) {
-            perf.insert("server_pid".to_string(), json!(pid));
-            perf.insert("server_pid_alive".to_string(), json!(process_is_alive(pid)));
+        if let Some(identity) = &server_identity {
+            perf.insert("server_identity".to_string(), json!(identity));
+            perf.insert("server_pid".to_string(), json!(identity.pid));
+            perf.insert(
+                "server_pid_alive".to_string(),
+                json!(process_is_alive(identity.pid)),
+            );
         }
 
-        if server_health_after {
+        if let Some(identity) = server_identity {
             let t_server_request = Instant::now();
             match transcribe_via_parakeet_server(
                 &base_url,
                 &audio_path,
                 &out_txt,
                 &model,
-                batch_size,
+                &identity,
             ) {
                 Ok((txt, meta)) => {
                     perf_mark(&mut perf, "server_request_ms", t_server_request);
@@ -866,13 +1261,12 @@ pub(crate) fn run_transcription(
     }
 
     let cmd_for_log = format!(
-        "{} {} --audio {} --out-txt {} --model {} --batch-size {}",
+        "{} {} --audio {} --out-txt {} --model {}",
         shell_escape(&python_bin),
         shell_escape(&script_path.display().to_string()),
         shell_escape(&audio_path.display().to_string()),
         shell_escape(&out_txt.display().to_string()),
-        shell_escape(&model),
-        batch_size
+        shell_escape(&model)
     );
 
     print_verbose(
@@ -889,8 +1283,6 @@ pub(crate) fn run_transcription(
         .arg(&out_txt)
         .arg("--model")
         .arg(&model)
-        .arg("--batch-size")
-        .arg(batch_size.to_string())
         .output();
     perf_mark(&mut perf, "python_transcribe_ms", t_python);
 
@@ -914,7 +1306,6 @@ pub(crate) fn run_transcription(
                 "cmd": cmd_for_log,
                 "script": script_path,
                 "model": model,
-                "batch_size": batch_size,
             });
             if let Some(server_error_meta) = server_error {
                 if let Some(obj) = meta.as_object_mut() {
@@ -1252,6 +1643,71 @@ mod hook_tests {
             parakeet_script: None,
             parakeet_model: None,
         }
+    }
+
+    fn matching_server_identity(model: &str, endpoint: &str) -> ParakeetServerIdentity {
+        let requested_device = resolve_parakeet_requested_device();
+        ParakeetServerIdentity {
+            protocol_version: PARAKEET_SERVER_PROTOCOL_VERSION,
+            service: "parakeet".to_string(),
+            server_instance_id: "test-instance".to_string(),
+            pid: std::process::id() as i32,
+            riff_root: normalized_path(&root_dir()),
+            script_path: normalized_path(Path::new(file!())),
+            transport: "unix".to_string(),
+            endpoint: endpoint.to_string(),
+            model: model.to_string(),
+            model_revision: resolve_parakeet_model_revision(),
+            requested_device: requested_device.clone(),
+            device: if requested_device == "cuda" {
+                "cuda".to_string()
+            } else {
+                "cpu".to_string()
+            },
+            python_version: "3.12.0".to_string(),
+            python_executable: "/test/python".to_string(),
+            nemo_version: "2.4.0".to_string(),
+            torch_version: "2.7.1".to_string(),
+            started_at_epoch: 1.0,
+        }
+    }
+
+    #[test]
+    fn parakeet_request_urls_support_unix_and_tcp() {
+        assert_eq!(
+            parakeet_server_request_url("unix:///tmp/riff.sock", "health"),
+            "http://localhost/health"
+        );
+        assert_eq!(
+            parakeet_server_request_url("http://127.0.0.1:8765/", "transcribe"),
+            "http://127.0.0.1:8765/transcribe"
+        );
+    }
+
+    #[test]
+    fn parakeet_identity_validation_rejects_wrong_model() {
+        let endpoint = format!("unix://{}", parakeet_server_socket_file().display());
+        let mut identity = matching_server_identity("model-a", &endpoint);
+        assert!(validate_parakeet_server_identity(&identity, Some("model-a"), None).is_ok());
+
+        identity.model = "model-b".to_string();
+        let error = validate_parakeet_server_identity(&identity, Some("model-a"), None)
+            .expect_err("wrong model must be rejected");
+        assert!(error.contains("model expected=model-a actual=model-b"));
+    }
+
+    #[test]
+    fn only_current_root_unix_socket_is_treated_as_owned() {
+        let endpoint = format!("unix://{}", normalized_path(&parakeet_server_socket_file()));
+        let mut identity = matching_server_identity("model-a", &endpoint);
+        assert!(identity_owned_by_current_root(&identity, &endpoint));
+
+        identity.transport = "tcp".to_string();
+        identity.endpoint = "http://127.0.0.1:8765".to_string();
+        assert!(!identity_owned_by_current_root(
+            &identity,
+            "http://127.0.0.1:8765"
+        ));
     }
 
     #[test]

@@ -41,6 +41,10 @@ pub fn parakeet_server_pid_file() -> PathBuf {
     root_dir().join("parakeet-server.pid")
 }
 
+pub fn parakeet_server_socket_file() -> PathBuf {
+    root_dir().join("parakeet-server.sock")
+}
+
 pub fn web_server_log_file() -> PathBuf {
     root_dir().join("web-server.log")
 }

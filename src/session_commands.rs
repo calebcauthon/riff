@@ -12,9 +12,9 @@ use crate::reporting::{
 };
 use crate::screenshots::{detect_screenshot_dir, file_mtime_epoch, move_session_screenshots};
 use crate::transcription::{
-    ensure_parakeet_server, ensure_web_server, parakeet_server_enabled,
-    resolve_parakeet_batch_size, resolve_parakeet_model, resolve_parakeet_script,
-    resolve_python_bin, run_output_hooks, run_post_transcribe_command, run_transcription,
+    ensure_parakeet_server, ensure_web_server, parakeet_server_base_url, parakeet_server_enabled,
+    resolve_parakeet_model, resolve_parakeet_script, resolve_python_bin, run_output_hooks,
+    run_post_transcribe_command, run_transcription, transcribe_via_parakeet_server,
 };
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
@@ -305,15 +305,13 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
 
     let python_bin = resolve_python_bin(None);
     let model = resolve_parakeet_model(None);
-    let batch_size = resolve_parakeet_batch_size();
     let cmd_for_log = format!(
-        "{} {} --audio {} --out-txt {} --model {} --batch-size {}",
+        "{} {} --audio {} --out-txt {} --model {}",
         python_bin,
         script_path.display(),
         chunk_audio.display(),
         chunk_out_txt.display(),
-        model,
-        batch_size
+        model
     );
     print_verbose(
         cli,
@@ -322,91 +320,18 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
 
     let mut server_error: Option<Value> = None;
     if parakeet_server_enabled() && command_exists("curl") {
-        ensure_parakeet_server(&python_bin, &script_path, &model, cli, true);
-        let base_url =
-            env::var("RIFF_PARAKEET_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8765".into());
-        let payload = json!({
-            "audio": chunk_audio,
-            "out_txt": chunk_out_txt,
-            "model": model,
-            "batch_size": batch_size
-        })
-        .to_string();
-        let server_out = Command::new("curl")
-            .args([
-                "-sS",
-                "--fail",
-                "-X",
-                "POST",
-                "-H",
-                "Content-Type: application/json",
-                "--data",
-                &payload,
-            ])
-            .arg(format!("{}/transcribe", base_url.trim_end_matches('/')))
-            .output();
-
-        match server_out {
-            Ok(out) if out.status.success() => {
-                let body = String::from_utf8_lossy(&out.stdout).to_string();
-                match serde_json::from_str::<Value>(&body) {
-                    Ok(parsed) if parsed.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
-                        let txt = parsed
-                            .get("text")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .trim()
-                            .to_string();
-                        if !txt.is_empty() && !chunk_out_txt.exists() {
-                            let _ = fs::write(chunk_out_txt, format!("{txt}\n"));
-                        }
-                        return (
-                            txt,
-                            json!({
-                                "status": "ok",
-                                "method": "parakeet_server",
-                                "server": base_url,
-                                "model": model,
-                                "batch_size": batch_size,
-                                "elapsed_sec": parsed.get("elapsed_sec").and_then(|v| v.as_f64()),
-                            }),
-                        );
-                    }
-                    Ok(parsed) => {
-                        server_error = Some(json!({
-                            "status": "error",
-                            "method": "parakeet_server",
-                            "server": base_url,
-                            "response": parsed,
-                        }));
-                    }
-                    Err(e) => {
-                        server_error = Some(json!({
-                            "status": "error",
-                            "method": "parakeet_server",
-                            "server": base_url,
-                            "reason": format!("invalid JSON response: {e}"),
-                            "body": body,
-                        }));
-                    }
-                }
-            }
-            Ok(out) => {
-                server_error = Some(json!({
-                    "status": "error",
-                    "method": "parakeet_server",
-                    "server": base_url,
-                    "returncode": out.status.code(),
-                    "stderr": String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                    "stdout": String::from_utf8_lossy(&out.stdout).trim().to_string(),
-                }));
-            }
-            Err(e) => {
-                server_error = Some(json!({
-                    "status": "error",
-                    "method": "parakeet_server",
-                    "reason": format!("curl failed: {e}"),
-                }));
+        let base_url = parakeet_server_base_url();
+        if let Some(identity) = ensure_parakeet_server(&python_bin, &script_path, &model, cli, true)
+        {
+            match transcribe_via_parakeet_server(
+                &base_url,
+                chunk_audio,
+                chunk_out_txt,
+                &model,
+                &identity,
+            ) {
+                Ok(result) => return result,
+                Err(error) => server_error = Some(error),
             }
         }
     }
@@ -419,8 +344,6 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
         .arg(chunk_out_txt)
         .arg("--model")
         .arg(&model)
-        .arg("--batch-size")
-        .arg(batch_size.to_string())
         .output();
 
     match output {
@@ -434,7 +357,6 @@ fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -
                 "status": "ok",
                 "method": "parakeet_python",
                 "model": model,
-                "batch_size": batch_size,
                 "script": script_path.display().to_string(),
             });
             if let Some(err) = server_error {
@@ -885,7 +807,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             let t_parakeet_server_warmup = Instant::now();
             let python_bin = resolve_python_bin(None);
             let model = resolve_parakeet_model(None);
-            ensure_parakeet_server(&python_bin, &script_path, &model, cli, false);
+            let _ = ensure_parakeet_server(&python_bin, &script_path, &model, cli, false);
             parakeet_server_warmup_attempted = true;
             parakeet_server_warmup_ms = elapsed_ms(t_parakeet_server_warmup);
         }

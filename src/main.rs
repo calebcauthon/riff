@@ -36,7 +36,7 @@ use crate::history::{
 use crate::models::SessionState;
 use crate::paths::{
     active_state_file, audio_device_cache_file, ensure_dirs, parakeet_server_pid_file,
-    perf_log_file, watcher_python_cache_file, web_server_pid_file,
+    parakeet_server_socket_file, perf_log_file, watcher_python_cache_file, web_server_pid_file,
 };
 use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
 use crate::session_commands::{cmd_chunk, cmd_pause, cmd_shot, cmd_start, cmd_stop, cmd_unpause};
@@ -1329,7 +1329,7 @@ pub(crate) fn process_is_alive(pid: i32) -> bool {
     matches!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM))
 }
 
-fn send_signal(pid: i32, signal: i32) -> io::Result<()> {
+pub(crate) fn send_signal(pid: i32, signal: i32) -> io::Result<()> {
     let rc = unsafe { libc::kill(pid, signal) };
     if rc == 0 {
         Ok(())
@@ -1499,7 +1499,9 @@ fn stop_recorder(pid: i32, cli: &Cli) -> Result<(), AppError> {
         if !process_is_alive(pid) {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(100));
+        // ffmpeg normally exits promptly after SIGINT. Poll frequently so a completed
+        // recorder does not add an avoidable ~100 ms bucket to the stop path.
+        thread::sleep(Duration::from_millis(10));
     }
 
     print_verbose(
@@ -2224,6 +2226,9 @@ fn cmd_kill_server(cli: &Cli) -> Result<i32, AppError> {
     let mut report = Vec::new();
     kill_server_from_pid_file(cli, "web", &web_server_pid_file(), &mut report)?;
     kill_server_from_pid_file(cli, "parakeet", &parakeet_server_pid_file(), &mut report)?;
+    if !cli.dry_run {
+        let _ = fs::remove_file(parakeet_server_socket_file());
+    }
 
     if !cli.quiet {
         for item in &report {
