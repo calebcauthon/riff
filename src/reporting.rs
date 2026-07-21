@@ -2073,6 +2073,7 @@ mod tests {
             audio_device: "Built-in Microphone".to_string(),
             clipboard_watcher_pid: None,
             transcription_watcher_pid: None,
+            max_duration_watcher_pid: None,
             transcription_cursor_sec: 0.0,
             transcription_paused: false,
             transcription_pause_started_sec: None,

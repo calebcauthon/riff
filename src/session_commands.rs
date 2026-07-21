@@ -19,12 +19,13 @@ use crate::transcription::{
 use crate::{
     append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
     capture_process_stats, clear_active_state, command_exists, emit_json, get_audio_duration_sec,
-    load_active_state, now_iso, pause_recorder_capture, play_event_sound, print_out, print_verbose,
-    process_is_alive, read_json, recorder_error_looks_like_invalid_audio_device,
-    resolve_audio_device, resolve_audio_device_uncached, resume_recorder_capture, round3,
-    save_active_state, session_stamp, spawn_clipboard_watcher, spawn_recorder,
-    spawn_transcription_watcher, stop_clipboard_watcher, stop_recorder, stop_transcription_watcher,
-    unix_now, wait_for_transcription_watcher, write_json,
+    load_active_state, max_session_sec, now_iso, pause_recorder_capture, play_event_sound,
+    print_out, print_verbose, process_is_alive, read_json,
+    recorder_error_looks_like_invalid_audio_device, resolve_audio_device,
+    resolve_audio_device_uncached, resume_recorder_capture, round3, save_active_state,
+    session_stamp, spawn_clipboard_watcher, spawn_max_duration_watcher, spawn_recorder,
+    spawn_transcription_watcher, stop_clipboard_watcher, stop_max_duration_watcher, stop_recorder,
+    stop_transcription_watcher, unix_now, wait_for_transcription_watcher, write_json,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -597,6 +598,9 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         if let Some(pid) = existing.transcription_watcher_pid {
             stop_transcription_watcher(pid, cli);
         }
+        if let Some(pid) = existing.max_duration_watcher_pid {
+            stop_max_duration_watcher(pid, cli);
+        }
         if let Some(pid) = existing.ffmpeg_pid {
             if process_is_alive(pid) {
                 return Err(app_error(
@@ -758,6 +762,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         audio_device: resolved_audio_device.clone(),
         clipboard_watcher_pid: None,
         transcription_watcher_pid: None,
+        max_duration_watcher_pid: None,
         transcription_cursor_sec: 0.0,
         transcription_paused: false,
         transcription_pause_started_sec: None,
@@ -798,13 +803,28 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     } else {
         elapsed_ms(t_transcription_watcher_spawn)
     };
+    let mut max_duration_state_save_ms = 0.0;
+    let t_max_duration_watcher_spawn = Instant::now();
+    let max_duration_watcher_spawn_ms = if let Some(pid) = spawn_max_duration_watcher(&state, cli) {
+        let ms = elapsed_ms(t_max_duration_watcher_spawn);
+        state.max_duration_watcher_pid = Some(pid);
+        let t_max_duration_state_save = Instant::now();
+        save_active_state(&state)?;
+        max_duration_state_save_ms = elapsed_ms(t_max_duration_state_save);
+        ms
+    } else {
+        elapsed_ms(t_max_duration_watcher_spawn)
+    };
+
     let watcher_setup_ms = round3(
         initial_state_save_ms
             + clipboard_bootstrap_read_ms
             + clipboard_watcher_spawn_ms
             + clipboard_state_save_ms
             + transcription_watcher_spawn_ms
-            + transcription_state_save_ms,
+            + transcription_state_save_ms
+            + max_duration_watcher_spawn_ms
+            + max_duration_state_save_ms,
     );
 
     let custom_transcribe_enabled = env::var("RIFF_TRANSCRIBE_CMD")
@@ -851,12 +871,16 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "clipboard_state_save_ms": round3(clipboard_state_save_ms),
             "transcription_watcher_spawn_ms": round3(transcription_watcher_spawn_ms),
             "transcription_state_save_ms": round3(transcription_state_save_ms),
+            "max_duration_watcher_spawn_ms": round3(max_duration_watcher_spawn_ms),
+            "max_duration_state_save_ms": round3(max_duration_state_save_ms),
             "parakeet_server_warmup_ms": round3(parakeet_server_warmup_ms),
             "watcher_setup_ms": watcher_setup_ms
         },
         "audio_device_retry": audio_device_retry,
         "transcription_watcher_spawned": transcription_watcher_spawned,
         "transcription_watcher_pid": state.transcription_watcher_pid,
+        "max_duration_watcher_pid": state.max_duration_watcher_pid,
+        "max_session_sec": max_session_sec(),
         "parakeet_server_warmup_attempted": parakeet_server_warmup_attempted,
         "parakeet_server_warmup": parakeet_server_warmup
     }));
@@ -895,6 +919,8 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "audio_device_retry": audio_device_retry,
             "ffmpeg_pid": ffmpeg_pid,
             "transcription_watcher_pid": state.transcription_watcher_pid,
+        "max_duration_watcher_pid": state.max_duration_watcher_pid,
+        "max_session_sec": max_session_sec(),
             "startup_ms": round3(start_total_ms),
             "phases": {
                 "stale_state_cleanup_ms": round3(stale_state_cleanup_ms),
@@ -1455,6 +1481,9 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     );
 
     if !cli.dry_run {
+        if let Some(pid) = state.max_duration_watcher_pid {
+            stop_max_duration_watcher(pid, cli);
+        }
         if let Some(pid) = state.clipboard_watcher_pid {
             let t_stop_clipboard_watcher = Instant::now();
             stop_clipboard_watcher(pid, cli);

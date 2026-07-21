@@ -249,6 +249,9 @@ export RIFF_WEB_SERVER_IDLE_TIMEOUT_SEC=1800
 
 # optional clipboard monitor controls
 export RIFF_CLIPBOARD_MONITOR=1
+
+# safety net: auto-stop a session left running (seconds; 0 disables)
+export RIFF_MAX_SESSION_SEC=90
 ```
 
 Or use an optional global `~/.riffrc` file (loaded automatically by `riff`):
@@ -557,6 +560,28 @@ You can also set a fixed selector:
 
 ```bash
 export RIFF_AUDIO_DEVICE=":1"
+```
+
+#### Auto-stop safety net
+
+Every session gets a watchdog that runs a normal `riff stop` once the session
+has been recording for `RIFF_MAX_SESSION_SEC` seconds (default `90`), so a
+session you forgot to stop still gets transcribed instead of recording forever.
+The auto-stop takes the regular stop path, so output hooks run exactly as if you
+had stopped it yourself, and a `max_duration_reached` event is written to the
+session's `events.jsonl`.
+
+Change or disable it in `~/.riffrc` (or `~/.riff.json`, or the environment):
+
+```bash
+export RIFF_MAX_SESSION_SEC=300   # cap sessions at 5 minutes
+export RIFF_MAX_SESSION_SEC=0     # disable the auto-stop entirely
+```
+
+Values are clamped to 5s-24h. `riff status` shows the cap and the time left:
+
+```
+max_session_sec: 90 (auto_stop_in=63.204s)
 ```
 
 ### Shot (capture directly into active session)

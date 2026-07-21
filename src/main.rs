@@ -26,7 +26,7 @@ mod transcription;
 
 use crate::cli::{
     Cli, Commands, HtmlArgs, LiveArgs, ScreenshotUseArgs, StartArgs, StopArgs, ToggleArgs,
-    WatchClipboardArgs,
+    WatchClipboardArgs, WatchMaxDurationArgs,
 };
 use crate::error::{app_error, AppError};
 use crate::history::{
@@ -499,6 +499,119 @@ pub(crate) fn stop_clipboard_watcher(pid: i32, cli: &Cli) {
 
 fn transcription_worker_enabled() -> bool {
     bool_env_enabled("RIFF_LIVE_TRANSCRIBE", false)
+}
+
+pub(crate) const DEFAULT_MAX_SESSION_SEC: f64 = 90.0;
+
+/// Wall-clock cap for a single session, in seconds. `RIFF_MAX_SESSION_SEC=0`
+/// (or any non-positive/unparseable value) disables the auto-stop.
+pub(crate) fn max_session_sec() -> Option<f64> {
+    parse_max_session_sec(env::var("RIFF_MAX_SESSION_SEC").ok().as_deref())
+}
+
+fn parse_max_session_sec(raw: Option<&str>) -> Option<f64> {
+    let value = match raw {
+        Some(v) => v.trim().parse::<f64>().ok()?,
+        None => DEFAULT_MAX_SESSION_SEC,
+    };
+    if value <= 0.0 || !value.is_finite() {
+        None
+    } else {
+        Some(value.clamp(5.0, 86_400.0))
+    }
+}
+
+fn max_duration_loop(args: &WatchMaxDurationArgs) -> Result<(), AppError> {
+    let poll = Duration::from_millis(args.poll_ms.clamp(100, 5_000));
+    loop {
+        // The recorder dying (normal stop, fork, crash) is the unambiguous
+        // signal that this watchdog's session is over.
+        if !process_is_alive(args.ffmpeg_pid) {
+            return Ok(());
+        }
+        let remaining = args.max_sec - (unix_now() - args.started_at_epoch);
+        if remaining <= 0.0 {
+            break;
+        }
+        thread::sleep(poll.min(Duration::from_secs_f64(remaining)));
+    }
+
+    // Only ever stop the session we were spawned for.
+    let Ok(state) = read_json::<SessionState>(&active_state_file()) else {
+        return Ok(());
+    };
+    if state.session_id != args.session_id || state.ffmpeg_pid != Some(args.ffmpeg_pid) {
+        return Ok(());
+    }
+
+    let _ = append_jsonl(
+        Path::new(&state.events_path),
+        &json!({
+            "ts": now_iso(),
+            "type": "max_duration_reached",
+            "session_id": state.session_id,
+            "max_sec": round3(args.max_sec),
+        }),
+    );
+
+    let Ok(exe) = env::current_exe() else {
+        return Ok(());
+    };
+    // Fire and forget: `stop` outlives this watchdog, so it never races with
+    // cmd_stop's SIGTERM to our own pid.
+    let _ = Command::new(exe)
+        .arg("stop")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    Ok(())
+}
+
+fn cmd_watch_max_duration(_cli: &Cli, args: &WatchMaxDurationArgs) -> Result<i32, AppError> {
+    max_duration_loop(args)?;
+    Ok(0)
+}
+
+pub(crate) fn spawn_max_duration_watcher(state: &SessionState, cli: &Cli) -> Option<i32> {
+    let max_sec = max_session_sec()?;
+    let ffmpeg_pid = state.ffmpeg_pid?;
+
+    let exe = env::current_exe().ok()?;
+    let child = Command::new(exe)
+        .arg("--quiet")
+        .arg("watch-max-duration")
+        .arg("--session-id")
+        .arg(&state.session_id)
+        .arg("--max-sec")
+        .arg(max_sec.to_string())
+        .arg("--ffmpeg-pid")
+        .arg(ffmpeg_pid.to_string())
+        .arg("--started-at-epoch")
+        .arg(state.started_at_epoch.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let pid = child.id() as i32;
+    print_verbose(
+        cli,
+        format!("Max-duration watchdog started with pid={pid} max_sec={max_sec}"),
+    );
+    Some(pid)
+}
+
+pub(crate) fn stop_max_duration_watcher(pid: i32, cli: &Cli) {
+    if !process_is_alive(pid) {
+        return;
+    }
+    let _ = send_signal(pid, libc::SIGTERM);
+    print_verbose(
+        cli,
+        format!("Max-duration watchdog pid={pid} sent SIGTERM."),
+    );
 }
 
 fn env_f64(name: &str, default: f64, min: f64, max: f64) -> f64 {
@@ -1798,6 +1911,9 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
         .as_ref()
         .and_then(|v| v.get("command_preview").and_then(|x| x.as_str()))
         .map(|s| s.to_string());
+    let max_sec = max_session_sec();
+    let max_duration_remaining_sec =
+        max_sec.map(|m| (m - (unix_now() - state.started_at_epoch)).max(0.0));
     let pause_since = state.transcription_pause_started_sec;
     let paused_for_sec = if state.transcription_paused {
         pause_since.map(|t| (unix_now() - t).max(0.0))
@@ -1808,7 +1924,7 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
     print_out(
         cli,
         format!(
-            "Active session: {}\nsession_dir: {}\nffmpeg_pid: {} (alive={})\nclipboard_watcher_pid: {} (alive={})\ntranscription_watcher_pid: {} (alive={})\ntranscription_watcher_event: {}{}\ntranscription_watcher_log: {}\ntranscription_cursor_sec: {:.3}\ntranscription_paused: {}{}\nbuild_id: {}",
+            "Active session: {}\nsession_dir: {}\nffmpeg_pid: {} (alive={})\nclipboard_watcher_pid: {} (alive={})\ntranscription_watcher_pid: {} (alive={})\ntranscription_watcher_event: {}{}\ntranscription_watcher_log: {}\ntranscription_cursor_sec: {:.3}\ntranscription_paused: {}{}\nmax_session_sec: {}{}\nbuild_id: {}",
             state.session_id,
             state.session_dir,
             pid.map(|p| p.to_string())
@@ -1834,6 +1950,12 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
             paused_for_sec
                 .map(|sec| format!(" (paused_for={}s)", round3(sec)))
                 .unwrap_or_default(),
+            max_sec
+                .map(|m| round3(m).to_string())
+                .unwrap_or_else(|| "off".to_string()),
+            max_duration_remaining_sec
+                .map(|sec| format!(" (auto_stop_in={}s)", round3(sec)))
+                .unwrap_or_default(),
             build_id()
         ),
     );
@@ -1851,6 +1973,13 @@ fn cmd_status(cli: &Cli) -> Result<i32, AppError> {
             "clipboard_watcher_alive": watcher_alive,
             "transcription_watcher_pid": transcription_watcher_pid,
             "transcription_watcher_alive": transcription_watcher_alive,
+            "max_duration_watcher_pid": state.max_duration_watcher_pid,
+            "max_duration_watcher_alive": state
+                .max_duration_watcher_pid
+                .map(process_is_alive)
+                .unwrap_or(false),
+            "max_session_sec": max_sec,
+            "max_duration_remaining_sec": max_duration_remaining_sec.map(round3),
             "transcription_watcher_last_event": watcher_event_type,
             "transcription_watcher_last_reason": watcher_reason,
             "transcription_watcher_log_path": watcher_log_path,
@@ -2461,6 +2590,9 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
     if let Some(pid) = old_state.clipboard_watcher_pid {
         stop_clipboard_watcher(pid, cli);
     }
+    if let Some(pid) = old_state.max_duration_watcher_pid {
+        stop_max_duration_watcher(pid, cli);
+    }
     let split_gap_ms = split_start.elapsed().as_secs_f64() * 1000.0;
 
     clear_active_state()?;
@@ -2579,6 +2711,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Html(args) => cmd_html(cli, args),
         Commands::ScreenshotUse(args) => cmd_screenshot_use(cli, args),
         Commands::WatchClipboard(args) => cmd_watch_clipboard(cli, args),
+        Commands::WatchMaxDuration(args) => cmd_watch_max_duration(cli, args),
         Commands::KillServer => cmd_kill_server(cli),
     }
 }
@@ -2614,7 +2747,7 @@ fn main() {
 mod tests {
     use super::{
         expand_env_refs, fill_template_with_transcript, load_riff_json_defaults,
-        parse_riffrc_assignment,
+        parse_max_session_sec, parse_riffrc_assignment, DEFAULT_MAX_SESSION_SEC,
     };
     use serde_json::json;
     use std::collections::HashSet;
@@ -2627,6 +2760,20 @@ mod tests {
     // RIFF_CONFIG_JSON_FILE and the vars these tests assert on are process-global;
     // serialize tests that load JSON config defaults.
     static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn max_session_sec_defaults_to_ninety_and_can_be_disabled() {
+        assert_eq!(parse_max_session_sec(None), Some(DEFAULT_MAX_SESSION_SEC));
+        assert_eq!(parse_max_session_sec(Some("120")), Some(120.0));
+        assert_eq!(parse_max_session_sec(Some(" 45.5 ")), Some(45.5));
+        assert_eq!(parse_max_session_sec(Some("0")), None);
+        assert_eq!(parse_max_session_sec(Some("-1")), None);
+        assert_eq!(parse_max_session_sec(Some("")), None);
+        assert_eq!(parse_max_session_sec(Some("off")), None);
+        // clamped to a sane range
+        assert_eq!(parse_max_session_sec(Some("1")), Some(5.0));
+        assert_eq!(parse_max_session_sec(Some("999999")), Some(86_400.0));
+    }
 
     #[test]
     fn parse_riffrc_accepts_export_and_quotes() {

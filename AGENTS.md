@@ -114,6 +114,8 @@ The Parakeet server uses a mode-`0600` Unix socket below `RIFF_ROOT` by default;
 
 It then writes `active_session.json`, starts a clipboard watcher by default, optionally starts live transcription when `RIFF_LIVE_TRANSCRIBE=1`, and begins warming the Parakeet server in the background. Start returns a structured warmup outcome immediately; a newly spawned Python server later appends its correlated ready/error event. The clipboard watcher is another invocation of the Riff binary that polls `pbpaste` and appends changed, non-empty text to `events.jsonl` with an audio-relative timestamp.
 
+Start also spawns a max-duration watchdog (`riff watch-max-duration`, another invocation of the binary) unless `RIFF_MAX_SESSION_SEC=0`. It exits as soon as its recorder pid dies, and otherwise waits until the session has run for the cap, then appends a `max_duration_reached` event and spawns a normal detached `riff stop` — so a forgotten session still transcribes and runs its hooks. It only ever fires when the active state still names both its session id and its recorder pid, and `stop`/`fork`/stale-session cleanup SIGTERM it through `max_duration_watcher_pid`.
+
 ### 2. Capture during the session
 
 `riff shot` runs interactive macOS `screencapture` directly into the session. It also attempts to record frontmost-application/window metadata through `osascript` and process statistics through `ps`.
@@ -177,6 +179,7 @@ Important switches:
 - `RIFF_WEB_SERVER` / `RIFF_WEB_SERVER_URL`: report helper; enabled by default at port 8766.
 - `RIFF_CLIPBOARD_MONITOR`: clipboard watcher; enabled by default.
 - `RIFF_LIVE_TRANSCRIBE`: silence-aware incremental transcription; disabled by default.
+- `RIFF_MAX_SESSION_SEC`: auto-stop watchdog cap in seconds; defaults to 90, clamped to 5-86400, `0` disables it.
 - `RIFF_TRANSCRIBE_CMD`, `RIFF_POST_TRANSCRIBE_CMD`, `RIFF_HOOKS`: custom pipeline stages.
 
 ## Development and verification

@@ -18,6 +18,8 @@ pub struct SessionState {
     #[serde(default)]
     pub transcription_watcher_pid: Option<i32>,
     #[serde(default)]
+    pub max_duration_watcher_pid: Option<i32>,
+    #[serde(default)]
     pub transcription_cursor_sec: f64,
     #[serde(default)]
     pub transcription_paused: bool,

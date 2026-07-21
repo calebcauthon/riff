@@ -87,6 +87,8 @@ pub enum Commands {
     Perf(PerfArgs),
     #[command(hide = true, name = "watch-clipboard")]
     WatchClipboard(WatchClipboardArgs),
+    #[command(hide = true, name = "watch-max-duration")]
+    WatchMaxDuration(WatchMaxDurationArgs),
     /// Kill background helper servers (web + parakeet)
     KillServer,
 }
@@ -260,6 +262,27 @@ pub struct ScreenshotUseArgs {
     /// Module id (for example: polaroid, framed, enhanced, original)
     #[arg(long)]
     pub module: String,
+}
+
+#[derive(Args, Debug)]
+pub struct WatchMaxDurationArgs {
+    /// Session this watchdog belongs to; it refuses to stop anything else
+    #[arg(long)]
+    pub session_id: String,
+
+    /// Wall-clock seconds after session start before the auto-stop fires
+    #[arg(long)]
+    pub max_sec: f64,
+
+    /// Recorder pid; the watchdog exits early once it dies
+    #[arg(long)]
+    pub ffmpeg_pid: i32,
+
+    #[arg(long)]
+    pub started_at_epoch: f64,
+
+    #[arg(long, default_value_t = 1000)]
+    pub poll_ms: u64,
 }
 
 #[derive(Args, Debug)]
