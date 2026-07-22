@@ -1,14 +1,12 @@
 # riff
 
-Local-first dictation CLI for macOS. Riff records a short voice session, collects screenshots and clipboard snippets, transcribes locally with Parakeet, and writes Markdown/HTML notes under your local `RIFF_ROOT`.
-
-Privacy model: session audio, screenshots, clipboard snippets, transcripts, and reports stay on your machine unless you explicitly move or share them. The Parakeet setup may download model/runtime dependencies from their upstream package/model hosts.
+Local-first dictation CLI for macOS. Talk, capture screenshots, and riff transcribes locally with Parakeet — everything stays on your machine.
 
 ![Animated comic strip showing the complete Riff workflow from speaking and taking screenshots to sending everything into Claude Code](assets/riff-comic.gif)
 
 ## Quickstart
 
-Install riff and provision its private local transcription runtime:
+Install and provision riff:
 
 ```bash
 brew install calebcauthon/riff/riff
@@ -18,46 +16,80 @@ riff doctor
 
 `riff setup` is a one-time step that installs the transcription packages and downloads the Parakeet model. macOS may ask for microphone, screen-recording, or Accessibility access when you first use the related features.
 
-Start talking, optionally capture screenshots, then stop to transcribe:
-
-```bash
-riff start
-riff shot    # optional: select a region to attach to this session
-riff stop
-```
-
-Those commands are useful for setup and testing, but riff is designed to disappear behind global hotkeys during everyday use. With Raycast, Alfred, skhd, Hammerspoon, Keyboard Maestro, or a similar launcher, bind keys of your choice to:
+Riff is designed to disappear behind global hotkeys. With Raycast, Alfred, skhd, Hammerspoon, Keyboard Maestro, or a similar launcher, bind keys of your choice to these commands:
 
 ```bash
 riff --quiet toggle    # start or stop listening
-riff --quiet shot      # capture screen context while talking
+riff --quiet shot      # capture a screenshot while talking
 riff --quiet toggle && riff --quiet send-images  # stop and paste everything
 ```
 
-For example, the overview above uses `⌥ R` for start/stop, `⌥ S` for screenshots, and `⌥ ↩` to stop and insert the transcript plus screenshots into Claude Code. Choose any keys you like. See [Hotkeys](#hotkeys) for complete examples, including stop-and-paste and opening the HTML report.
+For example, the overview above uses `⌥ R` for start/stop, `⌥ S` for screenshots, and `⌥ ↩` to stop and insert the transcript plus screenshots into Claude Code. Choose any keys you like. See [Hotkeys](#hotkeys) for complete examples.
 
-Your transcript and local HTML report are now under `/tmp/riff/sessions/<session-id>/`. Print the latest transcript with `riff copy`, paste it into the focused app with `riff send`, or open the report with `riff html`.
+Your transcript and local HTML report land under `/tmp/riff/sessions/<session-id>/`. Print the latest transcript with `riff copy`, paste it into the focused app with `riff send`, or open the report with `riff html`.
 
 For the underlying command-by-command flow:
 
 ![riff terminal quickstart: install, dictate, capture a screenshot, and send the transcript](assets/riff-demo.gif)
 
-## How it works
+## Output hooks
 
-1. `riff start` (or `riff toggle` when idle)
-2. Take screenshots with `riff shot` (recommended) or normal `Cmd+Shift+4`
-3. `riff stop` (or `riff toggle` when active)
+Output hooks post-process the transcript with your own scripts after each
+transcription — strip filler words, fix capitalization, pipe it through a local
+model, whatever you like. Each hook is a bash command that receives two
+temp-file paths:
 
-On `stop`, riff:
-- stops audio recording
-- finds screenshots created during the session in your normal screenshot folder
-- copies them to session tmp storage (`/tmp/riff/sessions/<session-id>/screenshots`)
-- deletes the originals from your normal screenshot folder
-- captures copied clipboard text during the session
-- runs local transcription (Parakeet via Python script / warm local server)
-- writes `note.md` with `[Screenshot N]` / `[Clipboard N]` markers + footnotes
-- writes `note.html` with metadata, transcript, and image preview gallery
-- auto-starts local web server (idle-timeout) for richer HTML behavior
+- `$1` — the current transcript. **Edit it in place**; riff reads it back and
+  feeds the result into the next hook.
+- `$2` — a read-only JSON blob of session metadata (session id, timing,
+  transcription info, screenshots, clipboard).
+
+Configure a chain in the JSON config (`~/.riff.json`) — the `riff.hooks` array
+runs in order:
+
+```json
+{
+  "riff": {
+    "hooks": [
+      "$HOME/Code/riff/scripts/hooks/remove_ums.sh \"$@\"",
+      "$HOME/Code/riff/scripts/hooks/capitalize_sentences.sh \"$@\""
+    ]
+  }
+}
+```
+
+Use `"$@"` so the two temp paths are forwarded to your script as `$1`/`$2`.
+Prefer a single hook? Set `RIFF_HOOKS` (newline-delimited) in `~/.riffrc`:
+
+```bash
+export RIFF_HOOKS='$HOME/Code/riff/scripts/hooks/remove_ums.sh "$@"'
+```
+
+Hooks run automatically on every `riff stop`/`riff toggle`. Skip them for one
+run with `--no-hooks`, or add an ad-hoc hook with `--with-post-hook <cmd>`
+(repeatable, runs after the configured chain). Run `riff hooks` to print the
+active chain.
+
+`scripts/hooks/remove_ums.sh` ships with riff — it drops standalone `um` filler
+(`"Um, so I um think."` → `"so I think."`) while leaving words like `umbrella`
+alone. Enable it by adding it to `riff.hooks` above.
+
+**Writing your own:** any executable that rewrites `$1` in place (and may read
+metadata from `$2`) works. A starter template:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+transcript="${1:?transcript path required}"
+metadata="${2:?metadata path required}"
+
+# Rewrite the transcript in place. Here we just uppercase it.
+tr '[:lower:]' '[:upper:]' < "$transcript" > "$transcript.tmp"
+mv "$transcript.tmp" "$transcript"
+```
+
+Make it executable and point a `riff.hooks` entry at it with `"$@"`.
 
 ---
 
@@ -88,115 +120,6 @@ Performance/observability logs:
 
 ---
 
-## Install
-
-### Homebrew (recommended)
-
-Tap/install from GitHub:
-
-```bash
-brew install calebcauthon/riff/riff
-```
-
-This uses the formula at `Formula/riff.rb`, builds from source with Cargo, and installs the native `riff` binary, helper scripts, `ffmpeg`, and Python 3.12.
-
-Provision the private transcription environment once:
-
-```bash
-riff setup
-riff doctor
-```
-
-Upgrade later:
-
-```bash
-brew upgrade riff
-```
-
-HEAD/development install:
-
-```bash
-brew install --HEAD calebcauthon/riff/riff
-```
-
-### Local repo wrapper (dev workflow)
-
-```bash
-git clone git@github.com:calebcauthon/riff.git
-cd riff
-chmod +x riff
-```
-
-`riff` is a wrapper script that builds/runs the Rust binary.
-If `RIFF_PYTHON_BIN` is not set, it auto-prefers:
-1. `./runtime/python/bin/python` (bundled runtime, when run from the repo)
-2. `./.venv/bin/python` (dev venv, when run from the repo)
-3. `python3` from PATH
-
-Versioning:
-- Repository version is stored in `VERSION`.
-- `riff --version` reads and displays that version at build time.
-
-Homebrew release/update flow:
-
-```bash
-# dry run first (safe preview)
-./scripts/release.sh --dry-run --allow-dirty v0.1.0
-
-# first pass updates release metadata and stops before tagging
-./scripts/release.sh v0.1.0
-
-git add Cargo.toml Cargo.lock VERSION
-git commit -m "release: v0.1.0"
-
-# second pass creates/pushes the tag, computes the GitHub tarball checksum,
-# updates the tap formula, then commits/pushes the tap repo
-./scripts/release.sh --push-tag v0.1.0
-```
-
-Shortcut if you want the script to make the release metadata commit:
-
-```bash
-./scripts/release.sh --auto-commit --push-tag v0.1.0
-```
-
-What this script automates:
-- normalizes version input (`0.1.0` or `v0.1.0`)
-- updates `Cargo.toml` + `Cargo.lock` + `VERSION`
-- runs `cargo build --release` (+ `cargo test` unless `--skip-tests`)
-- limits cargo parallelism by default (`--jobs <n>` to override)
-- refuses to tag while release metadata is uncommitted unless `--auto-commit` is used
-- creates/updates local release tag (`--retag` to force retag)
-- auto-detects private GitHub repos and uses a git/tag formula source instead of an unauthenticated tarball URL
-- for public repos, fetches GitHub tag tarball checksum with retries and updates `Formula/riff.rb` `url` + `sha256`
-
-What you still do manually:
-- push the riff release commit if you did not already push it
-- make the source repo public if you want public Homebrew installs from GitHub tarballs
-- open/merge PR if applicable
-- run any final Homebrew audit/install validation you want before publishing
-
-After release changes are pushed, users update with:
-
-```bash
-brew update
-brew upgrade riff
-```
-
-Performance note:
-- `riff start` warms a local Parakeet server on `$RIFF_ROOT/parakeet-server.sock` in the background (when enabled), reports whether it spawned or reused an instance, and does not wait for readiness, so later `riff stop` calls are faster.
-- Riff validates the server's exact model, revision, device, runtime, PID, owning root, and instance before accepting a transcript.
-- `riff stop` auto-starts a local HTML web server with idle-timeout for richer session pages.
-
-Optional PATH link from a local clone:
-
-```bash
-mkdir -p ~/bin
-ln -sf "$PWD/riff" ~/bin/riff
-```
-
----
-
 ## Requirements
 
 - macOS
@@ -208,284 +131,6 @@ Install ffmpeg:
 
 ```bash
 brew install ffmpeg
-```
-
----
-
-## One-time Parakeet setup (Python, dev venv)
-
-Create a local venv and install dependencies (**use Python 3.12 preferred; 3.10-3.12 supported**):
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r scripts/parakeet-requirements.txt
-```
-
-If you only have Python 3.14 installed, install 3.12 first:
-
-```bash
-brew install python@3.12
-```
-
-Set env vars (add to `~/.zshrc` if desired):
-
-```bash
-export RIFF_REPO="$HOME/Code/riff" # adjust if your clone lives elsewhere
-export RIFF_PYTHON_BIN="$RIFF_REPO/.venv/bin/python"
-export RIFF_PARAKEET_SCRIPT="$RIFF_REPO/scripts/parakeet_transcribe.py"
-export RIFF_PARAKEET_MODEL="nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc"
-export RIFF_PARAKEET_MODEL_REVISION="main"
-# optional perf + warm server controls
-export RIFF_PARAKEET_SERVER=1
-# Optional TCP compatibility override; the default is $RIFF_ROOT/parakeet-server.sock.
-# export RIFF_PARAKEET_SERVER_URL="http://127.0.0.1:8765"
-
-# optional local HTML server controls
-export RIFF_WEB_SERVER=1
-export RIFF_WEB_SERVER_URL="http://127.0.0.1:8766"
-export RIFF_WEB_SERVER_IDLE_TIMEOUT_SEC=1800
-
-# optional clipboard monitor controls
-export RIFF_CLIPBOARD_MONITOR=1
-
-# safety net: auto-stop a session left running (seconds; 0 disables)
-export RIFF_MAX_SESSION_SEC=90
-```
-
-Or use an optional global `~/.riffrc` file (loaded automatically by `riff`):
-
-```bash
-cat > ~/.riffrc <<'EOF'
-export RIFF_REPO="$HOME/Code/riff"
-export RIFF_PYTHON_BIN="$RIFF_REPO/.venv/bin/python"
-export RIFF_PARAKEET_SCRIPT="$RIFF_REPO/scripts/parakeet_transcribe.py"
-export RIFF_PARAKEET_MODEL="nvidia/stt_en_fastconformer_hybrid_medium_streaming_80ms_pc"
-export RIFF_PARAKEET_SERVER=1
-EOF
-```
-
-Notes:
-- `~/.riffrc` is optional.
-- Existing process env vars still win (for one-off overrides).
-- Only `RIFF_*` keys are loaded from `~/.riffrc`.
-- Use `RIFF_RC_FILE=/path/to/file` to point riff at a different rc file.
-
-You can also use an optional JSON config file (loaded automatically):
-
-```json
-{
-  "RIFF_PYTHON_BIN": "$HOME/Code/riff/.venv/bin/python",
-  "RIFF_PARAKEET_SCRIPT": "$HOME/Code/riff/scripts/parakeet_transcribe.py",
-  "riff": {
-    "post_transcribe_cmd": "my-local-agent --text {transcript}"
-  }
-}
-```
-
-Adjust `$HOME/Code/riff` if your local clone lives elsewhere.
-
-Notes:
-- Default path is `~/.riff.json`.
-- Use `RIFF_CONFIG_JSON_FILE=/path/to/file.json` to point riff at a different JSON config.
-- Process env vars still win over both config files.
-- Top-level `RIFF_*` keys are loaded automatically.
-- `riff.post_transcribe_cmd` maps to `RIFF_POST_TRANSCRIBE_CMD`.
-- `riff.hooks` maps to `RIFF_HOOKS` (see [Output hooks](#output-hooks)).
-
----
-
-## Output hooks
-
-Output hooks let you post-process the transcript with your own scripts after
-transcription. Each hook is a bash command. Hooks run in order, and each one is
-invoked with two temp-file paths as positional arguments:
-
-- `$1` — a temp file containing the current transcript. **Edit it in place**;
-  riff reads the file back and uses it as the new transcript (feeding it into
-  the next hook).
-- `$2` — a temp file containing a read-only JSON blob of session metadata
-  (session id, dirs, timing, transcription info, screenshots, clipboard). The
-  transcript itself is not in the JSON — it's `$1`.
-
-The metadata in `$2` looks like:
-
-```json
-{
-  "session_id": "20260619-154934",
-  "session_dir": "/tmp/riff/sessions/20260619-154934",
-  "audio_path": "/tmp/riff/sessions/20260619-154934/audio.wav",
-  "audio_device": ":0",
-  "started_at": "2026-06-19T15:49:34Z",
-  "ended_at": "2026-06-19T15:51:11Z",
-  "audio_duration_sec": 12.84,
-  "transcription": { "status": "ok", "method": "parakeet_server" },
-  "screenshots": [
-    {
-      "id": 1,
-      "path": "/tmp/riff/sessions/.../screenshots/shot-001.png",
-      "rel_path": "screenshots/shot-001.png",
-      "audio_sec": 3.2,
-      "app_name": "Safari",
-      "window_title": "Example"
-    }
-  ],
-  "clipboard": [
-    { "id": 1, "text": "copied text", "audio_sec": 5.1 }
-  ]
-}
-```
-
-Configure a chain via the JSON config `riff.hooks` array (runs in order):
-
-```json
-{
-  "riff": {
-    "hooks": [
-      "$HOME/Code/riff/scripts/hooks/remove_ums.sh \"$@\"",
-      "$HOME/Code/riff/scripts/hooks/capitalize_sentences.sh \"$@\""
-    ]
-  }
-}
-```
-
-Or via `~/.riffrc` for a single hook (`RIFF_HOOKS` is newline-delimited, so the
-rc form is best for one command):
-
-```bash
-export RIFF_HOOKS='$HOME/Code/riff/scripts/hooks/remove_ums.sh "$@"'
-```
-
-Use `"$@"` so the two temp paths are forwarded to your script as `$1`/`$2`.
-Inline snippets can also read `$1`/`$2` directly, e.g.:
-
-```bash
-export RIFF_HOOKS="perl -0777 -i -pe 's/\\bum\\b[,.]?//gi' \"\$1\""
-```
-
-Hooks run automatically on every `riff stop`/`riff toggle` once configured. To
-skip them for a single run, pass `--no-hooks`:
-
-```bash
-riff stop --no-hooks      # transcribe + post-transcribe still run, hooks don't
-```
-
-### Ad-hoc hooks on the command line
-
-Add extra output hooks for a single run with `--with-post-hook`. It is
-repeatable, so you can chain several in one command; they run in order, after
-the configured `RIFF_HOOKS` chain:
-
-```bash
-riff stop \
-  --with-post-hook ~/hooks/remove_ums.sh \
-  --with-post-hook ~/hooks/capitalize.sh
-```
-
-A bare script path automatically receives the transcript (`$1`) and metadata
-(`$2`) temp files. To pass a full inline command, reference the paths yourself
-and they are used as-is:
-
-```bash
-riff stop --with-post-hook "perl -0777 -i -pe 's/\\bum\\b//gi' \"\$1\""
-```
-
-`--with-post-hook` still runs alongside `--no-hooks` (which only disables the
-configured `RIFF_HOOKS` chain), but is suppressed by `--no-stop-hooks` (which
-disables the whole pipeline).
-
-`--no-stop-hooks` also skips them (it disables the entire stop-hook pipeline:
-custom transcription, post-transcribe, and output hooks).
-
-Notes:
-- Hooks only run when transcription succeeded; `--no-hooks` or `--no-stop-hooks`
-  skips them.
-- A non-zero exit from a hook stops the chain and marks the stop as errored.
-- Hook results and timing appear in `transcription.hooks` (JSON output) and in
-  the perf log as `output_hooks_ms`.
-
-### Inspecting and reviewing hooks
-
-Run `riff hooks` to print the currently configured output-hook chain plus any
-custom transcribe/post-transcribe commands (reads the effective config from the
-environment and `~/.riffrc`/JSON defaults):
-
-```bash
-riff hooks          # human-readable
-riff hooks --json   # machine-readable
-```
-
-`riff stop`/`riff toggle` now print an `output_hooks:` summary line reporting how
-many hooks ran, their status, and the character count before/after the chain.
-
-When the hooks change the transcript, the session HTML adds an **Output hooks**
-panel listing the hooks that ran and showing the **original (pre-hook)**
-transcript alongside the final (post-hook) text, so you can see exactly what the
-chain rewrote.
-
-### Writing your own hook
-
-A hook is any executable that reads/rewrites the transcript file (`$1`) and may
-inspect the metadata file (`$2`). Edit `$1` in place; riff reads it back.
-A starter template:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-transcript="${1:?transcript path required}"
-metadata="${2:?metadata path required}"
-
-# Example: read a value from the metadata blob (requires jq).
-session_id="$(jq -r .session_id "$metadata")"
-echo "post-processing transcript for $session_id" >&2
-
-# Rewrite the transcript in place. Here we just uppercase it.
-tr '[:lower:]' '[:upper:]' < "$transcript" > "$transcript.tmp"
-mv "$transcript.tmp" "$transcript"
-```
-
-Make it executable (`chmod +x your_hook.sh`) and point a hook entry at it with
-`"$@"` so riff forwards the two temp paths:
-
-```json
-{
-  "riff": {
-    "hooks": ["$HOME/path/to/your_hook.sh \"$@\""]
-  }
-}
-```
-
-### Bundled hook: remove "um"
-
-`scripts/hooks/remove_ums.sh` removes standalone filler `um` tokens (any
-case, with an optional trailing comma/period) and tidies the spacing —
-`"Um, so I um think."` becomes `"so I think."`. Real words like `umbrella`
-are left untouched.
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-transcript="${1:?transcript path required}"
-
-perl -0777 -i -pe '
-    s/\bum\b[,.]?//gi;      # drop "um", "um,", "um." anywhere it stands alone
-    s/[ \t]{2,}/ /g;        # collapse doubled spaces left behind
-    s/[ \t]+([,.!?])/$1/g;  # pull punctuation back against the previous word
-    s/^[ \t]+//mg;          # trim leading spaces per line
-' "$transcript"
-```
-
-Enable it:
-
-```json
-{
-  "riff": {
-    "hooks": ["$HOME/Code/riff/scripts/hooks/remove_ums.sh \"$@\""]
-  }
-}
 ```
 
 ---
