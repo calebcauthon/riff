@@ -1030,12 +1030,23 @@ fn stop_without_chunking_skips_stop_flush_chunk_event() {
         .success();
 
     let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
-        .args(["--json", "--quiet", "stop"])
+        .args([
+            "--json",
+            "--quiet",
+            "stop",
+            "--transcribe-cmd",
+            "printf 'ok\\n' > {out_txt}",
+        ])
         .output()
         .expect("run stop --json");
     assert!(out.status.success(), "stop should succeed");
 
     let payload: Value = serde_json::from_slice(&out.stdout).expect("parse stop json");
+    assert_eq!(
+        payload.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "stop with successful transcription should set ok=true: {payload}"
+    );
     assert_ne!(
         payload
             .get("transcription")
@@ -1059,6 +1070,108 @@ fn stop_without_chunking_skips_stop_flush_chunk_event() {
     assert!(
         !events_raw.contains(r#""type":"transcript_chunk""#),
         "stop without chunking should not append transcript_chunk event:\n{events_raw}"
+    );
+}
+
+#[test]
+fn stop_json_reports_failure_when_transcription_not_ok() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    // No --transcribe-cmd: either skipped (no script) or error (bundled script
+    // present but deps missing). Either way stop must not report success.
+    let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args(["--json", "--quiet", "stop"])
+        .output()
+        .expect("run stop --json");
+
+    assert!(
+        !out.status.success(),
+        "stop should exit non-zero when transcription is not ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&out.stdout).expect("parse stop json");
+    assert_eq!(
+        payload.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "stop --json must set ok=false when transcription is not ok: {payload}"
+    );
+    let status = payload
+        .get("transcription")
+        .and_then(|v| v.get("status"))
+        .and_then(|v| v.as_str());
+    assert!(
+        matches!(status, Some("skipped") | Some("error") | Some("missing_audio")),
+        "expected non-ok transcription status, got {status:?}: {payload}"
+    );
+}
+
+#[test]
+fn stop_json_reports_failure_when_transcription_errors() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "--json",
+            "--quiet",
+            "stop",
+            "--transcribe-cmd",
+            "echo boom >&2; exit 42",
+        ])
+        .output()
+        .expect("run stop --json");
+
+    assert!(
+        !out.status.success(),
+        "stop should exit non-zero when transcription fails; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&out.stdout).expect("parse stop json");
+    assert_eq!(
+        payload.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "stop --json must set ok=false when transcription errors: {payload}"
+    );
+    assert_eq!(
+        payload
+            .get("transcription")
+            .and_then(|v| v.get("status"))
+            .and_then(|v| v.as_str()),
+        Some("error"),
+        "expected error transcription status: {payload}"
+    );
+    assert_eq!(
+        payload
+            .get("transcription")
+            .and_then(|v| v.get("returncode"))
+            .and_then(|v| v.as_i64()),
+        Some(42),
+        "expected transcription returncode in stop json: {payload}"
     );
 }
 
@@ -1246,8 +1359,11 @@ fn stop_no_stop_hooks_disables_stop_hooks() {
                 hook_marker.display()
             ),
         ])
+        // --no-stop-hooks clears --transcribe-cmd, so transcription is not ok and
+        // stop correctly exits non-zero. Still verify hooks were disabled.
         .assert()
-        .success()
+        .failure()
+        .code(1)
         .stderr(predicates::str::contains("no_stop_hooks=true"))
         .stderr(predicates::str::contains("transcribe_cmd=disabled"))
         .stderr(predicates::str::contains("post_transcribe_cmd=disabled"))

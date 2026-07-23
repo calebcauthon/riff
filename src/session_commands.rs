@@ -40,6 +40,13 @@ fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
+/// dry_run intentionally skips transcription; treat that as success.
+/// skipped/error/missing_audio/empty/etc. must fail stop so automation does
+/// not treat a missing transcript as a successful recording.
+fn transcription_status_is_success(status: &str) -> bool {
+    matches!(status, "ok" | "dry_run")
+}
+
 fn command_source(cli_value: Option<&str>, env_key: &str) -> &'static str {
     if cli_value.map(str::trim).filter(|s| !s.is_empty()).is_some() {
         "cli"
@@ -1965,23 +1972,28 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         ),
     );
 
-    if transcription_meta.get("status").and_then(|s| s.as_str()) != Some("ok") {
-        let status = transcription_meta
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+    let transcription_status = transcription_meta
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    let transcription_ok = transcription_status_is_success(transcription_status);
+
+    if !transcription_ok {
         let reason = transcription_meta
             .get("reason")
             .and_then(|v| v.as_str())
             .or_else(|| transcription_meta.get("stderr").and_then(|v| v.as_str()))
             .unwrap_or("");
-        print_out(cli, format!("transcription_status: {status} ({reason})"));
+        print_out(
+            cli,
+            format!("transcription_status: {transcription_status} ({reason})"),
+        );
     }
 
     emit_json(
         cli,
         &json!({
-            "ok": true,
+            "ok": transcription_ok,
             "action": "stop",
             "session_id": state.session_id,
             "session_dir": session_dir,
@@ -2024,12 +2036,12 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         }),
     );
 
-    Ok(0)
+    Ok(if transcription_ok { 0 } else { 1 })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::merge_manual_chunk_text;
+    use super::{merge_manual_chunk_text, transcription_status_is_success};
 
     #[test]
     fn merge_manual_chunk_text_uses_double_newline_separator() {
@@ -2041,5 +2053,16 @@ mod tests {
     fn merge_manual_chunk_text_trims_outer_whitespace() {
         let merged = merge_manual_chunk_text("  first  ", "  second  ");
         assert_eq!(merged, "first\n\nsecond");
+    }
+
+    #[test]
+    fn transcription_status_success_only_for_ok_and_dry_run() {
+        assert!(transcription_status_is_success("ok"));
+        assert!(transcription_status_is_success("dry_run"));
+        assert!(!transcription_status_is_success("skipped"));
+        assert!(!transcription_status_is_success("error"));
+        assert!(!transcription_status_is_success("missing_audio"));
+        assert!(!transcription_status_is_success("empty"));
+        assert!(!transcription_status_is_success("unknown"));
     }
 }
