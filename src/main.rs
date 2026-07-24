@@ -501,7 +501,7 @@ fn transcription_worker_enabled() -> bool {
     bool_env_enabled("RIFF_LIVE_TRANSCRIBE", false)
 }
 
-pub(crate) const DEFAULT_MAX_SESSION_SEC: f64 = 90.0;
+pub(crate) const DEFAULT_MAX_SESSION_SEC: f64 = 300.0;
 
 /// Wall-clock cap for a single session, in seconds. `RIFF_MAX_SESSION_SEC=0`
 /// (or any non-positive/unparseable value) disables the auto-stop.
@@ -2762,8 +2762,9 @@ mod tests {
     static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn max_session_sec_defaults_to_ninety_and_can_be_disabled() {
+    fn max_session_sec_defaults_to_five_minutes_and_can_be_configured_or_disabled() {
         assert_eq!(parse_max_session_sec(None), Some(DEFAULT_MAX_SESSION_SEC));
+        assert_eq!(DEFAULT_MAX_SESSION_SEC, 300.0);
         assert_eq!(parse_max_session_sec(Some("120")), Some(120.0));
         assert_eq!(parse_max_session_sec(Some(" 45.5 ")), Some(45.5));
         assert_eq!(parse_max_session_sec(Some("0")), None);

@@ -179,7 +179,7 @@ Important switches:
 - `RIFF_WEB_SERVER` / `RIFF_WEB_SERVER_URL`: report helper; enabled by default at port 8766.
 - `RIFF_CLIPBOARD_MONITOR`: clipboard watcher; enabled by default.
 - `RIFF_LIVE_TRANSCRIBE`: silence-aware incremental transcription; disabled by default.
-- `RIFF_MAX_SESSION_SEC`: auto-stop watchdog cap in seconds; defaults to 90, clamped to 5-86400, `0` disables it.
+- `RIFF_MAX_SESSION_SEC`: auto-stop watchdog cap in seconds; defaults to 300 (5 minutes), clamped to 5-86400, `0` disables it.
 - `RIFF_TRANSCRIBE_CMD`, `RIFF_POST_TRANSCRIBE_CMD`, `RIFF_HOOKS`: custom pipeline stages.
 
 ## Development and verification
