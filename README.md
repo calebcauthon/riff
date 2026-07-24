@@ -26,7 +26,7 @@ riff --quiet toggle && riff --quiet send-images  # stop and paste everything
 
 For example, the overview above uses `⌥ R` for start/stop, `⌥ S` for screenshots, and `⌥ ↩` to stop and insert the transcript plus screenshots into Claude Code. Choose any keys you like. See [Hotkeys](#hotkeys) for complete examples.
 
-Your transcript and local HTML report land under `/tmp/riff/sessions/<session-id>/`. Print the latest transcript with `riff copy`, paste it into the focused app with `riff send`, or open the report with `riff html`.
+Your transcript and local HTML report land under `/tmp/riff/sessions/<session-id>/`. Print the whole latest session (transcript + clipboard + base64 images) to stdout with `riff copy`, paste the transcript into the focused app with `riff send`, or open the report with `riff html`.
 
 For the underlying command-by-command flow:
 
@@ -345,7 +345,7 @@ Shows a terminal table with:
 - image count
 - dictation length
 
-### Copy session transcript to stdout
+### Copy full session to stdout
 
 ```bash
 riff copy        # most recent (same as copy 1)
@@ -353,10 +353,17 @@ riff copy 3      # 3rd most recent
 riff copy --verbose   # full session dump (frontmatter + transcript + raw session files)
 ```
 
-Outputs only the transcript section to stdout (pipe to pbcopy, files, etc.):
+`copy` prints the whole session bundle to stdout so it can be piped or redirected:
+
+1. the transcript (which already carries `Screenshot N: <path>` lines and clipboard reference lines)
+2. a `----- Clipboard captures -----` section with each captured clipboard entry as full, unescaped text
+3. each screenshot inlined as base64 under a `----- Screenshot N — <file> (<mime>, base64) -----` header
+
+Nothing is pasted anywhere — use `riff send` / `riff send-images` to paste into the focused app.
 
 ```bash
 riff copy | pbcopy
+riff copy > session.txt
 ```
 
 `copy --verbose` switches to a full stdout export for that session:

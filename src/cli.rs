@@ -61,7 +61,7 @@ pub enum Commands {
     List(ListArgs),
     /// Show note markdown for a session id
     Show(ShowArgs),
-    /// Print transcript for a recent session index
+    /// Print session transcript, clipboard, and base64 images to stdout
     Copy(CopyArgs),
     /// Copy transcript and paste into focused app
     Send(SendArgs),

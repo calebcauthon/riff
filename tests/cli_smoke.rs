@@ -215,7 +215,7 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         ),
         ("list", "List recent sessions"),
         ("show", "Show note markdown for a session id"),
-        ("copy", "Print transcript for a recent session index"),
+        ("copy", "Print session transcript, clipboard, and base64 images to stdout"),
         ("send", "Copy transcript and paste into focused app"),
         ("html", "Open HTML report for a session id"),
         (
@@ -796,6 +796,46 @@ fn copy_prints_transcript_from_most_recent_session() {
         .success()
         .stdout(predicates::str::contains("new words here"))
         .stdout(predicates::str::contains("older words").not());
+}
+
+#[test]
+fn copy_appends_clipboard_captures_and_base64_screenshots() {
+    let td = tempdir().expect("tempdir");
+    let session_id = "20260413-013012";
+    make_session(
+        td.path(),
+        session_id,
+        "# Session\n\n## Transcript\nnew words here\n",
+    );
+    let session_dir = td.path().join("sessions").join(session_id);
+    fs::write(
+        session_dir.join("events.jsonl"),
+        [
+            r#"{"ts":"2026-04-13T01:30:12.000Z","type":"session_started"}"#,
+            r#"{"ts":"2026-04-13T01:31:00.000Z","type":"clipboard_copied","id":1,"audioSec":3.2,"text":"line one\nline two"}"#,
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .expect("write events");
+    fs::create_dir_all(session_dir.join("screenshots")).expect("create screenshots");
+    // "Man" -> base64 "TWFu"
+    fs::write(session_dir.join("screenshots").join("shot-001.png"), b"Man")
+        .expect("write screenshot");
+
+    cmd_with_root(td.path())
+        .arg("copy")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("new words here"))
+        .stdout(predicates::str::contains(
+            "----- Clipboard captures -----",
+        ))
+        .stdout(predicates::str::contains("Clipboard 1:\nline one\nline two"))
+        .stdout(predicates::str::contains(
+            "----- Screenshot 1 — shot-001.png (image/png, base64) -----",
+        ))
+        .stdout(predicates::str::contains("TWFu"));
 }
 
 #[test]

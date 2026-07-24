@@ -1,6 +1,7 @@
 use crate::cli::{Cli, CopyArgs, ListArgs, PerfArgs, SendArgs, ShowArgs};
 use crate::error::{app_error, AppError};
 use crate::models::SessionListRow;
+use crate::reporting::clipboard_from_events;
 use crate::paths::{ensure_dirs, perf_log_file, sessions_dir};
 use crate::{command_exists, emit_json, get_audio_duration_sec, print_out, SUPPORTED_IMAGE_EXTS};
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, SecondsFormat, Timelike, Utc};
@@ -671,11 +672,104 @@ pub(crate) fn cmd_copy(cli: &Cli, args: &CopyArgs) -> Result<i32, AppError> {
         return Ok(0);
     }
 
-    let (_, transcript) = load_recent_session_transcript(requested_rank)?;
+    // `copy` prints the whole session bundle to stdout so it can be piped/redirected:
+    // the transcript (which already carries `Screenshot N:` paths and clipboard
+    // reference lines), the session's full clipboard captures, and each screenshot
+    // inlined as base64. Pasting into the focused app is what `send`/`send-images` do.
+    let (session_dir, transcript) = load_recent_session_transcript(requested_rank)?;
+    let bundle = render_copy_bundle(&session_dir, &transcript);
 
     // Intentionally raw stdout only, so this can be piped/copied easily.
-    println!("{transcript}");
+    print!("{bundle}");
     Ok(0)
+}
+
+/// MIME type for a screenshot file, keyed by extension. Falls back to a generic
+/// binary type for anything unrecognized.
+fn image_mime_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("tif") | Some("tiff") => "image/tiff",
+        Some("heic") => "image/heic",
+        Some("heif") => "image/heif",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Standard base64 (RFC 4648, with `=` padding). Small self-contained encoder so
+/// `copy` can inline screenshot bytes without pulling in a base64 dependency.
+fn base64_encode(input: &[u8]) -> String {
+    const CHARS: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            CHARS[((triple >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            CHARS[(triple & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Build the default `riff copy` stdout bundle: the transcript, followed by the
+/// session's full (unescaped) clipboard captures, followed by each screenshot
+/// inlined as base64. The returned string ends with a trailing newline.
+fn render_copy_bundle(session_dir: &Path, transcript: &str) -> String {
+    let mut out = String::new();
+    out.push_str(transcript.trim_end());
+    out.push('\n');
+
+    let clips = clipboard_from_events(&read_jsonl_values(&session_dir.join("events.jsonl")));
+    if !clips.is_empty() {
+        out.push_str("\n----- Clipboard captures -----\n");
+        for clip in &clips {
+            out.push_str(&format!("\nClipboard {}:\n{}\n", clip.clip_id, clip.text));
+        }
+    }
+
+    for (idx, path) in collect_session_image_paths(session_dir).iter().enumerate() {
+        let n = idx + 1;
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image");
+        let mime = image_mime_type(path);
+        match fs::read(path) {
+            Ok(bytes) => {
+                out.push_str(&format!(
+                    "\n----- Screenshot {n} — {name} ({mime}, base64) -----\n"
+                ));
+                out.push_str(&base64_encode(&bytes));
+                out.push('\n');
+            }
+            Err(e) => {
+                out.push_str(&format!(
+                    "\n----- Screenshot {n} — {name} ({mime}, base64) -----\n[unavailable: {e}]\n"
+                ));
+            }
+        }
+    }
+
+    out
 }
 
 fn yaml_quote(value: &str) -> String {
@@ -1400,7 +1494,10 @@ pub(crate) fn cmd_show(_cli: &Cli, args: &ShowArgs) -> Result<i32, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_send_chunks, build_send_image_chunks, SendImageChunk};
+    use super::{
+        base64_encode, build_send_chunks, build_send_image_chunks, image_mime_type, SendImageChunk,
+    };
+    use std::path::Path;
 
     #[test]
     fn send_chunks_split_screenshot_source_lines() {
@@ -1482,6 +1579,31 @@ mod tests {
         assert_eq!(
             chunks[3],
             SendImageChunk::Text("/tmp/riff/does-not-exist-xyz/shot.png\n".into())
+        );
+    }
+
+    #[test]
+    fn base64_encode_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"M"), "TQ==");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"any carnal pleasure."), "YW55IGNhcm5hbCBwbGVhc3VyZS4=");
+        // Binary bytes (PNG magic) round-trip to the expected padding.
+        assert_eq!(base64_encode(&[0x89, 0x50, 0x4E, 0x47]), "iVBORw==");
+    }
+
+    #[test]
+    fn image_mime_type_maps_supported_extensions() {
+        assert_eq!(image_mime_type(Path::new("a/shot-001.png")), "image/png");
+        assert_eq!(image_mime_type(Path::new("a/shot.JPG")), "image/jpeg");
+        assert_eq!(image_mime_type(Path::new("a/shot.jpeg")), "image/jpeg");
+        assert_eq!(image_mime_type(Path::new("a/shot.webp")), "image/webp");
+        assert_eq!(image_mime_type(Path::new("a/shot.tiff")), "image/tiff");
+        assert_eq!(image_mime_type(Path::new("a/shot.heic")), "image/heic");
+        assert_eq!(
+            image_mime_type(Path::new("a/shot.bin")),
+            "application/octet-stream"
         );
     }
 }
