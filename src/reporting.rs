@@ -20,14 +20,7 @@ pub(crate) fn inject_annotation_markers(
     clips: &[ClipboardMeta],
     audio_duration_sec: Option<f64>,
 ) -> String {
-    let mut clean = transcript.trim().to_string();
-    for _ in 0..4 {
-        let (next, changed) = strip_annotation_markers_once(&clean);
-        clean = next;
-        if !changed {
-            break;
-        }
-    }
+    let clean = strip_annotation_markers(transcript);
     let clean = clean.trim();
     let mut markers = shots
         .iter()
@@ -95,6 +88,18 @@ pub(crate) fn inject_annotation_markers(
     }
 
     tokens.join(" ")
+}
+
+pub(crate) fn strip_annotation_markers(transcript: &str) -> String {
+    let mut clean = transcript.trim().to_string();
+    for _ in 0..4 {
+        let (next, changed) = strip_annotation_markers_once(&clean);
+        clean = next;
+        if !changed {
+            break;
+        }
+    }
+    clean.trim().to_string()
 }
 
 fn is_annotation_marker_body(body: &str) -> bool {

@@ -1,8 +1,8 @@
 use crate::cli::{Cli, CopyArgs, ListArgs, PerfArgs, SendArgs, ShowArgs};
 use crate::error::{app_error, AppError};
 use crate::models::SessionListRow;
-use crate::reporting::clipboard_from_events;
 use crate::paths::{ensure_dirs, perf_log_file, sessions_dir};
+use crate::reporting::{clipboard_from_events, strip_annotation_markers};
 use crate::{command_exists, emit_json, get_audio_duration_sec, print_out, SUPPORTED_IMAGE_EXTS};
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, SecondsFormat, Timelike, Utc};
 use serde_json::{json, Value};
@@ -1008,7 +1008,7 @@ fn load_recent_session_transcript(rank: usize) -> Result<(PathBuf, String), AppE
         transcript
     };
 
-    let transcript = transcript.trim().to_string();
+    let transcript = strip_annotation_markers(&transcript);
     if transcript.is_empty() {
         return Err(app_error(
             8,

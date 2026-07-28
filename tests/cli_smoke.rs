@@ -799,6 +799,33 @@ fn copy_prints_transcript_from_most_recent_session() {
 }
 
 #[test]
+fn copy_omits_redundant_annotation_markers_from_transcript_body() {
+    let td = tempdir().expect("tempdir");
+    make_session(
+        td.path(),
+        "20260413-013012",
+        concat!(
+            "# Session\n\n",
+            "## Transcript\n",
+            "ghostty Screenshot 1: /tmp/riff/sessions/20260413-013012/screenshots/shot-001.png\n",
+            "Clipboard 1: \"git add <file>\"\n\n",
+            "Testing, testing, testing. I've got a screenshot and copied text. ",
+            "[ghostty Screenshot 1] [Clipboard 1]\n",
+        ),
+    );
+
+    cmd_with_root(td.path())
+        .arg("copy")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Testing, testing, testing. I've got a screenshot and copied text.",
+        ))
+        .stdout(predicates::str::contains("[ghostty Screenshot 1]").not())
+        .stdout(predicates::str::contains("[Clipboard 1]").not());
+}
+
+#[test]
 fn copy_appends_clipboard_captures_and_base64_screenshots() {
     let td = tempdir().expect("tempdir");
     let session_id = "20260413-013012";
