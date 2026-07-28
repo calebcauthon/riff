@@ -1,7 +1,9 @@
 use crate::cli::Cli;
 use crate::error::{app_error, AppError};
 use crate::models::ShotMeta;
-use crate::{append_jsonl, now_iso, print_out, print_verbose, round3, SUPPORTED_IMAGE_EXTS};
+use crate::{
+    append_session_event, now_iso, print_out, print_verbose, round3, SUPPORTED_IMAGE_EXTS,
+};
 use serde_json::json;
 use std::env;
 use std::fs;
@@ -182,7 +184,7 @@ pub(crate) fn move_session_screenshots(
                 )
             })?;
 
-            append_jsonl(
+            append_session_event(
                 events_path,
                 &json!({
                     "ts": now_iso(),

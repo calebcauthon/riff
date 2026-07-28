@@ -93,6 +93,8 @@ ffmpeg/AVFoundation       screenshots + clipboard            finalize processes
 - `src/shot_modules/` renders the original, framed, enhanced, and polaroid screenshot variants. These are deterministic Rust image transforms, not AI models.
 - `src/models.rs` contains Rust data structures such as `SessionState`, `ShotMeta`, and `ClipboardMeta`; despite the filename, these are domain structs, not ML models.
 - `src/paths.rs` centralizes the on-disk layout below `RIFF_ROOT`.
+- `src/events.rs` emits the global event bus records that every command produces.
+- `src/watch.rs` implements `riff watch`, the read-only tail over that bus.
 
 ### Python data plane
 
@@ -146,6 +148,8 @@ Default layout:
 /tmp/riff/
   active_session.json             # present only while recording
   last_session.json
+  events.jsonl                     # global event bus: every command, tailed by `riff watch`
+  events.jsonl.1                   # previous bus generation, kept after size rotation
   perf.jsonl                       # start/stop and Parakeet cold-start timing events
   parakeet-server.{pid,log}
   parakeet-server.sock
@@ -165,7 +169,13 @@ Default layout:
         derived/
 ```
 
-`RIFF_ROOT` relocates this entire tree. Treat `active_session.json` as the coordination record and `events.jsonl` as the historical source of truth for captures and lifecycle events.
+`RIFF_ROOT` relocates this entire tree. Treat `active_session.json` as the coordination record and the per-session `events.jsonl` as the historical source of truth for captures and lifecycle events.
+
+### Event bus
+
+`$RIFF_ROOT/events.jsonl` is a separate, global append-only stream that every command writes to, including commands that never touch a session. `riff watch` tails it. Session events are written to their session file in the historical flat shape and mirrored onto the bus with a flat envelope (`v`, `ts`, `seq`, `inv`, `pid`, `command`, `type`, `session_id`, `level`) added; the per-session file itself never gains envelope fields, so reporting keeps reading it unchanged.
+
+`src/events.rs` owns emission, `src/watch.rs` owns the viewer, and both Python helpers mirror their own records through `write_bus_record` in `scripts/parakeet_transcribe.py`. Rules that matter when adding events: a bus write must never fail its command, payload strings are clipped at 200 characters so one record fits a single append write, user-supplied command templates and hook bodies are never logged verbatim, and the nine envelope keys are reserved. `docs/EVENTS.md` is the catalog and must be updated alongside new event types.
 
 ## Configuration
 
@@ -180,6 +190,8 @@ Important switches:
 - `RIFF_CLIPBOARD_MONITOR`: clipboard watcher; enabled by default.
 - `RIFF_LIVE_TRANSCRIBE`: silence-aware incremental transcription; disabled by default.
 - `RIFF_MAX_SESSION_SEC`: auto-stop watchdog cap in seconds; defaults to 300 (5 minutes), clamped to 5-86400, `0` disables it.
+- `RIFF_EVENT_BUS`: global event bus; enabled by default, `0` disables all bus writes.
+- `RIFF_EVENT_BUS_MAX_BYTES`: bus rotation cap; defaults to 8 MiB.
 - `RIFF_TRANSCRIBE_CMD`, `RIFF_POST_TRANSCRIBE_CMD`, `RIFF_HOOKS`: custom pipeline stages.
 
 ## Development and verification

@@ -25,6 +25,17 @@ pub fn perf_log_file() -> PathBuf {
     root_dir().join("perf.jsonl")
 }
 
+/// Global append-only event bus: every command emits here, `riff watch` tails it.
+/// Per-session `events.jsonl` files remain the source of truth for reporting.
+pub fn event_bus_file() -> PathBuf {
+    root_dir().join("events.jsonl")
+}
+
+/// Previous bus generation, kept after a size-triggered rotation.
+pub fn event_bus_rotated_file() -> PathBuf {
+    root_dir().join("events.jsonl.1")
+}
+
 pub fn audio_device_cache_file() -> PathBuf {
     root_dir().join("audio_device_cache.txt")
 }

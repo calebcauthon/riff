@@ -93,6 +93,34 @@ Make it executable and point a `riff.hooks` entry at it with `"$@"`.
 
 ---
 
+## Watching events
+
+Every riff command appends to a global event bus at `/tmp/riff/events.jsonl`.
+`riff watch` follows it, so you can see what riff is picking up as it happens —
+sessions starting, screenshots landing, clipboard captures, transcription
+finishing, hooks running, and every command's start and exit.
+
+```bash
+riff watch                    # follow from now on
+riff watch --since 10m        # backfill the last ten minutes, then follow
+riff watch --once --all       # print everything retained and exit
+```
+
+```text
+18:03:11.482  shot   screenshot_taken     20260728-180302  shot_id=1 audio_sec=2.41
+18:03:14.001  stop   session_stopping     20260728-180302
+18:03:16.900  stop   transcription_finished 20260728-180302  method=parakeet_server words=87
+```
+
+Narrow it down with `--type`, `--command`, `--session <id|current>`, and
+`--grep`. Add `--json` for NDJSON you can pipe into `jq`. `watch` is a viewer
+only — it never runs anything in response to an event.
+
+Set `RIFF_EVENT_BUS=0` to turn bus writes off. The full event catalog and
+envelope schema live in [docs/EVENTS.md](docs/EVENTS.md).
+
+---
+
 ## Files
 
 ```text
@@ -111,6 +139,8 @@ Make it executable and point a `riff.hooks` entry at it with `"$@"`.
 Performance/observability logs:
 
 ```text
+/tmp/riff/events.jsonl              # global event bus (every command); see `riff watch`
+/tmp/riff/events.jsonl.1            # previous bus generation after rotation
 /tmp/riff/perf.jsonl                # start/stop and Parakeet cold-start timings
 /tmp/riff/parakeet-server.log       # warm Parakeet server logs
 /tmp/riff/parakeet-server.sock      # Riff-owned local inference socket

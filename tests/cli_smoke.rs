@@ -215,7 +215,10 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         ),
         ("list", "List recent sessions"),
         ("show", "Show note markdown for a session id"),
-        ("copy", "Print session transcript, clipboard, and base64 images to stdout"),
+        (
+            "copy",
+            "Print session transcript, clipboard, and base64 images to stdout",
+        ),
         ("send", "Copy transcript and paste into focused app"),
         ("html", "Open HTML report for a session id"),
         (
@@ -855,10 +858,10 @@ fn copy_appends_clipboard_captures_and_base64_screenshots() {
         .assert()
         .success()
         .stdout(predicates::str::contains("new words here"))
+        .stdout(predicates::str::contains("----- Clipboard captures -----"))
         .stdout(predicates::str::contains(
-            "----- Clipboard captures -----",
+            "Clipboard 1:\nline one\nline two",
         ))
-        .stdout(predicates::str::contains("Clipboard 1:\nline one\nline two"))
         .stdout(predicates::str::contains(
             "----- Screenshot 1 — shot-001.png (image/png, base64) -----",
         ))
@@ -1552,4 +1555,308 @@ fn screenshot_use_swaps_transcript_image_and_keeps_original_backup() {
         polaroid_before, polaroid_after,
         "derived variant bytes should not be rewritten after selecting transcript image"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Global event bus + `riff watch`
+// ---------------------------------------------------------------------------
+
+fn read_bus(root: &Path) -> Vec<Value> {
+    let text = fs::read_to_string(root.join("events.jsonl")).unwrap_or_default();
+    text.lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .unwrap_or_else(|e| panic!("bus line is not valid JSON ({e}): {line}"))
+        })
+        .collect()
+}
+
+fn bus_types(events: &[Value], command: &str) -> Vec<String> {
+    events
+        .iter()
+        .filter(|e| e["command"] == json!(command))
+        .map(|e| e["type"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[test]
+fn every_invocation_emits_command_lifecycle_events() {
+    let td = tempdir().expect("tempdir");
+
+    cmd_with_root(td.path()).arg("list").assert().success();
+    cmd_with_root(td.path()).arg("hooks").assert().success();
+    cmd_with_root(td.path()).arg("status").assert().success();
+
+    let events = read_bus(td.path());
+    for command in ["list", "hooks", "status"] {
+        let types = bus_types(&events, command);
+        assert!(
+            types.contains(&"command_started".to_string()),
+            "{command} missing command_started, got {types:?}"
+        );
+        assert!(
+            types.contains(&"command_finished".to_string()),
+            "{command} missing command_finished, got {types:?}"
+        );
+    }
+
+    // Every record carries the full envelope.
+    for event in &events {
+        for key in ["v", "ts", "seq", "inv", "pid", "command", "type", "level"] {
+            assert!(
+                event.get(key).is_some(),
+                "event missing envelope key '{key}': {event}"
+            );
+        }
+        assert_eq!(event["v"], json!(1));
+    }
+}
+
+#[test]
+fn failing_command_emits_command_failed_with_exit_code() {
+    let td = tempdir().expect("tempdir");
+
+    cmd_with_root(td.path())
+        .args(["show", "no-such-session"])
+        .assert()
+        .failure();
+
+    let events = read_bus(td.path());
+    let failed = events
+        .iter()
+        .find(|e| e["type"] == json!("command_failed"))
+        .expect("command_failed event");
+    assert_eq!(failed["command"], json!("show"));
+    assert_eq!(failed["exit_code"], json!(8));
+    assert_eq!(failed["level"], json!("error"));
+    assert!(failed["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("no-such-session"));
+}
+
+#[test]
+fn session_events_are_mirrored_onto_the_bus_with_session_id() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "stop",
+            "--transcribe-cmd",
+            "printf 'bus test\\n' > {out_txt}",
+        ])
+        .assert()
+        .success();
+
+    let events = read_bus(td.path());
+    let started = events
+        .iter()
+        .find(|e| e["type"] == json!("session_started"))
+        .expect("session_started mirrored onto bus");
+    let session_id = started["session_id"].as_str().expect("session_id");
+    assert!(!session_id.is_empty());
+    assert_eq!(started["command"], json!("start"));
+
+    let stopped = events
+        .iter()
+        .find(|e| e["type"] == json!("session_stopped"))
+        .expect("session_stopped mirrored onto bus");
+    assert_eq!(stopped["session_id"], json!(session_id));
+
+    // Stop's live pipeline stages are visible as they happen.
+    let stop_types = bus_types(&events, "stop");
+    assert!(stop_types.contains(&"transcription_finished".to_string()));
+    assert!(stop_types.contains(&"output_hooks_ran".to_string()));
+}
+
+#[test]
+fn per_session_events_file_stays_free_of_envelope_fields() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    let sessions = fs::read_dir(td.path().join("sessions")).expect("sessions dir");
+    let session_dir = sessions
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .expect("one session dir");
+    let text = fs::read_to_string(session_dir.join("events.jsonl")).expect("session events");
+    assert!(!text.is_empty());
+    for line in text.lines() {
+        let value: Value = serde_json::from_str(line).expect("session event JSON");
+        // Reporting reads this file; the bus envelope must not leak into it.
+        for key in ["v", "seq", "inv", "command", "level"] {
+            assert!(
+                value.get(key).is_none(),
+                "session events.jsonl gained envelope key '{key}': {line}"
+            );
+        }
+    }
+}
+
+#[test]
+fn watch_once_backfills_and_filters() {
+    let td = tempdir().expect("tempdir");
+
+    cmd_with_root(td.path()).arg("hooks").assert().success();
+    cmd_with_root(td.path()).arg("list").assert().success();
+
+    cmd_with_root(td.path())
+        .args(["watch", "--once", "--all"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("hooks").and(predicates::str::contains("list")));
+
+    cmd_with_root(td.path())
+        .args(["watch", "--once", "--all", "--command", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("list").and(predicates::str::contains("hooks").not()));
+
+    cmd_with_root(td.path())
+        .args(["watch", "--once", "--all", "--type", "command_failed"])
+        .assert()
+        .success()
+        .stdout(predicates::str::is_empty());
+}
+
+#[test]
+fn watch_json_emits_one_json_object_per_line() {
+    let td = tempdir().expect("tempdir");
+    cmd_with_root(td.path()).arg("hooks").assert().success();
+
+    let output = cmd_with_root(td.path())
+        .args(["--json", "watch", "--once", "--all"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).expect("utf8 stdout");
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(!lines.is_empty());
+    for line in lines {
+        let value: Value = serde_json::from_str(line).expect("NDJSON line");
+        assert!(value.get("type").is_some());
+    }
+}
+
+#[test]
+fn watch_tail_limits_backfill_to_last_n() {
+    let td = tempdir().expect("tempdir");
+    cmd_with_root(td.path()).arg("hooks").assert().success();
+    cmd_with_root(td.path()).arg("list").assert().success();
+
+    let output = cmd_with_root(td.path())
+        .args(["--json", "watch", "--once", "-n", "1"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).expect("utf8 stdout");
+    assert_eq!(text.lines().filter(|l| !l.trim().is_empty()).count(), 1);
+}
+
+#[test]
+fn watch_rejects_an_unparseable_since_value() {
+    let td = tempdir().expect("tempdir");
+    cmd_with_root(td.path())
+        .args(["watch", "--once", "--since", "whenever"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Invalid --since"));
+}
+
+#[test]
+fn bus_rotates_once_it_passes_the_size_cap() {
+    let td = tempdir().expect("tempdir");
+
+    for _ in 0..6 {
+        cmd_with_root(td.path())
+            .env("RIFF_EVENT_BUS_MAX_BYTES", "400")
+            .arg("hooks")
+            .assert()
+            .success();
+    }
+
+    assert!(
+        td.path().join("events.jsonl.1").exists(),
+        "expected a rotated bus generation"
+    );
+    let live = fs::metadata(td.path().join("events.jsonl"))
+        .expect("live bus")
+        .len();
+    assert!(
+        live < 2000,
+        "live bus should have restarted small, got {live}"
+    );
+
+    // The rotated generation is still visible to a backfill.
+    cmd_with_root(td.path())
+        .args(["watch", "--once", "--all"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("hooks"));
+}
+
+#[test]
+fn event_bus_can_be_disabled() {
+    let td = tempdir().expect("tempdir");
+    cmd_with_root(td.path())
+        .env("RIFF_EVENT_BUS", "0")
+        .arg("hooks")
+        .assert()
+        .success();
+    assert!(
+        !td.path().join("events.jsonl").exists(),
+        "RIFF_EVENT_BUS=0 should suppress bus writes"
+    );
+}
+
+#[test]
+fn bus_clips_long_payload_strings() {
+    let td = tempdir().expect("tempdir");
+    let long_id = "z".repeat(500);
+
+    cmd_with_root(td.path())
+        .args(["show", &long_id])
+        .assert()
+        .failure();
+
+    let events = read_bus(td.path());
+    let failed = events
+        .iter()
+        .find(|e| e["type"] == json!("command_failed"))
+        .expect("command_failed event");
+    let message = failed["error"].as_str().expect("error message");
+    assert!(
+        message.chars().count() <= 201,
+        "error not clipped: {message}"
+    );
+    assert_eq!(failed["truncated"], json!(true));
 }

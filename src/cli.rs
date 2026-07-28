@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+use serde_json::{json, Value};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -43,6 +44,8 @@ pub enum Commands {
     Fork,
     /// Show running live session status
     Live(LiveArgs),
+    /// Follow the global riff event stream
+    Watch(WatchArgs),
     /// Transcribe audio captured so far and keep recording
     Chunk,
     /// Pause transcription capture while continuing to record audio
@@ -188,6 +191,45 @@ pub struct LiveArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct WatchArgs {
+    /// Backfill events newer than a duration (for example: 30s, 10m, 2h, 1d)
+    #[arg(long, value_name = "DURATION")]
+    pub since: Option<String>,
+
+    /// Backfill the last N matching events before following
+    #[arg(short = 'n', long = "tail", value_name = "COUNT")]
+    pub tail: Option<usize>,
+
+    /// Backfill the entire retained event history before following
+    #[arg(long)]
+    pub all: bool,
+
+    /// Print the backfill and exit instead of following
+    #[arg(long)]
+    pub once: bool,
+
+    /// Only show these event types (repeatable)
+    #[arg(long = "type", value_name = "TYPE")]
+    pub event_type: Vec<String>,
+
+    /// Only show events from these commands (repeatable)
+    #[arg(long = "command", value_name = "COMMAND")]
+    pub command_filter: Vec<String>,
+
+    /// Only show events for a session id, or "current" for the active session
+    #[arg(long, value_name = "ID")]
+    pub session: Option<String>,
+
+    /// Only show events whose JSON contains this substring
+    #[arg(long, value_name = "TEXT")]
+    pub grep: Option<String>,
+
+    /// Poll interval in milliseconds while following
+    #[arg(long, default_value_t = 200)]
+    pub poll_ms: u64,
+}
+
+#[derive(Args, Debug)]
 pub struct SetupArgs {
     /// Python 3.12 interpreter used to create the private runtime
     #[arg(long)]
@@ -301,4 +343,118 @@ pub struct WatchClipboardArgs {
 
     #[arg(long, default_value_t = 450)]
     pub poll_ms: u64,
+}
+
+impl Commands {
+    /// Stable command name used as the `command` field on every bus event.
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            Commands::Start(_) => "start",
+            Commands::Shot => "shot",
+            Commands::Stop(_) => "stop",
+            Commands::Toggle(_) => "toggle",
+            Commands::Fork => "fork",
+            Commands::Live(_) => "live",
+            Commands::Watch(_) => "watch",
+            Commands::Chunk => "chunk",
+            Commands::Pause => "pause",
+            Commands::Unpause => "unpause",
+            Commands::TogglePause => "toggle-pause",
+            Commands::Setup(_) => "setup",
+            Commands::Doctor(_) => "doctor",
+            Commands::List(_) => "list",
+            Commands::Show(_) => "show",
+            Commands::Copy(_) => "copy",
+            Commands::Send(_) => "send",
+            Commands::SendImages(_) => "send-images",
+            Commands::Html(_) => "html",
+            Commands::ScreenshotUse(_) => "screenshot-use",
+            Commands::Sounds => "sounds",
+            Commands::Silence => "silence",
+            Commands::Loud => "loud",
+            Commands::Status => "status",
+            Commands::Hooks => "hooks",
+            Commands::Perf(_) => "perf",
+            Commands::WatchClipboard(_) => "watch-clipboard",
+            Commands::WatchMaxDuration(_) => "watch-max-duration",
+            Commands::KillServer => "kill-server",
+        }
+    }
+
+    /// Redacted argument summary for `command_started`. User-supplied command
+    /// templates and hook bodies are reported as counts and booleans only —
+    /// they can carry arbitrary shell and do not belong in a shared log.
+    pub fn event_args(&self) -> Value {
+        match self {
+            Commands::Start(a) => json!({
+                "audio_device": a.audio_device,
+                "screenshot_dir_override": a.screenshot_dir.is_some(),
+            }),
+            Commands::Stop(a) => json!({
+                "no_hooks": a.no_hooks,
+                "no_stop_hooks": a.no_stop_hooks,
+                "post_hooks": a.with_post_hook.len(),
+                "custom_transcribe_cmd": a.transcribe_cmd.is_some(),
+                "custom_post_transcribe_cmd": a.post_transcribe_cmd.is_some(),
+                "parakeet_model_override": a.parakeet_model.is_some(),
+            }),
+            Commands::Toggle(a) => json!({
+                "audio_device": a.audio_device,
+                "screenshot_dir_override": a.screenshot_dir.is_some(),
+                "no_hooks": a.no_hooks,
+                "no_stop_hooks": a.no_stop_hooks,
+                "post_hooks": a.with_post_hook.len(),
+                "custom_transcribe_cmd": a.transcribe_cmd.is_some(),
+                "custom_post_transcribe_cmd": a.post_transcribe_cmd.is_some(),
+                "parakeet_model_override": a.parakeet_model.is_some(),
+            }),
+            Commands::Live(a) => json!({ "once": a.once, "poll_ms": a.poll_ms }),
+            Commands::Watch(a) => json!({
+                "once": a.once,
+                "all": a.all,
+                "since": a.since,
+                "tail": a.tail,
+                "types": a.event_type,
+                "commands": a.command_filter,
+                "session": a.session,
+                "grep": a.grep.is_some(),
+            }),
+            Commands::Setup(a) => json!({
+                "skip_packages": a.skip_packages,
+                "skip_model": a.skip_model,
+                "python_override": a.python.is_some(),
+                "runtime_dir_override": a.runtime_dir.is_some(),
+            }),
+            Commands::Doctor(a) => json!({ "deep": a.deep }),
+            Commands::List(a) => json!({ "n": a.n }),
+            Commands::Copy(a) => json!({ "n": a.n }),
+            Commands::Send(a) | Commands::SendImages(a) => json!({ "n": a.n }),
+            Commands::Show(a) => json!({ "session_id": a.session_id }),
+            Commands::Html(a) => json!({ "session_id": a.session_id }),
+            Commands::Perf(a) => json!({ "n": a.n }),
+            Commands::ScreenshotUse(a) => json!({
+                "session_id": a.session_id,
+                "shot_id": a.shot_id,
+                "module": a.module,
+            }),
+            Commands::WatchClipboard(a) => json!({ "session_id": a.session_id }),
+            Commands::WatchMaxDuration(a) => json!({
+                "session_id": a.session_id,
+                "max_sec": a.max_sec,
+                "ffmpeg_pid": a.ffmpeg_pid,
+            }),
+            Commands::Shot
+            | Commands::Fork
+            | Commands::Chunk
+            | Commands::Pause
+            | Commands::Unpause
+            | Commands::TogglePause
+            | Commands::Sounds
+            | Commands::Silence
+            | Commands::Loud
+            | Commands::Status
+            | Commands::Hooks
+            | Commands::KillServer => json!({}),
+        }
+    }
 }

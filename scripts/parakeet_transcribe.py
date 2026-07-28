@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import itertools
 import json
 import os
 import re
@@ -179,6 +180,99 @@ def append_startup_event(perf_log: str | None, payload: dict[str, Any]) -> None:
         os.write(fd, encoded)
     finally:
         os.close(fd)
+
+
+_BUS_SEQ = itertools.count()
+
+# Mirrors src/events.rs: same clip length, same envelope keys.
+BUS_MAX_STRING_LEN = 200
+BUS_SCHEMA_VERSION = 1
+
+
+def bus_enabled() -> bool:
+    return os.environ.get("RIFF_EVENT_BUS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+    )
+
+
+def clip_strings(value: Any) -> Any:
+    if isinstance(value, str) and len(value) > BUS_MAX_STRING_LEN:
+        return value[:BUS_MAX_STRING_LEN] + "…"
+    if isinstance(value, dict):
+        return {k: clip_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [clip_strings(v) for v in value]
+    return value
+
+
+def write_bus_record(
+    riff_root: str | Path,
+    command: str,
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    level: str = "info",
+    session_id: str | None = None,
+    inv: str | None = None,
+) -> None:
+    """Append one enveloped record to the global bus that `riff watch` tails."""
+    if not bus_enabled():
+        return
+    try:
+        record = clip_strings(dict(payload))
+        record.update(
+            {
+                "v": BUS_SCHEMA_VERSION,
+                "ts": record.get("ts") or iso_now(),
+                "type": event_type,
+                "seq": next(_BUS_SEQ),
+                "inv": inv or f"{command}-{os.getpid()}",
+                "pid": os.getpid(),
+                "command": command,
+                "level": level,
+            }
+        )
+        if session_id:
+            record["session_id"] = session_id
+        path = Path(riff_root).expanduser() / "events.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, encoded)
+        finally:
+            os.close(fd)
+    except Exception:  # noqa: BLE001 - observability must never break the caller
+        pass
+
+
+def append_bus_event(
+    args: argparse.Namespace,
+    event_type: str,
+    payload: dict[str, Any],
+    level: str = "info",
+) -> None:
+    """Mirror a Parakeet server event onto the global bus."""
+    write_bus_record(
+        args.riff_root,
+        "parakeet-server",
+        event_type,
+        payload,
+        level=level,
+        session_id=args.startup_trigger_session_id,
+        inv=args.startup_instance_id,
+    )
+
+
+def record_startup_event(
+    args: argparse.Namespace, payload: dict[str, Any], level: str = "info"
+) -> None:
+    """Write a startup record to the perf log and mirror it onto the event bus."""
+    append_startup_event(args.startup_perf_log, payload)
+    append_bus_event(args, "parakeet_server_startup", payload, level)
 
 
 def startup_event(
@@ -361,6 +455,20 @@ def append_event(events_path: Path, payload: dict[str, Any]) -> None:
     with events_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False))
         f.write("\n")
+
+    # <root>/sessions/<session-id>/events.jsonl -> <root>
+    session_dir = events_path.parent
+    riff_root = session_dir.parent.parent
+    status = payload.get("status")
+    level = {"error": "error", "skipped": "warn"}.get(status, "info")
+    write_bus_record(
+        riff_root,
+        "transcription-watcher",
+        payload.get("type", "session_event"),
+        payload,
+        level=level,
+        session_id=session_dir.name,
+    )
 
 
 def stopping_requested(events_path: Path, session_id: str) -> bool:
@@ -791,7 +899,7 @@ def run_server(args: argparse.Namespace) -> int:
             failed_phase=e.failed_phase or "python_bootstrap",
             error=str(e),
         )
-        append_startup_event(args.startup_perf_log, event)
+        record_startup_event(args, event, level="error")
         raise
 
     lock = threading.Lock()
@@ -925,11 +1033,11 @@ def run_server(args: argparse.Namespace) -> int:
             failed_phase="server_bind",
             error=f"{type(e).__name__}: {e}",
         )
-        append_startup_event(args.startup_perf_log, event)
+        record_startup_event(args, event, level="error")
         raise AppError(f"Failed to bind Parakeet server at {endpoint}: {e}", code=24) from e
     phases["server_bind_ms"] = (time.perf_counter() - bind_started) * 1000.0
     startup_payload.update(startup_event(args, "ready", phases, actual_device))
-    append_startup_event(args.startup_perf_log, startup_payload)
+    record_startup_event(args, startup_payload)
     out(
         f"Parakeet server ready on {endpoint} (model={args.model}, device={actual_device})",
         args.quiet,
