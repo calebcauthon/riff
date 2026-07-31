@@ -12,7 +12,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod bus;
 mod cli;
+mod daemon;
 mod error;
 mod events;
 mod history;
@@ -20,6 +22,7 @@ mod models;
 mod paths;
 mod reporting;
 mod screenshots;
+mod servers;
 mod session_commands;
 mod setup;
 mod shot_modules;
@@ -41,6 +44,7 @@ use crate::paths::{
     parakeet_server_socket_file, perf_log_file, watcher_python_cache_file, web_server_pid_file,
 };
 use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
+use crate::servers::cmd_restart;
 use crate::session_commands::{cmd_chunk, cmd_pause, cmd_shot, cmd_start, cmd_stop, cmd_unpause};
 use crate::setup::{cmd_doctor, cmd_setup};
 use crate::transcription::{
@@ -533,19 +537,56 @@ fn parse_max_session_sec(raw: Option<&str>) -> Option<f64> {
     }
 }
 
+/// Recorded WAV bytes past which capture is considered real: comfortably more
+/// than any header-only file, about 128 ms of 16 kHz mono 16-bit audio.
+const MIC_CONFIRM_MIN_BYTES: u64 = 4096;
+
+/// How long after session start the watchdog keeps checking for first audio
+/// before giving up on a `mic_listening` confirmation.
+const MIC_CONFIRM_WINDOW_SEC: f64 = 10.0;
+
 fn max_duration_loop(args: &WatchMaxDurationArgs) -> Result<(), AppError> {
     let poll = Duration::from_millis(args.poll_ms.clamp(100, 5_000));
+    let mut awaiting_mic = args.audio_path.is_some() && args.events_path.is_some();
     loop {
         // The recorder dying (normal stop, fork, crash) is the unambiguous
         // signal that this watchdog's session is over.
         if !process_is_alive(args.ffmpeg_pid) {
             return Ok(());
         }
-        let remaining = args.max_sec - (unix_now() - args.started_at_epoch);
+        let elapsed = unix_now() - args.started_at_epoch;
+        if awaiting_mic {
+            if let (Some(audio_path), Some(events_path)) = (&args.audio_path, &args.events_path) {
+                let audio_bytes = fs::metadata(audio_path).map(|m| m.len()).unwrap_or(0);
+                if audio_bytes > MIC_CONFIRM_MIN_BYTES {
+                    awaiting_mic = false;
+                    let _ = append_session_event(
+                        events_path,
+                        &json!({
+                            "ts": now_iso(),
+                            "type": "mic_listening",
+                            "session_id": args.session_id,
+                            "confirm_ms": round3(elapsed * 1000.0),
+                            "audio_bytes": audio_bytes,
+                        }),
+                    );
+                }
+            }
+            if elapsed > MIC_CONFIRM_WINDOW_SEC {
+                awaiting_mic = false;
+            }
+        }
+        let remaining = args.max_sec - elapsed;
         if remaining <= 0.0 {
             break;
         }
-        thread::sleep(poll.min(Duration::from_secs_f64(remaining)));
+        // Tight cadence until first audio is confirmed, then the normal one.
+        let tick = if awaiting_mic {
+            Duration::from_millis(50)
+        } else {
+            poll
+        };
+        thread::sleep(tick.min(Duration::from_secs_f64(remaining)));
     }
 
     // Only ever stop the session we were spawned for.
@@ -601,6 +642,10 @@ pub(crate) fn spawn_max_duration_watcher(state: &SessionState, cli: &Cli) -> Opt
         .arg(ffmpeg_pid.to_string())
         .arg("--started-at-epoch")
         .arg(state.started_at_epoch.to_string())
+        .arg("--audio-path")
+        .arg(&state.audio_path)
+        .arg("--events-path")
+        .arg(&state.events_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2363,7 +2408,12 @@ fn kill_server_from_pid_file(
         }
     }
 
-    if !cli.dry_run && pid_file.exists() {
+    // Keep the pid file when the process outlived our signals. Dropping it would
+    // strand a live server that no later `kill-server` could ever find, since
+    // the pid file is the only thing that command knows how to look at.
+    // `riff restart` scans the process table and can still clean it up.
+    let stranded = !cli.dry_run && process_is_alive(pid);
+    if !cli.dry_run && !stranded && pid_file.exists() {
         let _ = fs::remove_file(pid_file);
     }
 
@@ -2374,6 +2424,7 @@ fn kill_server_from_pid_file(
         "status": status,
         "signal": signal,
         "killed": killed,
+        "stranded": stranded,
         "error": error_msg,
     }));
     Ok(())
@@ -2385,12 +2436,22 @@ fn cmd_kill_server(cli: &Cli) -> Result<i32, AppError> {
     let mut report = Vec::new();
     kill_server_from_pid_file(cli, "web", &web_server_pid_file(), &mut report)?;
     kill_server_from_pid_file(cli, "parakeet", &parakeet_server_pid_file(), &mut report)?;
+    kill_server_from_pid_file(cli, "riffd", &paths::riffd_pid_file(), &mut report)?;
     if !cli.dry_run {
         let _ = fs::remove_file(parakeet_server_socket_file());
+        let _ = fs::remove_file(paths::riffd_socket_file());
     }
 
     for item in &report {
-        events::emit("server_killed", None, item.clone());
+        // `pid` here is the helper's, not this process's; rename it so the
+        // envelope does not shadow it on the bus.
+        let mut payload = item.clone();
+        if let Some(map) = payload.as_object_mut() {
+            if let Some(helper_pid) = map.remove("pid") {
+                map.insert("helper_pid".to_string(), helper_pid);
+            }
+        }
+        events::emit("server_killed", None, payload);
     }
 
     if !cli.quiet {
@@ -2781,6 +2842,9 @@ fn dispatch(cli: &Cli) -> Result<i32, AppError> {
         Commands::WatchClipboard(args) => cmd_watch_clipboard(cli, args),
         Commands::WatchMaxDuration(args) => cmd_watch_max_duration(cli, args),
         Commands::KillServer => cmd_kill_server(cli),
+        Commands::Restart(args) => cmd_restart(cli, args),
+        Commands::Daemon(args) => daemon::cmd_daemon(cli, args),
+        Commands::Emit(args) => daemon::cmd_emit(cli, args),
     }
 }
 

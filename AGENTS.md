@@ -175,7 +175,11 @@ Default layout:
 
 `$RIFF_ROOT/events.jsonl` is a separate, global append-only stream that every command writes to, including commands that never touch a session. `riff watch` tails it. Session events are written to their session file in the historical flat shape and mirrored onto the bus with a flat envelope (`v`, `ts`, `seq`, `inv`, `pid`, `command`, `type`, `session_id`, `level`) added; the per-session file itself never gains envelope fields, so reporting keeps reading it unchanged.
 
-`src/events.rs` owns emission, `src/watch.rs` owns the viewer, and both Python helpers mirror their own records through `write_bus_record` in `scripts/parakeet_transcribe.py`. Rules that matter when adding events: a bus write must never fail its command, payload strings are clipped at 200 characters so one record fits a single append write, user-supplied command templates and hook bodies are never logged verbatim, and the nine envelope keys are reserved. `docs/EVENTS.md` is the catalog and must be updated alongside new event types.
+`src/events.rs` owns emission, `src/bus.rs` owns the shared read side (tailing and filters), `src/watch.rs` owns the viewer, and both Python helpers mirror their own records through `write_bus_record` in `scripts/parakeet_transcribe.py`. Rules that matter when adding events: a bus write must never fail its command, payload strings are clipped at 200 characters so one record fits a single append write, user-supplied command templates and hook bodies are never logged verbatim, and the nine envelope keys are reserved. `docs/EVENTS.md` is the catalog and must be updated alongside new event types.
+
+### Daemon (riffd)
+
+`riff daemon` runs a long-lived control socket at `$RIFF_ROOT/riffd.sock` (`src/daemon.rs`, documented in `docs/DAEMON.md`). It is the systematic path for other tools to send events in (`POST /events`, envelope assigned by the daemon as `command: external:<source>`) and read events out (`GET /subscribe`, an NDJSON push stream fed by tailing the bus file). `riff emit` appends directly to the bus and does not need the daemon. `riff watch` prefers the daemon's subscribe stream and falls back to file tailing. On startup the daemon warms the Parakeet server in the background (`RIFF_DAEMON_PRELOAD=0` disables). The bus file remains the durable log; the daemon never gates other writers.
 
 ## Configuration
 

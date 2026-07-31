@@ -56,6 +56,19 @@ pub fn parakeet_server_socket_file() -> PathBuf {
     root_dir().join("parakeet-server.sock")
 }
 
+/// Control socket for the riff daemon (`riff daemon run`).
+pub fn riffd_socket_file() -> PathBuf {
+    root_dir().join("riffd.sock")
+}
+
+pub fn riffd_pid_file() -> PathBuf {
+    root_dir().join("riffd.pid")
+}
+
+pub fn riffd_log_file() -> PathBuf {
+    root_dir().join("riffd.log")
+}
+
 pub fn web_server_log_file() -> PathBuf {
     root_dir().join("web-server.log")
 }

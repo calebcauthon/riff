@@ -92,8 +92,14 @@ pub enum Commands {
     WatchClipboard(WatchClipboardArgs),
     #[command(hide = true, name = "watch-max-duration")]
     WatchMaxDuration(WatchMaxDurationArgs),
-    /// Kill background helper servers (web + parakeet)
+    /// Kill background helper servers (web + parakeet + daemon)
     KillServer,
+    /// Stop stray helper servers (including untracked ones) and start fresh
+    Restart(RestartArgs),
+    /// Manage the riff daemon: control socket for events in/out
+    Daemon(DaemonArgs),
+    /// Append an event to the global bus
+    Emit(EmitArgs),
 }
 
 #[derive(Args, Debug)]
@@ -188,6 +194,21 @@ pub struct LiveArgs {
     /// Print one snapshot and exit
     #[arg(long, default_value_t = false)]
     pub once: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct RestartArgs {
+    /// Restart only the Parakeet transcription server
+    #[arg(long)]
+    pub parakeet: bool,
+
+    /// Restart only the local report web server
+    #[arg(long)]
+    pub web: bool,
+
+    /// Return as soon as the replacement is spawned instead of waiting for ready
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
 }
 
 #[derive(Args, Debug)]
@@ -325,6 +346,14 @@ pub struct WatchMaxDurationArgs {
 
     #[arg(long, default_value_t = 1000)]
     pub poll_ms: u64,
+
+    /// Recording target; watched to confirm the mic is actually capturing
+    #[arg(long)]
+    pub audio_path: Option<PathBuf>,
+
+    /// Session events file the `mic_listening` confirmation is written to
+    #[arg(long)]
+    pub events_path: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -343,6 +372,57 @@ pub struct WatchClipboardArgs {
 
     #[arg(long, default_value_t = 450)]
     pub poll_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct DaemonArgs {
+    #[command(subcommand)]
+    pub action: DaemonAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DaemonAction {
+    /// Run the daemon in the foreground (`daemon start` spawns this detached)
+    Run(DaemonRunArgs),
+    /// Start the daemon in the background
+    Start(DaemonStartArgs),
+    /// Stop the running daemon
+    Stop,
+    /// Show daemon identity and health
+    Status,
+}
+
+#[derive(Args, Debug)]
+pub struct DaemonRunArgs {
+    /// Owning RIFF_ROOT, present on the command line so a wedged daemon can
+    /// still be identified from the process table. Must match the environment.
+    #[arg(long)]
+    pub root: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct DaemonStartArgs {
+    /// Return as soon as the daemon is spawned instead of waiting for ready
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct EmitArgs {
+    /// Event type, snake_case (for example: build_finished)
+    pub event_type: String,
+
+    /// JSON object payload for the event
+    #[arg(long, value_name = "JSON")]
+    pub data: Option<String>,
+
+    /// Attach to a session id, or "current" for the active session
+    #[arg(long, value_name = "ID")]
+    pub session: Option<String>,
+
+    /// Event level: info, warn, or error
+    #[arg(long, default_value = "info")]
+    pub level: String,
 }
 
 impl Commands {
@@ -378,6 +458,9 @@ impl Commands {
             Commands::WatchClipboard(_) => "watch-clipboard",
             Commands::WatchMaxDuration(_) => "watch-max-duration",
             Commands::KillServer => "kill-server",
+            Commands::Restart(_) => "restart",
+            Commands::Daemon(_) => "daemon",
+            Commands::Emit(_) => "emit",
         }
     }
 
@@ -436,6 +519,27 @@ impl Commands {
                 "session_id": a.session_id,
                 "shot_id": a.shot_id,
                 "module": a.module,
+            }),
+            Commands::Restart(a) => json!({
+                "parakeet": a.parakeet,
+                "web": a.web,
+                "no_wait": a.no_wait,
+            }),
+            Commands::Daemon(a) => json!({
+                "action": match &a.action {
+                    DaemonAction::Run(_) => "run",
+                    DaemonAction::Start(_) => "start",
+                    DaemonAction::Stop => "stop",
+                    DaemonAction::Status => "status",
+                },
+            }),
+            // The event type is a validated identifier, not user prose; the
+            // payload itself stays out of the redacted argument summary.
+            Commands::Emit(a) => json!({
+                "type": a.event_type,
+                "has_data": a.data.is_some(),
+                "session": a.session,
+                "level": a.level,
             }),
             Commands::WatchClipboard(a) => json!({ "session_id": a.session_id }),
             Commands::WatchMaxDuration(a) => json!({

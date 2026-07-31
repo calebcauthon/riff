@@ -36,6 +36,14 @@ pub(crate) const RESERVED_KEYS: &[&str] = &[
     "level",
 ];
 
+/// Reserved keys the envelope would silently overwrite, losing payload data.
+///
+/// `ts`, `type`, and `session_id` are deliberately excluded: payloads set those
+/// with the same meaning the envelope gives them, so letting them coincide is
+/// correct. The rest describe the *emitting riff process*, so a payload using
+/// one is talking about something else and gets moved aside instead.
+const COLLIDING_KEYS: &[&str] = &["v", "seq", "inv", "pid", "command", "level"];
+
 /// Long strings are clipped so one record stays inside a single append write
 /// (keeping concurrent riff processes from interleaving mid-line) and so the
 /// shared bus does not accumulate full clipboard and transcript text.
@@ -49,7 +57,7 @@ pub(crate) const LEVEL_ERROR: &str = "error";
 
 struct BusCtx {
     inv: String,
-    command: &'static str,
+    command: String,
     pid: u32,
     seq: AtomicU64,
     started: Instant,
@@ -59,7 +67,7 @@ struct BusCtx {
 static CTX: OnceLock<BusCtx> = OnceLock::new();
 
 /// Bind this process to a command name. Called once from `run()`.
-pub(crate) fn init(command: &'static str) {
+pub(crate) fn init(command: &str) {
     let pid = std::process::id();
     let epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -67,7 +75,7 @@ pub(crate) fn init(command: &'static str) {
         .as_millis();
     let _ = CTX.set(BusCtx {
         inv: format!("{epoch_ms}-{pid}"),
-        command,
+        command: command.to_string(),
         pid,
         seq: AtomicU64::new(0),
         started: Instant::now(),
@@ -95,6 +103,30 @@ pub(crate) fn emit_leveled(
     session_id: Option<&str>,
     payload: Value,
 ) {
+    emit_record(level, event_type, session_id, None, payload);
+}
+
+/// Emit an event whose `command` field names a logical source other than this
+/// process's subcommand. The daemon uses this to write envelopes on behalf of
+/// external senders (`command: "external:<source>"`); `inv` and `pid` still
+/// describe the process doing the writing.
+pub(crate) fn emit_as(
+    command: &str,
+    level: &str,
+    event_type: &str,
+    session_id: Option<&str>,
+    payload: Value,
+) {
+    emit_record(level, event_type, session_id, Some(command), payload);
+}
+
+fn emit_record(
+    level: &str,
+    event_type: &str,
+    session_id: Option<&str>,
+    command_override: Option<&str>,
+    payload: Value,
+) {
     let Some(ctx) = CTX.get() else {
         return;
     };
@@ -118,6 +150,13 @@ pub(crate) fn emit_leveled(
         map.insert("truncated".to_string(), json!(true));
     }
 
+    // Move payload keys out of the envelope's way rather than losing them.
+    for key in COLLIDING_KEYS {
+        if let Some(value) = map.remove(*key) {
+            map.insert(format!("payload_{key}"), value);
+        }
+    }
+
     // Envelope last so it always wins over a stray payload key.
     map.insert("v".to_string(), json!(SCHEMA_VERSION));
     map.entry("ts".to_string())
@@ -129,7 +168,10 @@ pub(crate) fn emit_leveled(
     );
     map.insert("inv".to_string(), json!(ctx.inv));
     map.insert("pid".to_string(), json!(ctx.pid));
-    map.insert("command".to_string(), json!(ctx.command));
+    map.insert(
+        "command".to_string(),
+        json!(command_override.unwrap_or(ctx.command.as_str())),
+    );
     map.insert("level".to_string(), json!(level));
     if let Some(session_id) = session_id {
         map.insert("session_id".to_string(), json!(session_id));

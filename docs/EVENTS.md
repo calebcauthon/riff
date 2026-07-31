@@ -25,7 +25,7 @@ Records are flat: envelope keys sit alongside the domain payload.
 | `seq` | Monotonic counter within one invocation. |
 | `inv` | Invocation id, `<spawn-epoch-ms>-<pid>`. Correlates every record from one process. |
 | `pid` | Emitting process id. |
-| `command` | Subcommand name (`start`, `stop`, `send-images`, …), or `parakeet-server` / `transcription-watcher` for the Python helpers. |
+| `command` | Subcommand name (`start`, `stop`, `send-images`, …), `parakeet-server` / `transcription-watcher` for the Python helpers, `daemon` for riffd, `emit` for `riff emit`, or `external:<source>` for events sent through the daemon's `POST /events`. |
 | `type` | Event type; see the catalog below. |
 | `session_id` | Present when the event belongs to a session. |
 | `level` | `info`, `warn`, or `error`. |
@@ -70,6 +70,7 @@ Also written to the session's own `events.jsonl`.
 | `transcript_chunk` | `chunk` and the live transcription watcher |
 | `transcript_probe`, `transcription_worker_stopped` | live transcription watcher |
 | `transcription_watcher_started` / `_not_started` / `_exited_early` | `start` |
+| `mic_listening` | `watch-max-duration`, once recorded audio bytes first flow (`confirm_ms`, `audio_bytes`) |
 | `max_duration_reached` | `watch-max-duration` |
 
 ### Pipeline and command events
@@ -88,8 +89,14 @@ Bus only.
 | `setup_step`, `setup_finished` | `setup` | `step`, `status`, `runtime_dir`, `model`, … |
 | `doctor_ran` | `doctor` | `ok`, `deep`, `checks`, `failed` |
 | `config_changed` | `silence`, `loud` | `key`, `value`, `rc_file` |
-| `server_killed` | `kill-server` | `server`, `status`, `pid`, `signal` |
+| `server_killed` | `kill-server` | `server`, `status`, `helper_pid`, `signal` |
+| `helper_orphan_detected` | `restart` | `server`, `helper_pid`, `tracked_pid`. Always `level: warn`. |
+| `server_restarted` | `restart` | `server`, `stopped`, `orphans`, `foreign`, `started` |
 | `parakeet_server_startup` | Parakeet server | `status`, `instance_id`, `model`, `device`, `total_ms`, `phases` |
+| `daemon_started`, `daemon_stopped` | `daemon` | `socket`, `root` |
+| `daemon_preload` | `daemon` | `server`, `status` — background Parakeet warm-up at daemon start |
+| *anything* | `emit` | `riff emit <type> --data '<json>'` appends arbitrary events with a native envelope |
+| *anything* | `external:<source>` | `POST /events` on the daemon socket; see `docs/DAEMON.md` |
 
 There is no separate `setup_started` or `session_copied` — `command_started`
 with `command: setup` and `session_delivered` cover those.
@@ -100,6 +107,7 @@ with `command: setup` and `session_delivered` cover those.
 | --- | --- | --- |
 | `RIFF_EVENT_BUS` | `1` | Set to `0` to disable all bus writes. Session `events.jsonl` files are unaffected. |
 | `RIFF_EVENT_BUS_MAX_BYTES` | `8388608` | Size cap. On the next write past the cap, the bus is renamed to `events.jsonl.1` and a fresh file is started. |
+| `RIFF_DAEMON_PRELOAD` | `1` | Set to `0` to stop riffd from warming the Parakeet server at daemon start. |
 
 Bus writes never fail a command: a write error is dropped silently.
 
@@ -122,4 +130,19 @@ riff watch --grep parakeet
 `riff watch --json --once --all | jq` is the scripting entry point.
 
 `watch` is a viewer. It never writes to the bus and never runs anything in
-response to an event.
+response to an event. When the riff daemon is running, `watch` follows through
+the daemon's subscribe stream instead of tailing the file, and degrades back to
+file tailing if the daemon goes away.
+
+## Sending events in
+
+- `riff emit <type> [--data '<json object>'] [--session <id|current>] [--level info|warn|error]`
+  appends directly to the bus with a native envelope (`command: "emit"`).
+- External tools that are not riff use the daemon socket:
+  `POST /events` with `{"type": ..., "source": ..., "payload": {...}}`; the
+  daemon validates and assigns the envelope with `command: "external:<source>"`.
+  See `docs/DAEMON.md`.
+
+Provenance is part of the envelope: consumers can always tell riff's own
+pipeline events (`command: "stop"`, `"start"`, …) from injected ones (`"emit"`,
+`"external:*"`).

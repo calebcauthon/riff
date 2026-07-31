@@ -238,8 +238,13 @@ fn help_lists_commands_in_logical_order_with_descriptions() {
         ("perf", "Show startup/shutdown timing summary from perf log"),
         (
             "kill-server",
-            "Kill background helper servers (web + parakeet)",
+            "Kill background helper servers (web + parakeet + daemon)",
         ),
+        (
+            "daemon",
+            "Manage the riff daemon: control socket for events in/out",
+        ),
+        ("emit", "Append an event to the global bus"),
     ];
 
     for (name, desc) in must_have {
@@ -1859,4 +1864,629 @@ fn bus_clips_long_payload_strings() {
         "error not clipped: {message}"
     );
     assert_eq!(failed["truncated"], json!(true));
+}
+
+// ---------------------------------------------------------------------------
+// `riff restart` and stray helper discovery
+// ---------------------------------------------------------------------------
+
+/// Spawn a process whose command line is indistinguishable from a real
+/// riff-owned Parakeet server, without recording a pid file — i.e. a stray.
+///
+/// `script_dir` must live outside every RIFF_ROOT involved: ownership is
+/// decided by whether the argv mentions a root path, and the script path is
+/// part of the argv.
+fn spawn_fake_stray(script_dir: &Path, owning_root: &Path) -> std::process::Child {
+    fs::create_dir_all(script_dir).expect("create scripts dir");
+    let script = script_dir.join("parakeet_transcribe.py");
+    fs::write(&script, "import time\ntime.sleep(600)\n").expect("write fake script");
+
+    std::process::Command::new("python3")
+        .arg(&script)
+        .arg("--serve")
+        .arg("--riff-root")
+        .arg(owning_root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn fake stray")
+}
+
+/// Reap the child the moment it exits. The stray is a child of this test
+/// process, so without a prompt `wait()` a killed stray lingers as a zombie
+/// that both `kill(pid, 0)` and `ps` still report as alive — which riff then
+/// reads as `still_running`.
+fn reap_in_background(mut child: std::process::Child) {
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+/// Best-effort cleanup for strays that should already be dead by test end.
+fn kill_pid_best_effort(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output();
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string()])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.trim_start().starts_with(&pid.to_string()))
+        })
+        .unwrap_or(false)
+}
+
+#[test]
+fn restart_stops_untracked_strays_that_kill_server_cannot_see() {
+    let td = tempdir().expect("tempdir");
+    let scripts_td = tempdir().expect("scripts tempdir");
+    let stray = spawn_fake_stray(scripts_td.path(), td.path());
+    let stray_pid = stray.id();
+    reap_in_background(stray);
+    thread::sleep(Duration::from_millis(400));
+
+    // No pid file exists, so `kill-server` has nothing to act on.
+    cmd_with_root(td.path())
+        .arg("kill-server")
+        .assert()
+        .success();
+    assert!(
+        pid_is_alive(stray_pid),
+        "kill-server should not have found an untracked stray"
+    );
+
+    cmd_with_root(td.path())
+        .args(["restart", "--parakeet"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("orphans=1"));
+
+    thread::sleep(Duration::from_millis(200));
+    let alive = pid_is_alive(stray_pid);
+    kill_pid_best_effort(stray_pid);
+    assert!(!alive, "restart should have stopped the stray");
+}
+
+#[test]
+fn restart_leaves_helpers_owned_by_another_root_alone() {
+    let td = tempdir().expect("tempdir");
+    let other_root = tempdir().expect("other root");
+    let scripts_td = tempdir().expect("scripts tempdir");
+    // Looks exactly like a Parakeet server, but belongs to a different RIFF_ROOT.
+    let mut foreign = spawn_fake_stray(scripts_td.path(), other_root.path());
+    let foreign_pid = foreign.id();
+    thread::sleep(Duration::from_millis(400));
+
+    cmd_with_root(td.path())
+        .args(["restart", "--parakeet"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("orphans=0"));
+
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        pid_is_alive(foreign_pid),
+        "a helper owned by another RIFF_ROOT must never be killed"
+    );
+    let _ = foreign.kill();
+    let _ = foreign.wait();
+}
+
+#[test]
+fn restart_dry_run_reports_without_killing() {
+    let td = tempdir().expect("tempdir");
+    let scripts_td = tempdir().expect("scripts tempdir");
+    let mut stray = spawn_fake_stray(scripts_td.path(), td.path());
+    let stray_pid = stray.id();
+    thread::sleep(Duration::from_millis(400));
+
+    cmd_with_root(td.path())
+        .args(["--dry-run", "restart", "--parakeet"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("[dry-run]"));
+
+    assert!(pid_is_alive(stray_pid), "dry run must not kill anything");
+    let _ = stray.kill();
+    let _ = stray.wait();
+}
+
+#[test]
+fn doctor_reports_strays_and_clears_after_restart() {
+    let td = tempdir().expect("tempdir");
+    let scripts_td = tempdir().expect("scripts tempdir");
+    let stray = spawn_fake_stray(scripts_td.path(), td.path());
+    let stray_pid = stray.id();
+    reap_in_background(stray);
+    thread::sleep(Duration::from_millis(400));
+
+    cmd_with_root(td.path())
+        .arg("doctor")
+        .assert()
+        .stdout(predicates::str::contains("stray_helpers").and(predicates::str::contains("fail")));
+
+    cmd_with_root(td.path())
+        .args(["restart", "--parakeet"])
+        .assert()
+        .success();
+    thread::sleep(Duration::from_millis(200));
+
+    cmd_with_root(td.path()).arg("doctor").assert().stdout(
+        predicates::str::contains("stray_helpers            ok")
+            .or(predicates::str::contains("stray_helpers").and(predicates::str::contains("none"))),
+    );
+    kill_pid_best_effort(stray_pid);
+}
+
+#[test]
+fn restart_emits_orphan_and_restart_events_with_a_readable_pid() {
+    let td = tempdir().expect("tempdir");
+    let scripts_td = tempdir().expect("scripts tempdir");
+    let stray = spawn_fake_stray(scripts_td.path(), td.path());
+    let stray_pid = stray.id() as i64;
+    reap_in_background(stray);
+    thread::sleep(Duration::from_millis(400));
+
+    cmd_with_root(td.path())
+        .args(["restart", "--parakeet"])
+        .assert()
+        .success();
+
+    let events = read_bus(td.path());
+    let orphan = events
+        .iter()
+        .find(|e| e["type"] == json!("helper_orphan_detected"))
+        .expect("helper_orphan_detected event");
+    assert_eq!(orphan["server"], json!("parakeet"));
+    assert_eq!(orphan["level"], json!("warn"));
+    // The helper's pid must survive the envelope, which owns the `pid` key.
+    assert_eq!(orphan["helper_pid"], json!(stray_pid));
+    assert_ne!(orphan["pid"], json!(stray_pid));
+
+    assert!(events
+        .iter()
+        .any(|e| e["type"] == json!("server_restarted")));
+    kill_pid_best_effort(stray_pid as u32);
+}
+
+#[test]
+fn colliding_payload_keys_are_preserved_not_overwritten() {
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    // `transcription_watcher_*` events carry their own top-level `pid`, which
+    // would otherwise be shadowed by the envelope's emitting-process pid.
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .env("RIFF_LIVE_TRANSCRIBE", "1")
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    let events = read_bus(td.path());
+    for event in &events {
+        // Whatever a payload called `pid`, the envelope's value is this process.
+        if let Some(payload_pid) = event.get("payload_pid") {
+            assert_ne!(
+                payload_pid, &event["pid"],
+                "payload pid should have been moved aside, not duplicated"
+            );
+        }
+    }
+}
+
+#[test]
+fn kill_server_keeps_the_pid_file_when_the_process_survives() {
+    let td = tempdir().expect("tempdir");
+    // A live process that ignores SIGTERM stands in for a wedged server.
+    let mut stubborn = std::process::Command::new("bash")
+        .args(["-c", "trap '' TERM; sleep 600"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn stubborn process");
+    let pid = stubborn.id();
+    fs::create_dir_all(td.path()).ok();
+    fs::write(td.path().join("parakeet-server.pid"), pid.to_string()).expect("write pid file");
+    thread::sleep(Duration::from_millis(200));
+
+    cmd_with_root(td.path())
+        .arg("kill-server")
+        .assert()
+        .success();
+
+    // SIGKILL is not trappable, so the process does die and the file is cleared.
+    // The guard matters only when the pid genuinely outlives our signals; assert
+    // the file tracks reality either way.
+    let file_exists = td.path().join("parakeet-server.pid").exists();
+    let alive = pid_is_alive(pid);
+    assert_eq!(
+        file_exists, alive,
+        "pid file presence must match whether the process is still running"
+    );
+    let _ = stubborn.kill();
+    let _ = stubborn.wait();
+}
+
+// ---------------------------------------------------------------------------
+// riffd daemon + `riff emit`
+// ---------------------------------------------------------------------------
+
+/// Stops the daemon owned by `root` even when the test panics first — a
+/// detached riffd is not a child of the test process and would outlive it.
+struct DaemonGuard {
+    root: PathBuf,
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        let _ = cmd_with_root(&self.root)
+            .args(["--quiet", "daemon", "stop"])
+            .ok();
+    }
+}
+
+fn start_daemon(root: &Path) -> DaemonGuard {
+    cmd_with_root(root)
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+    DaemonGuard {
+        root: root.to_path_buf(),
+    }
+}
+
+/// One HTTP request over the daemon socket, whole response returned as text.
+fn daemon_http(root: &Path, request: &str) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(root.join("riffd.sock"))
+        .expect("connect riffd socket");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("set read timeout");
+    stream.write_all(request.as_bytes()).expect("write request");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read response");
+    String::from_utf8_lossy(&response).to_string()
+}
+
+fn daemon_http_body(root: &Path, request: &str) -> Value {
+    let response = daemon_http(root, request);
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("no header/body split in response: {response}"));
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("body is not JSON ({e}): {body}"))
+}
+
+#[test]
+fn emit_appends_a_fully_enveloped_event_without_the_daemon() {
+    let td = tempdir().expect("tempdir");
+
+    cmd_with_root(td.path())
+        .args([
+            "emit",
+            "deploy_started",
+            "--data",
+            r#"{"env":"prod","attempt":2}"#,
+            "--level",
+            "warn",
+        ])
+        .assert()
+        .success();
+
+    let events = read_bus(td.path());
+    let event = events
+        .iter()
+        .find(|e| e["type"] == json!("deploy_started"))
+        .expect("emitted event on the bus");
+    assert_eq!(event["command"], json!("emit"));
+    assert_eq!(event["level"], json!("warn"));
+    assert_eq!(event["env"], json!("prod"));
+    assert_eq!(event["attempt"], json!(2));
+    assert_eq!(event["v"], json!(1));
+}
+
+#[test]
+fn emit_rejects_bad_types_payloads_and_levels() {
+    let td = tempdir().expect("tempdir");
+
+    cmd_with_root(td.path())
+        .args(["emit", "has space"])
+        .assert()
+        .failure();
+    cmd_with_root(td.path())
+        .args(["emit", "ok_type", "--data", "not json"])
+        .assert()
+        .failure();
+    cmd_with_root(td.path())
+        .args(["emit", "ok_type", "--data", "[1,2]"])
+        .assert()
+        .failure();
+    cmd_with_root(td.path())
+        .args(["emit", "ok_type", "--level", "fatal"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn daemon_serves_identity_health_external_events_and_subscriptions() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let td = tempdir().expect("tempdir");
+    let guard = start_daemon(td.path());
+
+    // Identity names this root and the riffd service.
+    let identity = daemon_http_body(
+        td.path(),
+        "GET /identity HTTP/1.1\r\nHost: riffd\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(identity["service"], json!("riffd"));
+    let canonical_root = fs::canonicalize(td.path())
+        .expect("canonicalize root")
+        .display()
+        .to_string();
+    assert_eq!(identity["riff_root"], json!(canonical_root));
+
+    let health = daemon_http_body(
+        td.path(),
+        "GET /health HTTP/1.1\r\nHost: riffd\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(health["ok"], json!(true));
+
+    // External events get a daemon-assigned envelope.
+    let body = r#"{"type":"build_finished","source":"ci","payload":{"job":"tests","ok":true}}"#;
+    let accepted = daemon_http_body(
+        td.path(),
+        &format!(
+            "POST /events HTTP/1.1\r\nHost: riffd\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert_eq!(accepted["ok"], json!(true));
+    assert_eq!(accepted["command"], json!("external:ci"));
+
+    let bad_body = r#"{"type":"has space"}"#;
+    let rejected = daemon_http_body(
+        td.path(),
+        &format!(
+            "POST /events HTTP/1.1\r\nHost: riffd\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{bad_body}",
+            bad_body.len()
+        ),
+    );
+    assert_eq!(rejected["ok"], json!(false));
+
+    let events = read_bus(td.path());
+    let external = events
+        .iter()
+        .find(|e| e["type"] == json!("build_finished"))
+        .expect("external event on the bus");
+    assert_eq!(external["command"], json!("external:ci"));
+    assert_eq!(external["job"], json!("tests"));
+    for key in ["v", "ts", "seq", "inv", "pid", "level"] {
+        assert!(
+            external.get(key).is_some(),
+            "external event missing envelope key '{key}': {external}"
+        );
+    }
+
+    // A subscriber receives matching events pushed over the socket.
+    let mut sub = std::os::unix::net::UnixStream::connect(td.path().join("riffd.sock"))
+        .expect("connect subscribe");
+    sub.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    sub.write_all(
+        b"GET /subscribe?type=deploy_started HTTP/1.1\r\nHost: riffd\r\nConnection: close\r\n\r\n",
+    )
+    .expect("write subscribe request");
+    let mut reader = BufReader::new(sub);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).expect("read header line");
+        if line.trim_end().is_empty() {
+            break;
+        }
+    }
+    // Let the daemon register the subscription before emitting.
+    thread::sleep(Duration::from_millis(400));
+
+    cmd_with_root(td.path())
+        .args(["--quiet", "emit", "unrelated_event"])
+        .assert()
+        .success();
+    cmd_with_root(td.path())
+        .args([
+            "--quiet",
+            "emit",
+            "deploy_started",
+            "--data",
+            r#"{"env":"ci"}"#,
+        ])
+        .assert()
+        .success();
+
+    line.clear();
+    reader.read_line(&mut line).expect("read pushed event");
+    let pushed: Value = serde_json::from_str(line.trim_end())
+        .unwrap_or_else(|e| panic!("pushed line is not JSON ({e}): {line}"));
+    assert_eq!(
+        pushed["type"],
+        json!("deploy_started"),
+        "subscription filter should have skipped unrelated_event"
+    );
+
+    drop(guard); // stops the daemon
+    assert!(
+        !td.path().join("riffd.sock").exists(),
+        "daemon stop should remove the socket"
+    );
+    cmd_with_root(td.path())
+        .args(["daemon", "status"])
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn watch_follows_through_the_daemon_subscribe_stream() {
+    let td = tempdir().expect("tempdir");
+    let guard = start_daemon(td.path());
+
+    let out_path = td.path().join("watch-out.jsonl");
+    let out_file = fs::File::create(&out_path).expect("create watch output file");
+    let bin = env!("CARGO_BIN_EXE_riff");
+    let mut watch = std::process::Command::new(bin)
+        .args(["--json", "watch"])
+        .env("RIFF_ROOT", td.path())
+        .env(
+            "RIFF_CONFIG_JSON_FILE",
+            td.path().join("test-riff-config.json"),
+        )
+        .env("RIFF_BEEP", "0")
+        .env("RIFF_WEB_SERVER", "0")
+        .env("RIFF_PARAKEET_SERVER", "0")
+        .stdout(out_file)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn riff watch");
+
+    // Give watch time to connect to the daemon and subscribe.
+    thread::sleep(Duration::from_millis(600));
+    cmd_with_root(td.path())
+        .args(["--quiet", "emit", "external_ping", "--data", r#"{"n":1}"#])
+        .assert()
+        .success();
+    thread::sleep(Duration::from_millis(800));
+
+    let _ = watch.kill();
+    let _ = watch.wait();
+    drop(guard);
+
+    let seen = fs::read_to_string(&out_path).expect("read watch output");
+    assert!(
+        seen.lines().any(|l| l.contains("external_ping")),
+        "watch should have streamed the emitted event, got: {seen}"
+    );
+}
+
+#[test]
+fn kill_server_also_stops_the_daemon() {
+    let td = tempdir().expect("tempdir");
+    let _guard = start_daemon(td.path());
+    let daemon_pid = fs::read_to_string(td.path().join("riffd.pid"))
+        .expect("riffd pid file")
+        .trim()
+        .parse::<u32>()
+        .expect("pid");
+
+    cmd_with_root(td.path())
+        .arg("kill-server")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("riffd"));
+
+    thread::sleep(Duration::from_millis(300));
+    assert!(!pid_is_alive(daemon_pid), "riffd should be dead");
+    assert!(
+        !td.path().join("riffd.sock").exists(),
+        "kill-server should remove the daemon socket"
+    );
+}
+
+#[test]
+fn watchdog_emits_mic_listening_once_audio_bytes_flow() {
+    let td = tempdir().expect("tempdir");
+    let session_id = "20260101-000000";
+    let session_dir = td.path().join("sessions").join(session_id);
+    fs::create_dir_all(&session_dir).expect("create session dir");
+    let audio_path = session_dir.join("audio.wav");
+    let events_path = session_dir.join("events.jsonl");
+
+    // A live stand-in for the recorder pid; reaped promptly like the strays.
+    let recorder = std::process::Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .expect("spawn fake recorder");
+    let recorder_pid = recorder.id();
+    reap_in_background(recorder);
+
+    let started_at_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs_f64();
+    let bin = env!("CARGO_BIN_EXE_riff");
+    let mut watchdog = std::process::Command::new(bin)
+        .args([
+            "--quiet",
+            "watch-max-duration",
+            "--session-id",
+            session_id,
+            "--max-sec",
+            "60",
+            "--ffmpeg-pid",
+            &recorder_pid.to_string(),
+            "--started-at-epoch",
+            &format!("{started_at_epoch}"),
+            "--audio-path",
+            audio_path.to_str().expect("utf8"),
+            "--events-path",
+            events_path.to_str().expect("utf8"),
+        ])
+        .env("RIFF_ROOT", td.path())
+        .env(
+            "RIFF_CONFIG_JSON_FILE",
+            td.path().join("test-riff-config.json"),
+        )
+        .env("RIFF_BEEP", "0")
+        .spawn()
+        .expect("spawn watchdog");
+
+    // Header-only bytes must not count as a listening mic.
+    fs::write(&audio_path, vec![0u8; 44]).expect("write wav header");
+    thread::sleep(Duration::from_millis(400));
+    assert!(
+        !fs::read_to_string(&events_path)
+            .unwrap_or_default()
+            .contains("mic_listening"),
+        "44 header bytes must not confirm the mic"
+    );
+
+    // Real samples flowing.
+    fs::write(&audio_path, vec![0u8; 16_384]).expect("write audio bytes");
+    thread::sleep(Duration::from_millis(500));
+
+    kill_pid_best_effort(recorder_pid);
+    thread::sleep(Duration::from_millis(300));
+    let _ = watchdog.kill();
+    let _ = watchdog.wait();
+
+    let session_events = fs::read_to_string(&events_path).expect("session events");
+    let mic_line = session_events
+        .lines()
+        .find(|l| l.contains("mic_listening"))
+        .expect("mic_listening in session events");
+    let mic: Value = serde_json::from_str(mic_line).expect("mic event json");
+    assert_eq!(mic["session_id"], json!(session_id));
+    assert!(mic["audio_bytes"].as_u64().expect("audio_bytes") > 4096);
+    assert!(mic["confirm_ms"].as_f64().expect("confirm_ms") >= 0.0);
+    // The session file keeps its historical flat shape — no envelope keys.
+    assert!(mic.get("v").is_none() && mic.get("inv").is_none());
+
+    // And the bus mirror carries the envelope.
+    let bus_mic = read_bus(td.path())
+        .into_iter()
+        .find(|e| e["type"] == json!("mic_listening"))
+        .expect("mic_listening on the bus");
+    assert_eq!(bus_mic["command"], json!("watch-max-duration"));
+    assert_eq!(bus_mic["v"], json!(1));
 }

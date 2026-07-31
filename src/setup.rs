@@ -334,6 +334,8 @@ pub(crate) fn cmd_doctor(cli: &Cli, args: &DoctorArgs) -> Result<i32, AppError> 
         check_web_server_health(&web_url),
         web_url,
     ));
+    let (no_strays, stray_detail) = crate::servers::stray_summary();
+    rows.push(("stray_helpers".to_string(), no_strays, stray_detail));
 
     let ok = rows.iter().all(|(name, status, _)| {
         *status || matches!(name.as_str(), "parakeet_server" | "web_server")

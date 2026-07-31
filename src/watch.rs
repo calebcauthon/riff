@@ -3,68 +3,19 @@
 //! A viewer only: it reads `$RIFF_ROOT/events.jsonl`, never writes to it and
 //! never runs anything in response to an event.
 
+use crate::bus::{read_retained_lines, BusTailer, EventFilters};
 use crate::cli::{Cli, WatchArgs};
 use crate::error::{app_error, AppError};
 use crate::events::RESERVED_KEYS;
 use crate::models::SessionState;
-use crate::paths::{active_state_file, ensure_dirs, event_bus_file, event_bus_rotated_file};
+use crate::paths::{active_state_file, ensure_dirs, event_bus_file};
 use crate::{print_out, read_json};
 use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
-use std::fs::{self, File};
 use std::io::IsTerminal;
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::io::{self, Write};
 use std::thread;
 use std::time::Duration;
-
-struct Filters {
-    types: Vec<String>,
-    commands: Vec<String>,
-    session: Option<String>,
-    grep: Option<String>,
-    since: Option<DateTime<Utc>>,
-}
-
-impl Filters {
-    fn matches(&self, event: &Value, raw: &str) -> bool {
-        if !self.types.is_empty() {
-            let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if !self.types.iter().any(|t| t == event_type) {
-                return false;
-            }
-        }
-        if !self.commands.is_empty() {
-            let command = event.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            if !self.commands.iter().any(|c| c == command) {
-                return false;
-            }
-        }
-        if let Some(session) = &self.session {
-            let event_session = event.get("session_id").and_then(|v| v.as_str());
-            if event_session != Some(session.as_str()) {
-                return false;
-            }
-        }
-        if let Some(needle) = &self.grep {
-            if !raw.to_lowercase().contains(&needle.to_lowercase()) {
-                return false;
-            }
-        }
-        if let Some(cutoff) = self.since {
-            let Some(ts) = event.get("ts").and_then(|v| v.as_str()) else {
-                return false;
-            };
-            let Ok(parsed) = DateTime::parse_from_rfc3339(ts) else {
-                return false;
-            };
-            if parsed.with_timezone(&Utc) < cutoff {
-                return false;
-            }
-        }
-        true
-    }
-}
 
 /// Parse `30s`, `10m`, `2h`, `1d`, or a bare number of seconds.
 pub(crate) fn parse_since(raw: &str) -> Option<Duration> {
@@ -115,7 +66,7 @@ pub(crate) fn cmd_watch(cli: &Cli, args: &WatchArgs) -> Result<i32, AppError> {
         None => None,
     };
 
-    let filters = Filters {
+    let filters = EventFilters {
         types: args.event_type.clone(),
         commands: args.command_filter.clone(),
         session,
@@ -129,14 +80,7 @@ pub(crate) fn cmd_watch(cli: &Cli, args: &WatchArgs) -> Result<i32, AppError> {
 
     let wants_backfill = args.all || args.since.is_some() || args.tail.is_some() || args.once;
     if wants_backfill {
-        let mut lines: Vec<String> = Vec::new();
-        // The rotated generation comes first so the merged view stays ordered.
-        for path in [event_bus_rotated_file(), bus.clone()] {
-            if let Ok(text) = fs::read_to_string(&path) {
-                lines.extend(text.lines().map(|l| l.to_string()));
-            }
-        }
-        let mut matched: Vec<(Value, String)> = lines
+        let mut matched: Vec<(Value, String)> = read_retained_lines()
             .into_iter()
             .filter_map(|line| {
                 let value: Value = serde_json::from_str(&line).ok()?;
@@ -161,60 +105,35 @@ pub(crate) fn cmd_watch(cli: &Cli, args: &WatchArgs) -> Result<i32, AppError> {
         print_out(cli, format!("watching {} — Ctrl-C to stop", bus.display()));
     }
 
+    // The daemon's subscribe stream replaces file tailing when it is up: the
+    // daemon pushes whole lines and its view survives rotation. Backfill above
+    // already covered history either way.
+    if crate::daemon::follow_via_daemon(cli, &filters, color, &mut out) {
+        return Ok(0);
+    }
+
     // Start at the end of what exists now; backfill above already covered history.
-    let mut offset = fs::metadata(&bus).map(|m| m.len()).unwrap_or(0);
+    let mut tailer = BusTailer::from_end();
     let poll = Duration::from_millis(args.poll_ms.max(50));
 
     loop {
-        let len = fs::metadata(&bus).map(|m| m.len()).unwrap_or(0);
-        if len < offset {
-            // Rotation or truncation: restart from the head of the new file.
-            offset = 0;
-        }
-        if len > offset {
-            match read_from(&bus, offset) {
-                Ok((chunk, consumed)) => {
-                    offset += consumed;
-                    for line in chunk.lines() {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        // A torn or partial record is skipped, not fatal.
-                        let Ok(value) = serde_json::from_str::<Value>(line) else {
-                            continue;
-                        };
-                        if filters.matches(&value, line) {
-                            render(&mut out, cli, &value, line, color);
-                        }
-                    }
-                }
-                Err(_) => offset = len,
+        for line in tailer.poll() {
+            // A torn or partial record is skipped, not fatal.
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if filters.matches(&value, &line) {
+                render(&mut out, cli, &value, &line, color);
             }
         }
         thread::sleep(poll);
     }
 }
 
-/// Read appended bytes, returning only whole lines and how many bytes those
-/// lines consumed so a partially-written record is re-read next poll.
-fn read_from(path: &Path, offset: u64) -> Result<(String, u64), AppError> {
-    let mut file = File::open(path)
-        .map_err(|e| app_error(1, format!("Failed to open {}: {e}", path.display())))?;
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|e| app_error(1, format!("Failed to seek {}: {e}", path.display())))?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
-        .map_err(|e| app_error(1, format!("Failed to read {}: {e}", path.display())))?;
-
-    let last_newline = buf.iter().rposition(|b| *b == b'\n');
-    let Some(end) = last_newline else {
-        return Ok((String::new(), 0));
-    };
-    let complete = &buf[..=end];
-    Ok((
-        String::from_utf8_lossy(complete).to_string(),
-        complete.len() as u64,
-    ))
+/// Render one already-filtered bus line; used by the daemon subscribe path so
+/// its output is identical to the file-tail path.
+pub(crate) fn render_line(out: &mut impl Write, cli: &Cli, value: &Value, raw: &str, color: bool) {
+    render(out, cli, value, raw, color);
 }
 
 fn use_color(cli: &Cli) -> bool {
