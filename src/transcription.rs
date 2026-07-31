@@ -230,7 +230,7 @@ fn resolve_parakeet_requested_device() -> String {
         .unwrap_or_else(|| "auto".to_string())
 }
 
-fn normalized_path(path: &Path) -> String {
+pub(crate) fn normalized_path(path: &Path) -> String {
     if let Ok(canonical) = fs::canonicalize(path) {
         return canonical.display().to_string();
     }
@@ -809,7 +809,7 @@ pub(crate) fn ensure_parakeet_server(
     warmup
 }
 
-fn web_server_enabled() -> bool {
+pub(crate) fn web_server_enabled() -> bool {
     env::var("RIFF_WEB_SERVER")
         .map(|v| {
             !matches!(

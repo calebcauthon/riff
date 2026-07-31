@@ -166,6 +166,11 @@ pub(crate) fn cmd_setup(cli: &Cli, args: &SetupArgs) -> Result<i32, AppError> {
                 "Failed to install pinned transcription packages.",
             ));
         }
+        crate::events::emit(
+            "setup_step",
+            None,
+            json!({ "step": "packages", "status": "ok" }),
+        );
     }
 
     if !args.skip_model {
@@ -193,7 +198,25 @@ pub(crate) fn cmd_setup(cli: &Cli, args: &SetupArgs) -> Result<i32, AppError> {
         if !status.success() {
             return Err(app_error(1, "Model pre-download failed."));
         }
+        crate::events::emit(
+            "setup_step",
+            None,
+            json!({ "step": "model", "status": "ok", "model": PINNED_PARAKEET_MODEL }),
+        );
     }
+
+    crate::events::emit(
+        "setup_finished",
+        None,
+        json!({
+            "runtime_dir": runtime_dir.display().to_string(),
+            "python": runtime_py.display().to_string(),
+            "model": PINNED_PARAKEET_MODEL,
+            "model_revision": PINNED_PARAKEET_MODEL_REVISION,
+            "skipped_packages": args.skip_packages,
+            "skipped_model": args.skip_model,
+        }),
+    );
 
     print_out(
         cli,
@@ -311,10 +334,32 @@ pub(crate) fn cmd_doctor(cli: &Cli, args: &DoctorArgs) -> Result<i32, AppError> 
         check_web_server_health(&web_url),
         web_url,
     ));
+    let (no_strays, stray_detail) = crate::servers::stray_summary();
+    rows.push(("stray_helpers".to_string(), no_strays, stray_detail));
 
     let ok = rows.iter().all(|(name, status, _)| {
         *status || matches!(name.as_str(), "parakeet_server" | "web_server")
     });
+    let failed: Vec<&str> = rows
+        .iter()
+        .filter(|(_, status, _)| !*status)
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    crate::events::emit_leveled(
+        if ok {
+            crate::events::LEVEL_INFO
+        } else {
+            crate::events::LEVEL_ERROR
+        },
+        "doctor_ran",
+        None,
+        json!({
+            "ok": ok,
+            "deep": args.deep,
+            "checks": rows.len(),
+            "failed": failed,
+        }),
+    );
     for (label, status, detail) in &rows {
         print_out(
             cli,

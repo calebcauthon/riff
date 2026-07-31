@@ -17,7 +17,7 @@ use crate::transcription::{
     run_post_transcribe_command, run_transcription, transcribe_via_parakeet_server,
 };
 use crate::{
-    append_jsonl, append_perf_event, build_record_cmd, capture_frontmost_app_meta,
+    append_perf_event, append_session_event, build_record_cmd, capture_frontmost_app_meta,
     capture_process_stats, clear_active_state, command_exists, emit_json, get_audio_duration_sec,
     load_active_state, max_session_sec, now_iso, pause_recorder_capture, play_event_sound,
     print_out, print_verbose, process_is_alive, read_json,
@@ -430,7 +430,7 @@ fn process_manual_chunk(
     let effective_end_sec = forced_end_sec.unwrap_or_else(|| audio_elapsed_sec(state));
 
     if effective_end_sec <= start_sec + 0.05 {
-        append_jsonl(
+        append_session_event(
             &events_path,
             &json!({
                 "ts": now_iso(),
@@ -461,7 +461,7 @@ fn process_manual_chunk(
     if let Err(e) =
         extract_audio_segment(&source_audio, start_sec, effective_end_sec, &scratch_audio)
     {
-        append_jsonl(
+        append_session_event(
             &events_path,
             &json!({
                 "ts": now_iso(),
@@ -494,7 +494,7 @@ fn process_manual_chunk(
         .unwrap_or("error");
 
     if transcribe_status != "ok" {
-        append_jsonl(
+        append_session_event(
             &events_path,
             &json!({
                 "ts": now_iso(),
@@ -537,7 +537,7 @@ fn process_manual_chunk(
     }
     state.transcription_cursor_sec = effective_end_sec.max(state.transcription_cursor_sec);
 
-    append_jsonl(
+    append_session_event(
         &events_path,
         &json!({
             "ts": now_iso(),
@@ -685,7 +685,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     create_session_dir_ms = elapsed_ms(t_create_session_dir);
 
     let t_write_session_started_event = Instant::now();
-    append_jsonl(
+    append_session_event(
         &events_path,
         &json!({
             "ts": started_iso,
@@ -1052,7 +1052,7 @@ pub(crate) fn cmd_shot(cli: &Cli) -> Result<i32, AppError> {
         ),
     };
 
-    append_jsonl(
+    append_session_event(
         &events_path,
         &json!({
             "ts": now_iso(),
@@ -1243,7 +1243,7 @@ pub(crate) fn cmd_pause(cli: &Cli) -> Result<i32, AppError> {
     state.transcription_paused = true;
     state.transcription_pause_started_sec = Some(paused_at_epoch);
     if !cli.dry_run {
-        append_jsonl(
+        append_session_event(
             Path::new(&state.events_path),
             &json!({
                 "ts": now_iso(),
@@ -1338,7 +1338,7 @@ pub(crate) fn cmd_unpause(cli: &Cli) -> Result<i32, AppError> {
     state.transcription_pause_started_sec = None;
 
     if !cli.dry_run {
-        append_jsonl(
+        append_session_event(
             Path::new(&state.events_path),
             &json!({
                 "ts": now_iso(),
@@ -1490,7 +1490,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             stop_clipboard_watcher_ms = elapsed_ms(t_stop_clipboard_watcher);
         }
         let t_append_stopping_event = Instant::now();
-        append_jsonl(
+        append_session_event(
             &events_path,
             &json!({
                 "ts": ended_iso,
@@ -1632,6 +1632,26 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         }
     }
     let transcribe_ms = elapsed_ms(t_transcribe);
+    let transcription_status = transcription_meta
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    crate::events::emit_leveled(
+        if transcription_status == "ok" {
+            crate::events::LEVEL_INFO
+        } else {
+            crate::events::LEVEL_ERROR
+        },
+        "transcription_finished",
+        Some(&state.session_id),
+        json!({
+            "status": transcription_status,
+            "method": transcription_meta.get("method").cloned().unwrap_or(Value::Null),
+            "chars": transcription_meta.get("chars").cloned().unwrap_or(Value::Null),
+            "words": transcription_meta.get("words").cloned().unwrap_or(Value::Null),
+            "duration_ms": round3(transcribe_ms),
+        }),
+    );
     print_verbose(
         cli,
         format!(
@@ -1721,6 +1741,26 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
             )
         };
     output_hooks_ms = elapsed_ms(t_output_hooks);
+    let output_hooks_status = output_hooks_meta
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    crate::events::emit_leveled(
+        match output_hooks_status {
+            "ok" => crate::events::LEVEL_INFO,
+            "skipped" => crate::events::LEVEL_WARN,
+            _ => crate::events::LEVEL_ERROR,
+        },
+        "output_hooks_ran",
+        Some(&state.session_id),
+        json!({
+            "status": output_hooks_status,
+            "count": output_hooks_meta.get("count").cloned().unwrap_or(Value::Null),
+            "chars_before": output_hooks_meta.get("chars_before").cloned().unwrap_or(Value::Null),
+            "chars_after": output_hooks_meta.get("chars_after").cloned().unwrap_or(Value::Null),
+            "duration_ms": round3(output_hooks_ms),
+        }),
+    );
     print_verbose(
         cli,
         format!(
@@ -1832,7 +1872,7 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         write_note_html_ms = round3(write_note_md_ms + write_note_html_file_ms);
 
         let t_append_stop_event = Instant::now();
-        append_jsonl(
+        append_session_event(
             &events_path,
             &json!({
                 "ts": now_iso(),

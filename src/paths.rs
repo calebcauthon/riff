@@ -25,6 +25,17 @@ pub fn perf_log_file() -> PathBuf {
     root_dir().join("perf.jsonl")
 }
 
+/// Global append-only event bus: every command emits here, `riff watch` tails it.
+/// Per-session `events.jsonl` files remain the source of truth for reporting.
+pub fn event_bus_file() -> PathBuf {
+    root_dir().join("events.jsonl")
+}
+
+/// Previous bus generation, kept after a size-triggered rotation.
+pub fn event_bus_rotated_file() -> PathBuf {
+    root_dir().join("events.jsonl.1")
+}
+
 pub fn audio_device_cache_file() -> PathBuf {
     root_dir().join("audio_device_cache.txt")
 }
@@ -43,6 +54,19 @@ pub fn parakeet_server_pid_file() -> PathBuf {
 
 pub fn parakeet_server_socket_file() -> PathBuf {
     root_dir().join("parakeet-server.sock")
+}
+
+/// Control socket for the riff daemon (`riff daemon run`).
+pub fn riffd_socket_file() -> PathBuf {
+    root_dir().join("riffd.sock")
+}
+
+pub fn riffd_pid_file() -> PathBuf {
+    root_dir().join("riffd.pid")
+}
+
+pub fn riffd_log_file() -> PathBuf {
+    root_dir().join("riffd.log")
 }
 
 pub fn web_server_log_file() -> PathBuf {

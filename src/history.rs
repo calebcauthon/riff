@@ -1,8 +1,8 @@
 use crate::cli::{Cli, CopyArgs, ListArgs, PerfArgs, SendArgs, ShowArgs};
 use crate::error::{app_error, AppError};
 use crate::models::SessionListRow;
-use crate::reporting::clipboard_from_events;
 use crate::paths::{ensure_dirs, perf_log_file, sessions_dir};
+use crate::reporting::{clipboard_from_events, strip_annotation_markers};
 use crate::{command_exists, emit_json, get_audio_duration_sec, print_out, SUPPORTED_IMAGE_EXTS};
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, SecondsFormat, Timelike, Utc};
 use serde_json::{json, Value};
@@ -667,6 +667,12 @@ pub(crate) fn cmd_copy(cli: &Cli, args: &CopyArgs) -> Result<i32, AppError> {
     if cli.verbose {
         let session_dir = resolve_recent_session_dir(requested_rank)?;
         let verbose_dump = render_verbose_copy_output(&session_dir, requested_rank)?;
+        emit_copy_event(
+            &session_dir,
+            requested_rank,
+            verbose_dump.chars().count(),
+            true,
+        );
         // Intentionally raw stdout only, so this can be piped/copied easily.
         print!("{verbose_dump}");
         return Ok(0);
@@ -678,10 +684,25 @@ pub(crate) fn cmd_copy(cli: &Cli, args: &CopyArgs) -> Result<i32, AppError> {
     // inlined as base64. Pasting into the focused app is what `send`/`send-images` do.
     let (session_dir, transcript) = load_recent_session_transcript(requested_rank)?;
     let bundle = render_copy_bundle(&session_dir, &transcript);
+    emit_copy_event(&session_dir, requested_rank, bundle.chars().count(), false);
 
     // Intentionally raw stdout only, so this can be piped/copied easily.
     print!("{bundle}");
     Ok(0)
+}
+
+fn emit_copy_event(session_dir: &Path, rank: usize, chars: usize, verbose: bool) {
+    let session_id = session_dir.file_name().and_then(|n| n.to_str());
+    crate::events::emit(
+        "session_delivered",
+        session_id,
+        json!({
+            "mode": "copy",
+            "rank": rank,
+            "chars": chars,
+            "verbose": verbose,
+        }),
+    );
 }
 
 /// MIME type for a screenshot file, keyed by extension. Falls back to a generic
@@ -706,8 +727,7 @@ fn image_mime_type(path: &Path) -> &'static str {
 /// Standard base64 (RFC 4648, with `=` padding). Small self-contained encoder so
 /// `copy` can inline screenshot bytes without pulling in a base64 dependency.
 fn base64_encode(input: &[u8]) -> String {
-    const CHARS: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -748,10 +768,7 @@ fn render_copy_bundle(session_dir: &Path, transcript: &str) -> String {
 
     for (idx, path) in collect_session_image_paths(session_dir).iter().enumerate() {
         let n = idx + 1;
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("image");
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("image");
         let mime = image_mime_type(path);
         match fs::read(path) {
             Ok(bytes) => {
@@ -1008,7 +1025,7 @@ fn load_recent_session_transcript(rank: usize) -> Result<(PathBuf, String), AppE
         transcript
     };
 
-    let transcript = transcript.trim().to_string();
+    let transcript = strip_annotation_markers(&transcript);
     if transcript.is_empty() {
         return Err(app_error(
             8,
@@ -1354,6 +1371,17 @@ pub(crate) fn cmd_send(cli: &Cli, args: &SendArgs) -> Result<i32, AppError> {
         }
     }
 
+    crate::events::emit(
+        "session_delivered",
+        Some(&session_id),
+        json!({
+            "mode": "send",
+            "rank": requested_rank,
+            "chars": transcript.chars().count(),
+            "chunks": chunks.len(),
+        }),
+    );
+
     print_out(
         cli,
         format!(
@@ -1446,6 +1474,18 @@ pub(crate) fn cmd_send_images(cli: &Cli, args: &SendArgs) -> Result<i32, AppErro
             thread::sleep(Duration::from_millis(45));
         }
     }
+
+    crate::events::emit(
+        "session_delivered",
+        Some(&session_id),
+        json!({
+            "mode": "send-images",
+            "rank": requested_rank,
+            "chars": transcript.chars().count(),
+            "chunks": chunks.len(),
+            "images": image_count,
+        }),
+    );
 
     print_out(
         cli,
@@ -1588,7 +1628,10 @@ mod tests {
         assert_eq!(base64_encode(b"M"), "TQ==");
         assert_eq!(base64_encode(b"Ma"), "TWE=");
         assert_eq!(base64_encode(b"Man"), "TWFu");
-        assert_eq!(base64_encode(b"any carnal pleasure."), "YW55IGNhcm5hbCBwbGVhc3VyZS4=");
+        assert_eq!(
+            base64_encode(b"any carnal pleasure."),
+            "YW55IGNhcm5hbCBwbGVhc3VyZS4="
+        );
         // Binary bytes (PNG magic) round-trip to the expected padding.
         assert_eq!(base64_encode(&[0x89, 0x50, 0x4E, 0x47]), "iVBORw==");
     }

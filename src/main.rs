@@ -12,17 +12,22 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod bus;
 mod cli;
+mod daemon;
 mod error;
+mod events;
 mod history;
 mod models;
 mod paths;
 mod reporting;
 mod screenshots;
+mod servers;
 mod session_commands;
 mod setup;
 mod shot_modules;
 mod transcription;
+mod watch;
 
 use crate::cli::{
     Cli, Commands, HtmlArgs, LiveArgs, ScreenshotUseArgs, StartArgs, StopArgs, ToggleArgs,
@@ -39,6 +44,7 @@ use crate::paths::{
     parakeet_server_socket_file, perf_log_file, watcher_python_cache_file, web_server_pid_file,
 };
 use crate::reporting::{generate_html_for_session, generate_sessions_index_html};
+use crate::servers::cmd_restart;
 use crate::session_commands::{cmd_chunk, cmd_pause, cmd_shot, cmd_start, cmd_stop, cmd_unpause};
 use crate::setup::{cmd_doctor, cmd_setup};
 use crate::transcription::{
@@ -46,6 +52,7 @@ use crate::transcription::{
     resolve_parakeet_model, resolve_parakeet_script, resolve_python_bin, touch_web_server,
     web_server_base_url,
 };
+use crate::watch::cmd_watch;
 
 pub(crate) const SUPPORTED_IMAGE_EXTS: &[&str] =
     &["png", "jpg", "jpeg", "webp", "tif", "tiff", "heic", "heif"];
@@ -58,7 +65,7 @@ fn build_id() -> &'static str {
     RIFF_BUILD_ID
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
@@ -327,7 +334,7 @@ fn upsert_riffrc_export(key: &str, value: &str) -> Result<PathBuf, AppError> {
     Ok(path)
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, AppError> {
+pub(crate) fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, AppError> {
     let bytes = fs::read(path)
         .map_err(|e| app_error(1, format!("Failed to read {}: {e}", path.display())))?;
     serde_json::from_slice(&bytes)
@@ -366,13 +373,22 @@ fn append_jsonl(path: &Path, payload: &Value) -> Result<(), AppError> {
         .map_err(|e| app_error(1, format!("Failed to append {}: {e}", path.display())))
 }
 
+/// Append to a session's `events.jsonl` and mirror the same record onto the
+/// global bus. The session file keeps its historical flat shape; the bus copy
+/// gains the envelope fields.
+pub(crate) fn append_session_event(events_path: &Path, payload: &Value) -> Result<(), AppError> {
+    let result = append_jsonl(events_path, payload);
+    events::mirror_session_event(events_path, payload);
+    result
+}
+
 fn append_perf_event(payload: Value) {
     if let Err(e) = append_jsonl(&perf_log_file(), &payload) {
         eprintln!("[perf] failed to append perf log: {}", e);
     }
 }
 
-fn bool_env_enabled(name: &str, default: bool) -> bool {
+pub(crate) fn bool_env_enabled(name: &str, default: bool) -> bool {
     match env::var(name) {
         Ok(v) => !matches!(
             v.to_ascii_lowercase().as_str(),
@@ -431,7 +447,7 @@ fn monitor_clipboard_loop(args: &WatchClipboardArgs) -> Result<(), AppError> {
                 "text": current,
                 "audioSec": round3(audio_sec),
             });
-            append_jsonl(&events_path, &payload)?;
+            append_session_event(&events_path, &payload)?;
             last_seen = payload
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -521,19 +537,56 @@ fn parse_max_session_sec(raw: Option<&str>) -> Option<f64> {
     }
 }
 
+/// Recorded WAV bytes past which capture is considered real: comfortably more
+/// than any header-only file, about 128 ms of 16 kHz mono 16-bit audio.
+const MIC_CONFIRM_MIN_BYTES: u64 = 4096;
+
+/// How long after session start the watchdog keeps checking for first audio
+/// before giving up on a `mic_listening` confirmation.
+const MIC_CONFIRM_WINDOW_SEC: f64 = 10.0;
+
 fn max_duration_loop(args: &WatchMaxDurationArgs) -> Result<(), AppError> {
     let poll = Duration::from_millis(args.poll_ms.clamp(100, 5_000));
+    let mut awaiting_mic = args.audio_path.is_some() && args.events_path.is_some();
     loop {
         // The recorder dying (normal stop, fork, crash) is the unambiguous
         // signal that this watchdog's session is over.
         if !process_is_alive(args.ffmpeg_pid) {
             return Ok(());
         }
-        let remaining = args.max_sec - (unix_now() - args.started_at_epoch);
+        let elapsed = unix_now() - args.started_at_epoch;
+        if awaiting_mic {
+            if let (Some(audio_path), Some(events_path)) = (&args.audio_path, &args.events_path) {
+                let audio_bytes = fs::metadata(audio_path).map(|m| m.len()).unwrap_or(0);
+                if audio_bytes > MIC_CONFIRM_MIN_BYTES {
+                    awaiting_mic = false;
+                    let _ = append_session_event(
+                        events_path,
+                        &json!({
+                            "ts": now_iso(),
+                            "type": "mic_listening",
+                            "session_id": args.session_id,
+                            "confirm_ms": round3(elapsed * 1000.0),
+                            "audio_bytes": audio_bytes,
+                        }),
+                    );
+                }
+            }
+            if elapsed > MIC_CONFIRM_WINDOW_SEC {
+                awaiting_mic = false;
+            }
+        }
+        let remaining = args.max_sec - elapsed;
         if remaining <= 0.0 {
             break;
         }
-        thread::sleep(poll.min(Duration::from_secs_f64(remaining)));
+        // Tight cadence until first audio is confirmed, then the normal one.
+        let tick = if awaiting_mic {
+            Duration::from_millis(50)
+        } else {
+            poll
+        };
+        thread::sleep(tick.min(Duration::from_secs_f64(remaining)));
     }
 
     // Only ever stop the session we were spawned for.
@@ -544,7 +597,7 @@ fn max_duration_loop(args: &WatchMaxDurationArgs) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let _ = append_jsonl(
+    let _ = append_session_event(
         Path::new(&state.events_path),
         &json!({
             "ts": now_iso(),
@@ -589,6 +642,10 @@ pub(crate) fn spawn_max_duration_watcher(state: &SessionState, cli: &Cli) -> Opt
         .arg(ffmpeg_pid.to_string())
         .arg("--started-at-epoch")
         .arg(state.started_at_epoch.to_string())
+        .arg("--audio-path")
+        .arg(&state.audio_path)
+        .arg("--events-path")
+        .arg(&state.events_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -736,7 +793,7 @@ fn append_transcription_watcher_event(state: &SessionState, payload: Value) {
             base.insert(k.clone(), v.clone());
         }
     }
-    let _ = append_jsonl(Path::new(&state.events_path), &event);
+    let _ = append_session_event(Path::new(&state.events_path), &event);
 }
 
 pub(crate) fn spawn_transcription_watcher(state: &SessionState, cli: &Cli) -> Option<i32> {
@@ -1658,7 +1715,7 @@ fn unix_now() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn round3(v: f64) -> f64 {
+pub(crate) fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
 }
 
@@ -1814,6 +1871,15 @@ fn set_global_beep_enabled(cli: &Cli, enabled: bool) -> Result<i32, AppError> {
 
     let path = upsert_riffrc_export("RIFF_BEEP", value)?;
     env::set_var("RIFF_BEEP", value);
+    events::emit(
+        "config_changed",
+        None,
+        json!({
+            "key": "RIFF_BEEP",
+            "value": value,
+            "rc_file": path.display().to_string(),
+        }),
+    );
     let action = if enabled { "loud" } else { "silence" };
     print_out(
         cli,
@@ -2245,6 +2311,15 @@ fn cmd_html(cli: &Cli, args: &HtmlArgs) -> Result<i32, AppError> {
         );
     }
 
+    events::emit(
+        "report_opened",
+        Some(&session_id),
+        json!({
+            "target": opened_target,
+            "web_server_ready": server_ready,
+        }),
+    );
+
     if !cli.quiet {
         println!("Opening {}", opened_target);
     }
@@ -2333,7 +2408,12 @@ fn kill_server_from_pid_file(
         }
     }
 
-    if !cli.dry_run && pid_file.exists() {
+    // Keep the pid file when the process outlived our signals. Dropping it would
+    // strand a live server that no later `kill-server` could ever find, since
+    // the pid file is the only thing that command knows how to look at.
+    // `riff restart` scans the process table and can still clean it up.
+    let stranded = !cli.dry_run && process_is_alive(pid);
+    if !cli.dry_run && !stranded && pid_file.exists() {
         let _ = fs::remove_file(pid_file);
     }
 
@@ -2344,6 +2424,7 @@ fn kill_server_from_pid_file(
         "status": status,
         "signal": signal,
         "killed": killed,
+        "stranded": stranded,
         "error": error_msg,
     }));
     Ok(())
@@ -2355,8 +2436,22 @@ fn cmd_kill_server(cli: &Cli) -> Result<i32, AppError> {
     let mut report = Vec::new();
     kill_server_from_pid_file(cli, "web", &web_server_pid_file(), &mut report)?;
     kill_server_from_pid_file(cli, "parakeet", &parakeet_server_pid_file(), &mut report)?;
+    kill_server_from_pid_file(cli, "riffd", &paths::riffd_pid_file(), &mut report)?;
     if !cli.dry_run {
         let _ = fs::remove_file(parakeet_server_socket_file());
+        let _ = fs::remove_file(paths::riffd_socket_file());
+    }
+
+    for item in &report {
+        // `pid` here is the helper's, not this process's; rename it so the
+        // envelope does not shadow it on the bus.
+        let mut payload = item.clone();
+        if let Some(map) = payload.as_object_mut() {
+            if let Some(helper_pid) = map.remove("pid") {
+                map.insert("helper_pid".to_string(), helper_pid);
+            }
+        }
+        events::emit("server_killed", None, payload);
     }
 
     if !cli.quiet {
@@ -2491,6 +2586,16 @@ fn cmd_screenshot_use(cli: &Cli, args: &ScreenshotUseArgs) -> Result<i32, AppErr
     let _ = generate_html_for_session(&session_dir)?;
     let _ = generate_sessions_index_html()?;
 
+    events::emit(
+        "screenshot_variant_selected",
+        Some(&args.session_id),
+        json!({
+            "shot_id": args.shot_id,
+            "module": normalized_module,
+            "target_path": target_path.display().to_string(),
+        }),
+    );
+
     print_out(
         cli,
         format!(
@@ -2520,6 +2625,11 @@ fn cmd_screenshot_use(cli: &Cli, args: &ScreenshotUseArgs) -> Result<i32, AppErr
 
 fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
     let active = active_state_file().exists();
+    events::emit(
+        "toggle_resolved",
+        None,
+        json!({ "resolved_to": if active { "stop" } else { "start" } }),
+    );
     if active {
         let stop_args = StopArgs {
             no_stop_hooks: args.no_stop_hooks,
@@ -2644,6 +2754,16 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
         ));
     }
 
+    events::emit(
+        "session_forked",
+        Some(&new_state.session_id),
+        json!({
+            "old_session_id": old_state.session_id,
+            "new_session_id": new_state.session_id,
+            "split_gap_ms": round3(split_gap_ms),
+            "split_to_running_ms": round3(split_to_running_ms),
+        }),
+    );
     print_out(
         cli,
         format!(
@@ -2684,6 +2804,14 @@ fn cmd_toggle_pause(cli: &Cli) -> Result<i32, AppError> {
 }
 
 fn run(cli: &Cli) -> Result<i32, AppError> {
+    events::init(cli.command.event_name());
+    events::command_started(cli.command.event_args());
+    let result = dispatch(cli);
+    events::command_finished(&result);
+    result
+}
+
+fn dispatch(cli: &Cli) -> Result<i32, AppError> {
     match &cli.command {
         Commands::Start(args) => cmd_start(cli, args),
         Commands::Shot => cmd_shot(cli),
@@ -2691,6 +2819,7 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::Toggle(args) => cmd_toggle(cli, args),
         Commands::Fork => cmd_fork(cli),
         Commands::Live(args) => cmd_live(cli, args),
+        Commands::Watch(args) => cmd_watch(cli, args),
         Commands::Chunk => cmd_chunk(cli),
         Commands::Pause => cmd_pause(cli),
         Commands::Unpause => cmd_unpause(cli),
@@ -2713,6 +2842,9 @@ fn run(cli: &Cli) -> Result<i32, AppError> {
         Commands::WatchClipboard(args) => cmd_watch_clipboard(cli, args),
         Commands::WatchMaxDuration(args) => cmd_watch_max_duration(cli, args),
         Commands::KillServer => cmd_kill_server(cli),
+        Commands::Restart(args) => cmd_restart(cli, args),
+        Commands::Daemon(args) => daemon::cmd_daemon(cli, args),
+        Commands::Emit(args) => daemon::cmd_emit(cli, args),
     }
 }
 
