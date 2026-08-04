@@ -230,12 +230,59 @@ riff start
 Flags:
 - `--screenshot-dir <path>` override screenshot source dir
 - `--audio-device <selector>` ffmpeg avfoundation selector (default `auto`, prefers built-in Mac mic and avoids iPhone/Continuity)
+- `--engine <name>` transcription engine: `parakeet` (default) or `elevenlabs`
 
 You can also set a fixed selector:
 
 ```bash
 export RIFF_AUDIO_DEVICE=":1"
 ```
+
+#### Transcription engines
+
+The engine decides what happens during the session and what `riff stop` has to
+wait for. It is recorded in the session state at start, so `stop`, `chunk`, and
+`pause` all use the right one without you passing the flag again.
+
+**`parakeet`** (default) — fully local, works offline. A watcher transcribes
+completed segments while you talk, but the tail past the cursor is only
+transcribed at stop, so `stop` costs inference time that grows with how much
+audio is left unflushed.
+
+**`elevenlabs`** — streams to Scribe v2 Realtime over a WebSocket while you
+record, so the transcript is essentially finished when you stop. `stop` only
+waits for a final commit (~150ms) instead of running inference over the tail.
+Requires network and an API key; audio leaves your machine.
+
+```bash
+export RIFF_ELEVENLABS_API_KEY="sk_..."
+riff start --engine elevenlabs
+
+# or make it the default for every session
+export RIFF_ENGINE=elevenlabs
+```
+
+Install the streaming dependency once:
+
+```bash
+pip install -r scripts/elevenlabs-requirements.txt
+```
+
+If the stream fails (dropped socket, exhausted quota, missing key), `stop`
+reports `status: "error"` with whatever text was committed before the failure.
+It deliberately does **not** fall back to a local transcribe — a silent fallback
+would hand you a slow session while you believed you were on the fast path.
+Missing credentials are caught at `start`, before anything is recorded.
+
+Optional tuning:
+
+| Variable | Purpose |
+| --- | --- |
+| `RIFF_ELEVENLABS_API_KEY` / `ELEVENLABS_API_KEY` | credentials (required) |
+| `RIFF_ELEVENLABS_MODEL` | model id (default `scribe_v2_realtime`) |
+| `RIFF_ELEVENLABS_LANGUAGE` | force a language instead of auto-detect |
+| `RIFF_ELEVENLABS_FINALIZE_TIMEOUT_SEC` | how long `stop` waits for the final commit (default `8`) |
+| `RIFF_ELEVENLABS_WS_URL` | override the endpoint (e.g. an EU/US residency host) |
 
 #### Auto-stop safety net
 

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 mod bus;
 mod cli;
 mod daemon;
+mod engine;
 mod error;
 mod events;
 mod history;
@@ -2646,6 +2647,7 @@ fn cmd_toggle(cli: &Cli, args: &ToggleArgs) -> Result<i32, AppError> {
         let start_args = StartArgs {
             screenshot_dir: args.screenshot_dir.clone(),
             audio_device: args.audio_device.clone(),
+            engine: args.engine.clone(),
         };
         cmd_start(cli, &start_args)
     }
@@ -2709,6 +2711,8 @@ fn cmd_fork(cli: &Cli) -> Result<i32, AppError> {
     let start_args = StartArgs {
         screenshot_dir: Some(PathBuf::from(old_state.screenshot_source_dir.clone())),
         audio_device: old_state.audio_device.clone(),
+        // A fork continues the same session's intent, engine included.
+        engine: Some(crate::engine::normalize_engine_id(&old_state.engine).to_string()),
     };
     let internal_cli = Cli {
         verbose: cli.verbose,
