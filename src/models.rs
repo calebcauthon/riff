@@ -13,6 +13,12 @@ pub struct SessionState {
     pub started_at_epoch: f64,
     pub screenshot_source_dir: String,
     pub audio_device: String,
+    /// Transcription engine chosen at `riff start`.
+    ///
+    /// Recorded here so later commands never need the flag re-passed. Empty on
+    /// sessions written before engines existed, which normalizes to parakeet.
+    #[serde(default)]
+    pub engine: String,
     #[serde(default)]
     pub clipboard_watcher_pid: Option<i32>,
     #[serde(default)]

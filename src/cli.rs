@@ -109,6 +109,11 @@ pub struct StartArgs {
 
     #[arg(long, default_value = "auto")]
     pub audio_device: String,
+
+    /// Transcription engine: "parakeet" (local, default) or "elevenlabs"
+    /// (streaming, needs RIFF_ELEVENLABS_API_KEY). Falls back to RIFF_ENGINE.
+    #[arg(long)]
+    pub engine: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -151,6 +156,10 @@ pub struct ToggleArgs {
     /// Used when idle (start path): ffmpeg avfoundation selector
     #[arg(long, default_value = "auto")]
     pub audio_device: String,
+
+    /// Used when idle (start path): transcription engine ("parakeet" or "elevenlabs")
+    #[arg(long)]
+    pub engine: Option<String>,
 
     /// Used when active (stop path): custom transcription command template
     #[arg(long)]
@@ -472,6 +481,7 @@ impl Commands {
             Commands::Start(a) => json!({
                 "audio_device": a.audio_device,
                 "screenshot_dir_override": a.screenshot_dir.is_some(),
+                "engine": a.engine,
             }),
             Commands::Stop(a) => json!({
                 "no_hooks": a.no_hooks,

@@ -1,0 +1,4 @@
+# Dependencies for the ElevenLabs streaming engine (`riff start --engine elevenlabs`).
+# Deliberately tiny: the streaming path does no local inference, so it needs a
+# WebSocket client and nothing else.
+websockets==15.0.1

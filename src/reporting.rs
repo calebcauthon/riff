@@ -2076,6 +2076,7 @@ mod tests {
             started_at_epoch: 0.0,
             screenshot_source_dir: "/tmp/screens".to_string(),
             audio_device: "Built-in Microphone".to_string(),
+            engine: "parakeet".to_string(),
             clipboard_watcher_pid: None,
             transcription_watcher_pid: None,
             max_duration_watcher_pid: None,

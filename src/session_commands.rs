@@ -1,4 +1,7 @@
 use crate::cli::{Cli, StartArgs, StopArgs};
+use crate::engine::{
+    audio_elapsed_sec, engine_for, resolve_engine_id, StopCtx,
+};
 use crate::error::{app_error, AppError};
 use crate::history::read_jsonl_values;
 use crate::models::{ClipboardMeta, SessionState, ShotMeta};
@@ -12,9 +15,9 @@ use crate::reporting::{
 };
 use crate::screenshots::{detect_screenshot_dir, file_mtime_epoch, move_session_screenshots};
 use crate::transcription::{
-    ensure_parakeet_server, ensure_web_server, parakeet_server_base_url, parakeet_server_enabled,
-    resolve_parakeet_model, resolve_parakeet_script, resolve_python_bin, run_output_hooks,
-    run_post_transcribe_command, run_transcription, transcribe_via_parakeet_server,
+    ensure_parakeet_server, ensure_web_server, parakeet_server_enabled, resolve_parakeet_model,
+    resolve_parakeet_script, resolve_python_bin, run_output_hooks, run_post_transcribe_command,
+    run_transcription,
 };
 use crate::{
     append_perf_event, append_session_event, build_record_cmd, capture_frontmost_app_meta,
@@ -24,11 +27,10 @@ use crate::{
     recorder_error_looks_like_invalid_audio_device, resolve_audio_device,
     resolve_audio_device_uncached, resume_recorder_capture, round3, save_active_state,
     session_stamp, spawn_clipboard_watcher, spawn_max_duration_watcher, spawn_recorder,
-    spawn_transcription_watcher, stop_clipboard_watcher, stop_max_duration_watcher, stop_recorder,
-    stop_transcription_watcher, unix_now, wait_for_transcription_watcher, write_json,
+    stop_clipboard_watcher, stop_max_duration_watcher, stop_recorder, stop_transcription_watcher,
+    unix_now, write_json,
 };
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -161,414 +163,13 @@ fn hook_source(cli_value: Option<&str>, env_key: &str, disabled: bool) -> &'stat
     }
 }
 
-fn load_chunked_transcript(session_dir: &Path, events_path: &Path) -> (String, Value) {
-    let transcript_path = session_dir.join("transcript.txt");
-    let transcript_raw = fs::read_to_string(&transcript_path)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-
-    let events = read_jsonl_values(events_path);
-    let mut chunk_count = 0usize;
-    let mut chunk_seconds = 0.0f64;
-    let mut chunk_mode = "manual";
-    let mut stopping_seen = false;
-    let mut stop_reason = String::new();
-    let mut status_counts: HashMap<String, usize> = HashMap::new();
-
-    for e in &events {
-        let et = e.get("type").and_then(|v| v.as_str()).unwrap_or_default();
-        if et == "session_stopping" {
-            stopping_seen = true;
-        }
-        if et != "transcript_chunk" {
-            continue;
-        }
-        chunk_count = chunk_count.saturating_add(1);
-        let start_sec = e.get("start_sec").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let end_sec = e
-            .get("end_sec")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(start_sec);
-        chunk_seconds += (end_sec - start_sec).max(0.0);
-
-        if let Some(mode) = e.get("mode").and_then(|v| v.as_str()) {
-            chunk_mode = mode;
-        }
-        if let Some(reason) = e.get("reason").and_then(|v| v.as_str()) {
-            stop_reason = reason.to_string();
-        }
-        if let Some(status) = e.get("status").and_then(|v| v.as_str()) {
-            *status_counts.entry(status.to_string()).or_insert(0) += 1;
-        }
-    }
-
-    let ok_chunks = status_counts.get("ok").copied().unwrap_or(0);
-    let skipped_chunks = status_counts.get("skipped").copied().unwrap_or(0);
-    let errored_chunks = status_counts.get("error").copied().unwrap_or(0);
-    let status = if transcript_raw.is_empty() && chunk_count == 0 {
-        "empty"
-    } else if errored_chunks > 0 && ok_chunks == 0 {
-        "error"
-    } else {
-        "ok"
-    };
-
-    (
-        transcript_raw,
-        json!({
-            "status": status,
-            "method": "manual_chunked",
-            "mode": chunk_mode,
-            "chunks": chunk_count,
-            "chunks_ok": ok_chunks,
-            "chunks_skipped": skipped_chunks,
-            "chunks_error": errored_chunks,
-            "chunk_audio_sec": round3(chunk_seconds),
-            "stopping_seen": stopping_seen,
-            "stop_reason": if stop_reason.is_empty() { Value::Null } else { Value::String(stop_reason) }
-        }),
-    )
-}
-
-fn audio_elapsed_sec(state: &SessionState) -> f64 {
-    get_audio_duration_sec(Path::new(&state.audio_path))
-        .unwrap_or_else(|| (unix_now() - state.started_at_epoch).max(0.0))
-}
-
-fn next_transcript_chunk_id(events: &[Value]) -> usize {
-    events
-        .iter()
-        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("transcript_chunk"))
-        .filter_map(|e| e.get("id").and_then(|v| v.as_u64()))
-        .max()
-        .unwrap_or(0) as usize
-        + 1
-}
-
-fn merge_manual_chunk_text(existing: &str, chunk: &str) -> String {
-    let left = existing.trim();
-    let right = chunk.trim();
-    if right.is_empty() {
-        return left.to_string();
-    }
-    if left.is_empty() {
-        return right.to_string();
-    }
-    format!("{left}\n\n{right}")
-}
-
-fn extract_audio_segment(
-    source_audio: &Path,
-    start_sec: f64,
-    end_sec: f64,
-    target_audio: &Path,
-) -> Result<(), AppError> {
-    if end_sec <= start_sec {
-        return Err(app_error(
-            1,
-            "Invalid chunk boundary: end <= start for audio segment extract.",
-        ));
-    }
-    let duration = (end_sec - start_sec).max(0.0);
-    let output = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .arg("-ss")
-        .arg(format!("{start_sec:.3}"))
-        .arg("-t")
-        .arg(format!("{duration:.3}"))
-        .arg("-i")
-        .arg(source_audio)
-        .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
-        .arg(target_audio)
-        .output()
-        .map_err(|e| app_error(1, format!("Failed to run ffmpeg for chunk extract: {e}")))?;
-    if !output.status.success() || !target_audio.exists() {
-        return Err(app_error(
-            1,
-            format!(
-                "ffmpeg chunk extract failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn transcribe_chunk_audio(chunk_audio: &Path, chunk_out_txt: &Path, cli: &Cli) -> (String, Value) {
-    let script = resolve_parakeet_script(None);
-    let Some(script_path) = script else {
-        return (
-            String::new(),
-            json!({
-                "status": "skipped",
-                "reason": "No transcription configured. Set RIFF_PARAKEET_SCRIPT or use --parakeet-script."
-            }),
-        );
-    };
-
-    let python_bin = resolve_python_bin(None);
-    let model = resolve_parakeet_model(None);
-    let cmd_for_log = format!(
-        "{} {} --audio {} --out-txt {} --model {}",
-        python_bin,
-        script_path.display(),
-        chunk_audio.display(),
-        chunk_out_txt.display(),
-        model
-    );
-    print_verbose(
-        cli,
-        format!("Running chunk transcription (one-shot): {cmd_for_log}"),
-    );
-
-    let mut server_error: Option<Value> = None;
-    if parakeet_server_enabled() && command_exists("curl") {
-        let base_url = parakeet_server_base_url();
-        let warmup =
-            ensure_parakeet_server(&python_bin, &script_path, &model, cli, true, None, "chunk");
-        if let Some(identity) = warmup.identity.as_ref() {
-            match transcribe_via_parakeet_server(
-                &base_url,
-                chunk_audio,
-                chunk_out_txt,
-                &model,
-                &identity,
-            ) {
-                Ok(result) => return result,
-                Err(error) => server_error = Some(error),
-            }
-        }
-    }
-
-    let output = Command::new(&python_bin)
-        .arg(&script_path)
-        .arg("--audio")
-        .arg(chunk_audio)
-        .arg("--out-txt")
-        .arg(chunk_out_txt)
-        .arg("--model")
-        .arg(&model)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let txt = if chunk_out_txt.exists() {
-                fs::read_to_string(chunk_out_txt).unwrap_or_default()
-            } else {
-                String::from_utf8_lossy(&out.stdout).to_string()
-            };
-            let mut meta = json!({
-                "status": "ok",
-                "method": "parakeet_python",
-                "model": model,
-                "script": script_path.display().to_string(),
-            });
-            if let Some(err) = server_error {
-                if let Some(obj) = meta.as_object_mut() {
-                    obj.insert("server_fallback".to_string(), err);
-                }
-            }
-            (txt.trim().to_string(), meta)
-        }
-        Ok(out) => {
-            let mut meta = json!({
-                "status": "error",
-                "method": "parakeet_python",
-                "returncode": out.status.code(),
-                "stderr": String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                "stdout": String::from_utf8_lossy(&out.stdout).trim().to_string(),
-            });
-            if let Some(err) = server_error {
-                if let Some(obj) = meta.as_object_mut() {
-                    obj.insert("server_fallback".to_string(), err);
-                }
-            }
-            (String::new(), meta)
-        }
-        Err(e) => {
-            let mut meta = json!({
-                "status": "error",
-                "method": "parakeet_python",
-                "reason": format!("Failed to run python transcription: {e}"),
-            });
-            if let Some(err) = server_error {
-                if let Some(obj) = meta.as_object_mut() {
-                    obj.insert("server_fallback".to_string(), err);
-                }
-            }
-            (String::new(), meta)
-        }
-    }
-}
-
-fn process_manual_chunk(
-    state: &mut SessionState,
-    cli: &Cli,
-    reason: &str,
-    forced_end_sec: Option<f64>,
-) -> Result<Value, AppError> {
-    let session_dir = PathBuf::from(&state.session_dir);
-    let events_path = PathBuf::from(&state.events_path);
-    let source_audio = PathBuf::from(&state.audio_path);
-    if !source_audio.exists() {
-        return Ok(json!({
-            "status": "skipped",
-            "reason": format!("Audio file not found: {}", source_audio.display()),
-        }));
-    }
-    if !command_exists("ffmpeg") {
-        return Ok(json!({
-            "status": "error",
-            "reason": "ffmpeg is required for chunking but was not found in PATH.",
-        }));
-    }
-
-    let events = read_jsonl_values(&events_path);
-    let chunk_id = next_transcript_chunk_id(&events);
-    let start_sec = state.transcription_cursor_sec.max(0.0);
-    let effective_end_sec = forced_end_sec.unwrap_or_else(|| audio_elapsed_sec(state));
-
-    if effective_end_sec <= start_sec + 0.05 {
-        append_session_event(
-            &events_path,
-            &json!({
-                "ts": now_iso(),
-                "type": "transcript_chunk",
-                "id": chunk_id,
-                "mode": "manual",
-                "status": "skipped",
-                "reason": "no_new_audio",
-                "requested_reason": reason,
-                "start_sec": round3(start_sec),
-                "end_sec": round3(effective_end_sec),
-            }),
-        )?;
-        return Ok(json!({
-            "status": "skipped",
-            "reason": "no_new_audio",
-            "start_sec": round3(start_sec),
-            "end_sec": round3(effective_end_sec),
-            "chunk_id": chunk_id
-        }));
-    }
-
-    let scratch_audio = session_dir.join(".chunk-manual.wav");
-    let scratch_txt = session_dir.join(".chunk-manual.txt");
-    let _ = fs::remove_file(&scratch_audio);
-    let _ = fs::remove_file(&scratch_txt);
-
-    if let Err(e) =
-        extract_audio_segment(&source_audio, start_sec, effective_end_sec, &scratch_audio)
-    {
-        append_session_event(
-            &events_path,
-            &json!({
-                "ts": now_iso(),
-                "type": "transcript_chunk",
-                "id": chunk_id,
-                "mode": "manual",
-                "status": "error",
-                "reason": "segment_extract_failed",
-                "requested_reason": reason,
-                "start_sec": round3(start_sec),
-                "end_sec": round3(effective_end_sec),
-                "error": e.message,
-            }),
-        )?;
-        return Ok(json!({
-            "status": "error",
-            "reason": "segment_extract_failed",
-            "start_sec": round3(start_sec),
-            "end_sec": round3(effective_end_sec),
-            "chunk_id": chunk_id
-        }));
-    }
-
-    let (chunk_text, transcribe_meta) = transcribe_chunk_audio(&scratch_audio, &scratch_txt, cli);
-    let _ = fs::remove_file(&scratch_audio);
-    let _ = fs::remove_file(&scratch_txt);
-    let transcribe_status = transcribe_meta
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("error");
-
-    if transcribe_status != "ok" {
-        append_session_event(
-            &events_path,
-            &json!({
-                "ts": now_iso(),
-                "type": "transcript_chunk",
-                "id": chunk_id,
-                "mode": "manual",
-                "status": "error",
-                "reason": "transcribe_failed",
-                "requested_reason": reason,
-                "start_sec": round3(start_sec),
-                "end_sec": round3(effective_end_sec),
-                "transcription": transcribe_meta,
-            }),
-        )?;
-        return Ok(json!({
-            "status": "error",
-            "reason": "transcribe_failed",
-            "start_sec": round3(start_sec),
-            "end_sec": round3(effective_end_sec),
-            "chunk_id": chunk_id,
-            "transcription": transcribe_meta
-        }));
-    }
-
-    let transcript_path = session_dir.join("transcript.txt");
-    let trimmed = chunk_text.trim().to_string();
-    let final_status = if trimmed.is_empty() { "skipped" } else { "ok" };
-    if !trimmed.is_empty() {
-        let existing = fs::read_to_string(&transcript_path).unwrap_or_default();
-        let merged = merge_manual_chunk_text(&existing, &trimmed);
-        fs::write(&transcript_path, format!("{merged}\n")).map_err(|e| {
-            app_error(
-                1,
-                format!(
-                    "Failed to write merged transcript {}: {e}",
-                    transcript_path.display()
-                ),
-            )
-        })?;
-    }
-    state.transcription_cursor_sec = effective_end_sec.max(state.transcription_cursor_sec);
-
-    append_session_event(
-        &events_path,
-        &json!({
-            "ts": now_iso(),
-            "type": "transcript_chunk",
-            "id": chunk_id,
-            "mode": "manual",
-            "status": final_status,
-            "reason": if final_status == "ok" { "manual_chunk" } else { "empty_transcript" },
-            "requested_reason": reason,
-            "start_sec": round3(start_sec),
-            "end_sec": round3(effective_end_sec),
-            "chars": trimmed.len(),
-            "words": trimmed.split_whitespace().count(),
-            "transcription": transcribe_meta,
-        }),
-    )?;
-
-    Ok(json!({
-        "status": final_status,
-        "reason": reason,
-        "start_sec": round3(start_sec),
-        "end_sec": round3(effective_end_sec),
-        "chunk_id": chunk_id,
-        "chars": trimmed.len(),
-        "words": trimmed.split_whitespace().count(),
-        "transcription": transcribe_meta
-    }))
-}
-
 pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
     ensure_dirs()?;
+    // Resolve before any side effects so an unknown engine name fails the
+    // command instead of leaving a half-started session behind.
+    let engine_id = resolve_engine_id(args.engine.as_deref())?;
+    let engine = crate::engine::engine_by_id(&engine_id);
+    engine.preflight(cli)?;
     let perf_total = Instant::now();
     let mut stale_state_cleanup_ms = 0.0;
     let create_session_dir_ms: f64;
@@ -760,6 +361,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         started_at_epoch: started_epoch,
         screenshot_source_dir: screenshot_dir.display().to_string(),
         audio_device: resolved_audio_device.clone(),
+        engine: engine_id.clone(),
         clipboard_watcher_pid: None,
         transcription_watcher_pid: None,
         max_duration_watcher_pid: None,
@@ -792,7 +394,19 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
 
     let mut transcription_watcher_spawned = false;
     let t_transcription_watcher_spawn = Instant::now();
-    transcription_watcher_spawn_ms = if let Some(pid) = spawn_transcription_watcher(&state, cli) {
+    // Preflight should have caught misconfiguration already, but a spawn can
+    // still fail for reasons we cannot predict. Do not leave a recorder running
+    // for a session that is about to error out.
+    let engine_started = engine.on_start(&state, cli).inspect_err(|_| {
+        if let Some(pid) = state.ffmpeg_pid {
+            let _ = stop_recorder(pid, cli);
+        }
+        if let Some(pid) = state.clipboard_watcher_pid {
+            stop_clipboard_watcher(pid, cli);
+        }
+        let _ = clear_active_state();
+    })?;
+    transcription_watcher_spawn_ms = if let Some(pid) = engine_started {
         let ms = elapsed_ms(t_transcription_watcher_spawn);
         state.transcription_watcher_pid = Some(pid);
         transcription_watcher_spawned = true;
@@ -831,7 +445,9 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
         .ok()
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
-    if !custom_transcribe_enabled && parakeet_server_enabled() {
+    // Warming the local inference server is only useful to the engine that
+    // uses it; a streaming session should not pay for a model load.
+    if engine.id() == "parakeet" && !custom_transcribe_enabled && parakeet_server_enabled() {
         if let Some(script_path) = resolve_parakeet_script(None) {
             let t_parakeet_server_warmup = Instant::now();
             let python_bin = resolve_python_bin(None);
@@ -917,6 +533,7 @@ pub(crate) fn cmd_start(cli: &Cli, args: &StartArgs) -> Result<i32, AppError> {
             "screenshot_source_dir": screenshot_dir,
             "audio_device": resolved_audio_device,
             "audio_device_retry": audio_device_retry,
+            "engine": engine_id,
             "ffmpeg_pid": ffmpeg_pid,
             "transcription_watcher_pid": state.transcription_watcher_pid,
         "max_duration_watcher_pid": state.max_duration_watcher_pid,
@@ -1140,7 +757,8 @@ pub(crate) fn cmd_chunk(cli: &Cli) -> Result<i32, AppError> {
         return Ok(0);
     }
 
-    let result = process_manual_chunk(&mut state, cli, "manual", None)?;
+    let engine = engine_for(&state);
+    let result = engine.on_chunk(&mut state, cli, "manual", None)?;
     save_active_state(&state)?;
 
     let status = result
@@ -1237,7 +855,8 @@ pub(crate) fn cmd_pause(cli: &Cli) -> Result<i32, AppError> {
             "end_sec": round3(pause_at_sec)
         })
     } else {
-        process_manual_chunk(&mut state, cli, "pause_flush", Some(pause_at_sec))?
+        let engine = engine_for(&state);
+        engine.on_chunk(&mut state, cli, "pause_flush", Some(pause_at_sec))?
     };
 
     state.transcription_paused = true;
@@ -1411,12 +1030,13 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let mut write_last_session_ms = 0.0;
     let mut generate_index_ms = 0.0;
     let mut clear_state_ms = 0.0;
-    let mut transcription_wait_ms = 0.0;
-    let mut stop_flush_ms = 0.0;
+    let transcription_wait_ms;
+    let stop_flush_ms;
     let mut stop_clipboard_watcher_ms = 0.0;
     let mut append_stopping_event_ms = 0.0;
     let mut resume_before_stop_ms = 0.0;
-    let mut transcription_watcher_stop_ms = 0.0;
+    let transcription_watcher_stop_ms;
+    let transcription_forced_stop;
     let source_dir_check_ms: f64;
     let load_prior_events_ms: f64;
     let load_existing_shots_ms: f64;
@@ -1428,9 +1048,10 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let render_ms: f64;
     let mut write_note_md_ms = 0.0;
     let mut write_note_html_file_ms = 0.0;
-    let mut transcription_forced_stop = false;
-    let mut stop_flush_meta = Value::Null;
-    let mut use_chunked_transcript = false;
+    // Filled by the engine's stop hook; `None` means the custom-transcribe
+    // override ran instead, or this was a dry run.
+    let mut engine_stop_result: Option<(String, Value)> = None;
+    let mut engine_stop_ms = 0.0;
     let stop_hooks_disabled = args.no_stop_hooks;
     let custom_transcribe_source = hook_source(
         args.transcribe_cmd.as_deref(),
@@ -1514,63 +1135,21 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
         }
         stop_recorder_ms = elapsed_ms(t_stop_recorder);
 
-        if let Some(pid) = state.transcription_watcher_pid {
-            let t_transcription_watcher_stop = Instant::now();
-            print_verbose(
-                cli,
-                format!("Waiting up to 12s for transcription watcher pid={pid} to finish."),
-            );
-            let (finished, waited_ms) =
-                wait_for_transcription_watcher(pid, Duration::from_secs(12), cli);
-            transcription_wait_ms = waited_ms;
-            if !finished {
-                transcription_forced_stop = true;
-                print_verbose(
-                    cli,
-                    format!(
-                        "Transcription watcher pid={pid} did not finish in time; forcing stop."
-                    ),
-                );
-                stop_transcription_watcher(pid, cli);
-            }
-            transcription_watcher_stop_ms = elapsed_ms(t_transcription_watcher_stop);
-        }
-
+        // The engine owns everything from here to the finished transcript:
+        // draining its sidecar, flushing the tail, and assembling the result.
+        // What that costs is the whole difference between the backends.
         if !use_custom_transcribe {
-            let should_flush_manual_chunk = state.transcription_watcher_pid.is_some()
-                || state.transcription_cursor_sec > 0.05
-                || state.transcription_paused;
-            if should_flush_manual_chunk {
-                use_chunked_transcript = true;
-                print_verbose(
-                    cli,
-                    format!(
-                        "Stop transcription strategy: chunked_flush (watcher_pid={:?} cursor_sec={:.3} paused={})",
-                        state.transcription_watcher_pid,
-                        state.transcription_cursor_sec,
-                        state.transcription_paused
-                    ),
-                );
-                let t_stop_flush = Instant::now();
-                stop_flush_meta = match process_manual_chunk(&mut state, cli, "stop_flush", None) {
-                    Ok(meta) => meta,
-                    Err(e) => json!({
-                        "status": "error",
-                        "reason": e.message,
-                    }),
-                };
-                stop_flush_ms = elapsed_ms(t_stop_flush);
-                print_verbose(cli, format!("Stop flush result: {}", stop_flush_meta));
-            } else {
-                print_verbose(cli, "Stop transcription strategy: full_transcribe_on_stop");
-                stop_flush_meta = json!({
-                    "status": "skipped",
-                    "reason": "full_transcribe_on_stop",
-                });
-            }
+            let t_engine_stop = Instant::now();
+            let engine = engine_for(&state);
+            let ctx = StopCtx {
+                stop_args: &effective_stop_args,
+            };
+            engine_stop_result = Some(engine.on_stop(&mut state, cli, &ctx));
+            engine_stop_ms = elapsed_ms(t_engine_stop);
+        } else {
+            state.transcription_paused = false;
+            state.transcription_pause_started_sec = None;
         }
-        state.transcription_paused = false;
-        state.transcription_pause_started_sec = None;
     }
 
     let source_dir = PathBuf::from(&state.screenshot_source_dir);
@@ -1611,27 +1190,29 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     let move_screenshots_ms = elapsed_ms(t_move_screens);
 
     let t_transcribe = Instant::now();
-    let (transcript_raw, mut transcription_meta) = if use_custom_transcribe {
-        run_transcription(&state, &session_dir, &effective_stop_args, cli)
-    } else if use_chunked_transcript {
-        load_chunked_transcript(&session_dir, &events_path)
-    } else {
-        run_transcription(&state, &session_dir, &effective_stop_args, cli)
+    // `RIFF_TRANSCRIBE_CMD` is a user override that replaces the pipeline
+    // wholesale, so it short-circuits engine dispatch rather than being one.
+    let (transcript_raw, mut transcription_meta) = match engine_stop_result.take() {
+        Some(result) => result,
+        None => run_transcription(&state, &session_dir, &effective_stop_args, cli),
     };
-    if !use_custom_transcribe && use_chunked_transcript {
-        if let Some(obj) = transcription_meta.as_object_mut() {
-            obj.insert(
-                "forced_watcher_stop".to_string(),
-                json!(transcription_forced_stop),
-            );
-            obj.insert(
-                "watcher_wait_ms".to_string(),
-                json!(round3(transcription_wait_ms)),
-            );
-            obj.insert("stop_flush".to_string(), stop_flush_meta.clone());
-        }
-    }
-    let transcribe_ms = elapsed_ms(t_transcribe);
+    let transcribe_ms = elapsed_ms(t_transcribe) + engine_stop_ms;
+
+    // Engines report their own internal timings; surface them under the
+    // existing stop-perf keys so the output schema stays stable.
+    let meta_f64 = |key: &str| {
+        transcription_meta
+            .get(key)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+    };
+    transcription_wait_ms = meta_f64("watcher_wait_ms");
+    stop_flush_ms = meta_f64("stop_flush_ms");
+    transcription_watcher_stop_ms = transcription_wait_ms;
+    transcription_forced_stop = transcription_meta
+        .get("forced_watcher_stop")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let transcription_status = transcription_meta
         .get("status")
         .and_then(|v| v.as_str())
@@ -2043,6 +1624,11 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
                 "collect_clipboard_events_ms": round3(collect_clipboard_events_ms),
                 "move_screenshots_ms": round3(move_screenshots_ms),
                 "transcribe_ms": round3(transcribe_ms),
+                // Hook timings belong here too: they are frequently the largest
+                // slice of stop, and omitting them makes stop_ms unexplainable
+                // from its own phase breakdown.
+                "post_transcribe_ms": round3(post_transcribe_ms),
+                "output_hooks_ms": round3(output_hooks_ms),
                 "audio_duration_ms": round3(audio_duration_ms),
                 "render_ms": round3(render_ms),
                 "build_note_bundle_ms": round3(build_note_bundle_ms),
@@ -2065,21 +1651,4 @@ pub(crate) fn cmd_stop(cli: &Cli, args: &StopArgs) -> Result<i32, AppError> {
     );
 
     Ok(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::merge_manual_chunk_text;
-
-    #[test]
-    fn merge_manual_chunk_text_uses_double_newline_separator() {
-        let merged = merge_manual_chunk_text("first chunk", "second chunk");
-        assert_eq!(merged, "first chunk\n\nsecond chunk");
-    }
-
-    #[test]
-    fn merge_manual_chunk_text_trims_outer_whitespace() {
-        let merged = merge_manual_chunk_text("  first  ", "  second  ");
-        assert_eq!(merged, "first\n\nsecond");
-    }
 }
