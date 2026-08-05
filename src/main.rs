@@ -1558,6 +1558,12 @@ fn build_record_cmd(audio_path: &Path, audio_device: &str) -> Vec<String> {
         "16000".to_string(),
         "-c:a".to_string(),
         "pcm_s16le".to_string(),
+        // Write through instead of accumulating in the muxer buffer. Anything
+        // tailing the growing WAV — the Parakeet watcher, the ElevenLabs
+        // streamer — otherwise sees audio arrive in large sporadic blocks, and
+        // whatever is still buffered at stop lands on the critical path.
+        "-flush_packets".to_string(),
+        "1".to_string(),
         audio_path.display().to_string(),
     ]
 }
