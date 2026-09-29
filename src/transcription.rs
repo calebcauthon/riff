@@ -67,13 +67,26 @@ fn executable_ancestor_roots() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
 
     if let Ok(exe) = env::current_exe() {
-        let mut parent = exe.parent();
-        for _ in 0..7 {
-            let Some(p) = parent else {
-                break;
-            };
-            roots.push(p.to_path_buf());
-            parent = p.parent();
+        // Walk ancestors of both the invoked path and the symlink-resolved
+        // real path. Homebrew runs the binary through `/opt/homebrew/bin/riff`
+        // -> `../Cellar/riff/<ver>/bin/riff`, and only the resolved path has
+        // `libexec/scripts` beside it — without this, every fresh brew
+        // install fails to find its Python helpers.
+        let mut exes = vec![exe.clone()];
+        if let Ok(real) = fs::canonicalize(&exe) {
+            if real != exe {
+                exes.push(real);
+            }
+        }
+        for exe in exes {
+            let mut parent = exe.parent();
+            for _ in 0..7 {
+                let Some(p) = parent else {
+                    break;
+                };
+                roots.push(p.to_path_buf());
+                parent = p.parent();
+            }
         }
     }
 
