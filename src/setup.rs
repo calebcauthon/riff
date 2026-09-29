@@ -249,6 +249,37 @@ pub(crate) fn cmd_doctor(cli: &Cli, args: &DoctorArgs) -> Result<i32, AppError> 
             .unwrap_or_else(|| "not found".to_string()),
     ));
     check_path("parakeet_script", default_parakeet_script(), &mut rows);
+    // The script the runtime will actually use honors RIFF_PARAKEET_SCRIPT,
+    // which can point at a stale copy from an old checkout. Validate that
+    // resolved script speaks the server protocol so doctor catches it here
+    // instead of stop failing with an opaque "server_unavailable".
+    {
+        let resolved = crate::transcription::resolve_parakeet_script(None);
+        match resolved {
+            Some(path) => {
+                let supports_server = fs::read_to_string(&path)
+                    .map(|s| s.contains("--unix-socket") && s.contains("--startup-instance-id"))
+                    .unwrap_or(false);
+                rows.push((
+                    "parakeet_script_resolved".to_string(),
+                    supports_server,
+                    if supports_server {
+                        path.display().to_string()
+                    } else {
+                        format!(
+                            "{} (stale: lacks server protocol; unset RIFF_PARAKEET_SCRIPT)",
+                            path.display()
+                        )
+                    },
+                ));
+            }
+            None => rows.push((
+                "parakeet_script_resolved".to_string(),
+                false,
+                "not found".to_string(),
+            )),
+        }
+    }
     check_path("web_server_script", default_web_server_script(), &mut rows);
     check_path(
         "sound_picker_script",

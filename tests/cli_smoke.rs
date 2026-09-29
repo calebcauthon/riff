@@ -578,7 +578,13 @@ fn start_with_healthy_parakeet_reports_no_cold_start() {
     fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
     let marker = td.path().join("python-invoked");
     let parakeet_script = td.path().join("fake_parakeet.py");
-    fs::write(&parakeet_script, "# fake\n").expect("write fake parakeet script");
+    // The spawn guard requires a script that speaks the server protocol;
+    // the fake advertises the flags without implementing anything.
+    fs::write(
+        &parakeet_script,
+        "# fake: supports --unix-socket --startup-instance-id\n",
+    )
+    .expect("write fake parakeet script");
     let canonical_root = fs::canonicalize(td.path()).expect("canonicalize temp root");
     let canonical_script = fs::canonicalize(&parakeet_script).expect("canonicalize fake script");
     let health = json!({
@@ -663,7 +669,13 @@ fn cold_start_returns_immediately_and_correlates_readiness_event() {
     let screenshot_source = td.path().join("source-shots");
     fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
     let parakeet_script = td.path().join("fake_parakeet.py");
-    fs::write(&parakeet_script, "# fake\n").expect("write fake parakeet script");
+    // The spawn guard requires a script that speaks the server protocol;
+    // the fake advertises the flags without implementing anything.
+    fs::write(
+        &parakeet_script,
+        "# fake: supports --unix-socket --startup-instance-id\n",
+    )
+    .expect("write fake parakeet script");
     write_executable(&fake_bin.join("curl"), "#!/usr/bin/env bash\nexit 22\n");
     write_executable(
         &fake_bin.join("python3"),

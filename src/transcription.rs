@@ -560,6 +560,28 @@ fn spawn_parakeet_server(
     trigger_session_id: Option<&str>,
     trigger_action: &str,
 ) -> ParakeetServerSpawn {
+    // A stale RIFF_PARAKEET_SCRIPT (old checkout, synced dotfiles) chokes on
+    // the modern server flags and dies before binding, which surfaces only as
+    // an opaque "server_unavailable" much later. Refuse it up front and name
+    // the offending path instead.
+    let script_supports_server = fs::read_to_string(script_path)
+        .map(|src| src.contains("--unix-socket") && src.contains("--startup-instance-id"))
+        .unwrap_or(false);
+    if !script_supports_server {
+        return ParakeetServerSpawn::Failed {
+            error: app_error(
+                1,
+                format!(
+                    "Transcription script {} does not support the Parakeet server protocol \
+                     (missing --unix-socket/--startup-instance-id). It is probably an old copy \
+                     configured via RIFF_PARAKEET_SCRIPT; unset that to use the bundled script.",
+                    script_path.display()
+                ),
+            ),
+            instance_id: None,
+        };
+    }
+
     let pid_file = parakeet_server_pid_file();
     let base_url = parakeet_server_base_url();
 
