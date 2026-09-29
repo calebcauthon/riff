@@ -19,6 +19,7 @@ mod engine;
 mod error;
 mod events;
 mod history;
+mod hotkeys;
 mod models;
 mod paths;
 mod reporting;
@@ -2911,6 +2912,7 @@ fn dispatch(cli: &Cli) -> Result<i32, AppError> {
         Commands::Loud => cmd_loud(cli),
         Commands::Status => cmd_status(cli),
         Commands::Hooks => cmd_hooks(cli),
+        Commands::Hotkeys(args) => hotkeys::cmd_hotkeys(cli, args),
         Commands::Perf(args) => cmd_perf(cli, args),
         Commands::List(args) => cmd_list(cli, args),
         Commands::Copy(args) => cmd_copy(cli, args),

@@ -86,6 +86,8 @@ pub enum Commands {
     Status,
     /// Show configured output hooks and transcription commands
     Hooks,
+    /// Set up global hotkeys via skhd: status (default), install, or remove
+    Hotkeys(HotkeysArgs),
     /// Show startup/shutdown timing summary from perf log
     Perf(PerfArgs),
     #[command(hide = true, name = "watch-clipboard")]
@@ -100,6 +102,13 @@ pub enum Commands {
     Daemon(DaemonArgs),
     /// Append an event to the global bus
     Emit(EmitArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct HotkeysArgs {
+    /// What to do: show status, install the skhd bindings, or remove them
+    #[arg(value_parser = ["status", "install", "remove"], default_value = "status")]
+    pub action: String,
 }
 
 #[derive(Args, Debug)]
@@ -463,6 +472,7 @@ impl Commands {
             Commands::Loud => "loud",
             Commands::Status => "status",
             Commands::Hooks => "hooks",
+            Commands::Hotkeys(_) => "hotkeys",
             Commands::Perf(_) => "perf",
             Commands::WatchClipboard(_) => "watch-clipboard",
             Commands::WatchMaxDuration(_) => "watch-max-duration",
@@ -525,6 +535,7 @@ impl Commands {
             Commands::Show(a) => json!({ "session_id": a.session_id }),
             Commands::Html(a) => json!({ "session_id": a.session_id }),
             Commands::Perf(a) => json!({ "n": a.n }),
+            Commands::Hotkeys(a) => json!({ "action": a.action }),
             Commands::ScreenshotUse(a) => json!({
                 "session_id": a.session_id,
                 "shot_id": a.shot_id,

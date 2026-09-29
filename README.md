@@ -592,9 +592,24 @@ riff sounds
 
 ## Hotkeys
 
-Riff does not require a hotkey daemon, but it works well with skhd, Raycast, Alfred, Hammerspoon, Keyboard Maestro, or any launcher that can run shell commands.
+The fastest way to get global hotkeys is the built-in installer, which writes an skhd binding block and starts the service:
 
-Example skhd setup using the Homebrew-installed `riff` binary:
+```bash
+brew install koekeishiya/formulae/skhd
+riff hotkeys install
+```
+
+That gives you:
+
+- `alt+/` — toggle recording (start if idle, stop if active)
+- `alt+'` — toggle + paste the transcript into the focused app
+- `alt+;` — toggle + open the HTML report
+
+The bindings live between `# >>> riff hotkeys >>>` markers in your skhd config; everything outside the markers is left alone. `riff hotkeys` shows status, `riff hotkeys remove` uninstalls the block. On first run macOS asks you to grant skhd Accessibility access (System Settings -> Privacy & Security -> Accessibility).
+
+Riff does not require a hotkey daemon, though: it also works with Raycast, Alfred, Hammerspoon, Keyboard Maestro, or any launcher that can run shell commands.
+
+Equivalent manual skhd setup using the Homebrew-installed `riff` binary:
 
 ```text
 # toggle: start if idle, stop if active
