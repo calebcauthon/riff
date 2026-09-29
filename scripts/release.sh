@@ -364,7 +364,9 @@ run_or_echo cargo build --release --jobs "$CARGO_JOBS"
 
 if [[ "$SKIP_TESTS" -eq 0 ]]; then
   echo "[riff-release] Running cargo test"
-  run_or_echo cargo test --jobs "$CARGO_JOBS"
+  # Serial test threads: the smoke suite spawns real process trees per test,
+  # and parallel runs have crashed a 16GB machine (see AGENTS.md).
+  run_or_echo cargo test --jobs "$CARGO_JOBS" -- --test-threads=1
 else
   echo "[riff-release] Skipping cargo test (--skip-tests)"
 fi
