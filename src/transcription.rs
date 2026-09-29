@@ -214,7 +214,7 @@ pub(crate) fn parakeet_server_base_url() -> String {
         .unwrap_or_else(|| format!("unix://{}", normalized_path(&parakeet_server_socket_file())))
 }
 
-fn resolve_parakeet_model_revision() -> String {
+pub(crate) fn resolve_parakeet_model_revision() -> String {
     env::var("RIFF_PARAKEET_MODEL_REVISION")
         .ok()
         .map(|v| v.trim().to_string())

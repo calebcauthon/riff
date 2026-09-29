@@ -1,7 +1,5 @@
 use crate::cli::{Cli, StartArgs, StopArgs};
-use crate::engine::{
-    audio_elapsed_sec, engine_for, resolve_engine_id, StopCtx,
-};
+use crate::engine::{audio_elapsed_sec, engine_for, resolve_engine_id, StopCtx};
 use crate::error::{app_error, AppError};
 use crate::history::read_jsonl_values;
 use crate::models::{ClipboardMeta, SessionState, ShotMeta};

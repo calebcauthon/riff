@@ -433,6 +433,16 @@ fn monitor_clipboard_loop(args: &WatchClipboardArgs) -> Result<(), AppError> {
     let mut next_id = args.start_id.saturating_add(1);
 
     loop {
+        // Orphan guard: the session directory disappearing means nobody will
+        // ever SIGTERM us (deleted test roots, cleaned sessions). Exit instead
+        // of polling the clipboard forever.
+        if Path::new(&events_path)
+            .parent()
+            .map(|dir| !dir.exists())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
         let Some(current_raw) = read_clipboard_text() else {
             thread::sleep(Duration::from_millis(args.poll_ms.max(100)));
             continue;
@@ -514,8 +524,45 @@ pub(crate) fn stop_clipboard_watcher(pid: i32, cli: &Cli) {
     print_verbose(cli, format!("Clipboard watcher pid={pid} sent SIGTERM."));
 }
 
-fn transcription_worker_enabled() -> bool {
-    bool_env_enabled("RIFF_LIVE_TRANSCRIBE", false)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TranscriptionWatcherMode {
+    /// No live watcher: everything is transcribed at stop.
+    Disabled,
+    /// Watcher tails the WAV and transcribes chunks via the warm Parakeet
+    /// server, so no second model copy is ever loaded.
+    Server,
+    /// Legacy opt-in: watcher loads its own model in-process. Only reachable
+    /// when RIFF_LIVE_TRANSCRIBE=1 while the Parakeet server is disabled.
+    InProcess,
+}
+
+/// Live transcription defaults to ON (server mode) whenever the warm Parakeet
+/// server is enabled: chunks are transcribed while you talk, so `riff stop`
+/// only owes the tail since the last silence cut. `RIFF_LIVE_TRANSCRIBE=0`
+/// turns it off; `=1` forces it on even without the server (in-process model).
+pub(crate) fn transcription_watcher_mode() -> TranscriptionWatcherMode {
+    use TranscriptionWatcherMode::*;
+    let server = crate::transcription::parakeet_server_enabled();
+    let raw = env::var("RIFF_LIVE_TRANSCRIBE")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase());
+    match raw.as_deref() {
+        Some("0") | Some("false") | Some("off") | Some("no") => Disabled,
+        Some("1") | Some("true") | Some("on") | Some("yes") => {
+            if server {
+                Server
+            } else {
+                InProcess
+            }
+        }
+        _ => {
+            if server {
+                Server
+            } else {
+                Disabled
+            }
+        }
+    }
 }
 
 pub(crate) const DEFAULT_MAX_SESSION_SEC: f64 = 300.0;
@@ -729,7 +776,7 @@ fn python_has_parakeet_deps(bin: &str) -> bool {
     matches!(out, Ok(o) if o.status.success())
 }
 
-fn resolve_watcher_python_bin() -> (Option<String>, Vec<String>, bool) {
+fn resolve_watcher_python_bin(require_deps: bool) -> (Option<String>, Vec<String>, bool) {
     let cache_file = watcher_python_cache_file();
     if let Ok(cached) = fs::read_to_string(&cache_file) {
         let cached = cached.trim();
@@ -757,8 +804,10 @@ fn resolve_watcher_python_bin() -> (Option<String>, Vec<String>, bool) {
             continue;
         }
         let supported = python_supported_for_parakeet(candidate);
+        // Server-mode watchers only need the stdlib: the model runs in the
+        // warm server process, so a missing local NeMo must not disable them.
         let deps_ok = if supported {
-            python_has_parakeet_deps(candidate)
+            !require_deps || python_has_parakeet_deps(candidate)
         } else {
             false
         };
@@ -777,7 +826,12 @@ fn resolve_watcher_python_bin() -> (Option<String>, Vec<String>, bool) {
             }
         ));
         if supported && deps_ok {
-            let _ = fs::write(&cache_file, format!("{candidate}\n"));
+            // Only cache pythons whose NeMo deps were actually verified, so a
+            // server-mode (stdlib-only) hit can never poison the cache for a
+            // later in-process run.
+            if require_deps {
+                let _ = fs::write(&cache_file, format!("{candidate}\n"));
+            }
             return (Some(candidate.clone()), considered, false);
         }
     }
@@ -798,16 +852,22 @@ fn append_transcription_watcher_event(state: &SessionState, payload: Value) {
 }
 
 pub(crate) fn spawn_transcription_watcher(state: &SessionState, cli: &Cli) -> Option<i32> {
-    if !transcription_worker_enabled() {
+    let mode = transcription_watcher_mode();
+    if mode == TranscriptionWatcherMode::Disabled {
+        let explicit_off = env::var("RIFF_LIVE_TRANSCRIBE").is_ok();
         print_verbose(
             cli,
-            "Transcription watcher disabled by RIFF_LIVE_TRANSCRIBE.",
+            if explicit_off {
+                "Transcription watcher disabled by RIFF_LIVE_TRANSCRIBE."
+            } else {
+                "Transcription watcher not started: Parakeet server disabled and live transcription not requested."
+            },
         );
         append_transcription_watcher_event(
             state,
             json!({
                 "type": "transcription_watcher_not_started",
-                "reason": "disabled_by_env",
+                "reason": if explicit_off { "disabled_by_env" } else { "parakeet_server_disabled" },
             }),
         );
         return None;
@@ -830,23 +890,6 @@ pub(crate) fn spawn_transcription_watcher(state: &SessionState, cli: &Cli) -> Op
         );
         return None;
     }
-
-    let (python_bin, python_candidates, python_from_cache) = resolve_watcher_python_bin();
-    let Some(python_bin) = python_bin else {
-        print_verbose(
-            cli,
-            "Transcription watcher not started because no supported python (3.10-3.12) was found.",
-        );
-        append_transcription_watcher_event(
-            state,
-            json!({
-                "type": "transcription_watcher_not_started",
-                "reason": "python_incompatible_or_unavailable_or_missing_parakeet_deps",
-                "python_candidates": python_candidates,
-            }),
-        );
-        return None;
-    };
 
     let local_script = default_parakeet_script();
     let resolved_script = resolve_parakeet_script(None);
@@ -887,6 +930,26 @@ pub(crate) fn spawn_transcription_watcher(state: &SessionState, cli: &Cli) -> Op
             );
             return None;
         }
+    };
+
+    // Python resolution runs after the cheap script gate so a session that
+    // cannot use the watcher never spawns probe processes.
+    let (python_bin, python_candidates, python_from_cache) =
+        resolve_watcher_python_bin(mode == TranscriptionWatcherMode::InProcess);
+    let Some(python_bin) = python_bin else {
+        print_verbose(
+            cli,
+            "Transcription watcher not started because no supported python (3.10-3.12) was found.",
+        );
+        append_transcription_watcher_event(
+            state,
+            json!({
+                "type": "transcription_watcher_not_started",
+                "reason": "python_incompatible_or_unavailable_or_missing_parakeet_deps",
+                "python_candidates": python_candidates,
+            }),
+        );
+        return None;
     };
 
     let session_dir = PathBuf::from(&state.session_dir);
@@ -956,6 +1019,13 @@ pub(crate) fn spawn_transcription_watcher(state: &SessionState, cli: &Cli) -> Op
         poll_ms.to_string(),
         "--quiet".to_string(),
     ];
+    let mut watcher_args = watcher_args;
+    if mode == TranscriptionWatcherMode::Server {
+        watcher_args.push("--transcribe-base-url".to_string());
+        watcher_args.push(crate::transcription::parakeet_server_base_url());
+        watcher_args.push("--model-revision".to_string());
+        watcher_args.push(crate::transcription::resolve_parakeet_model_revision());
+    }
     let command_preview = format!(
         "{} {}",
         shell_escape(&python_bin),

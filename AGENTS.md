@@ -101,7 +101,7 @@ ffmpeg/AVFoundation       screenshots + clipboard            finalize processes
 - `scripts/parakeet_transcribe.py` has three modes:
   - one-shot transcription of an audio file;
   - a persistent `/health` + `/transcribe` HTTP server with one loaded model;
-  - an optional live watcher that detects silence, extracts chunks with ffmpeg, transcribes them, and appends chunk events.
+  - a live watcher that detects silence, extracts chunks with ffmpeg, transcribes them, and appends chunk events. By default the watcher transcribes chunks through the warm Parakeet server (`--transcribe-base-url`), so it never loads a second model copy; it waits for server health at startup, exits cleanly on server failure (leaving the un-committed tail to the stop-time flush), and finalizes immediately on `SIGUSR2`/`SIGTERM`.
 
 In server mode, Rust passes a correlated startup instance ID, spawn timestamp, trigger, and `perf.jsonl` path. Python records one durable `parakeet_server_startup` event after binding or on import/model/bind failure, and exposes the successful startup timing object through `/health`. This records the full cold start without making `riff start` wait for readiness.
 - `scripts/riff_web_server.py` serves reports and supports local report actions such as selecting a screenshot variant or saving an annotation. It is a file/report server, not an inference service, and shuts down after an idle timeout.
@@ -114,7 +114,7 @@ The Parakeet server uses a mode-`0600` Unix socket below `RIFF_ROOT` by default;
 
 `riff start` refuses to overlap a live session, creates `sessions/<timestamp>/`, detects the macOS screenshot folder and audio input, and starts ffmpeg with AVFoundation. Audio is written as 16 kHz, mono, 16-bit PCM WAV.
 
-It then writes `active_session.json`, starts a clipboard watcher by default, optionally starts live transcription when `RIFF_LIVE_TRANSCRIBE=1`, and begins warming the Parakeet server in the background. Start returns a structured warmup outcome immediately; a newly spawned Python server later appends its correlated ready/error event. The clipboard watcher is another invocation of the Riff binary that polls `pbpaste` and appends changed, non-empty text to `events.jsonl` with an audio-relative timestamp.
+It then writes `active_session.json`, starts a clipboard watcher by default, starts the live transcription watcher (on by default whenever the Parakeet server is enabled; `RIFF_LIVE_TRANSCRIBE=0` disables it), and begins warming the Parakeet server in the background. Start returns a structured warmup outcome immediately; a newly spawned Python server later appends its correlated ready/error event. The clipboard watcher is another invocation of the Riff binary that polls `pbpaste` and appends changed, non-empty text to `events.jsonl` with an audio-relative timestamp.
 
 Start also spawns a max-duration watchdog (`riff watch-max-duration`, another invocation of the binary) unless `RIFF_MAX_SESSION_SEC=0`. It exits as soon as its recorder pid dies, and otherwise waits until the session has run for the cap, then appends a `max_duration_reached` event and spawns a normal detached `riff stop` — so a forgotten session still transcribes and runs its hooks. It only ever fires when the active state still names both its session id and its recorder pid, and `stop`/`fork`/stale-session cleanup SIGTERM it through `max_duration_watcher_pid`.
 
@@ -124,14 +124,14 @@ Start also spawns a max-duration watchdog (`riff watch-max-duration`, another in
 
 Screenshots taken with normal macOS shortcuts are handled later: stop scans the configured screenshot folder for supported images whose modification times fall inside the session window, copies them into the session, records an event, and deletes the source copy.
 
-`riff chunk` can transcribe audio since the last cursor while recording continues. Pause/unpause controls transcription capture and updates state/events. The optional live watcher divides growing audio at silence boundaries and incrementally maintains `transcript.txt`.
+`riff chunk` can transcribe audio since the last cursor while recording continues. Pause/unpause controls transcription capture and updates state/events. The live watcher divides growing audio at silence boundaries, transcribes each chunk through the warm server, and incrementally maintains `transcript.txt` — so most inference is already done before stop. The flush cursor is derived from committed (`ok`/`skipped`) `transcript_chunk` events, never from the stale in-state cursor alone, so watcher chunks are not re-transcribed at stop.
 
 ### 3. Stop and transcription selection
 
 `riff stop` stops the clipboard watcher and ffmpeg recorder, asks a live watcher to flush and exit, adopts matching screenshots, and selects one transcription route:
 
 1. A configured custom transcription command wins.
-2. If live/manual chunks exist, Riff loads and flushes the accumulated chunk transcript.
+2. If a live watcher ran or live/manual chunks exist, Riff signals the watcher to finalize (`SIGUSR2`), waits for it, then flushes only the tail past the committed chunk cursor — normally a no-op or a sub-second transcription.
 3. Otherwise Riff uses the built-in Parakeet path: healthy warm server first, then one-shot Python fallback.
 
 The result may pass through a single post-transcription command and then an ordered output-hook chain. Hook metadata includes session timing, audio, screenshots, clipboard captures, and transcription metadata. Hooks mutate a temporary transcript file; the canonical result is persisted as `transcript.txt`.
@@ -192,7 +192,7 @@ Important switches:
 - `RIFF_PARAKEET_SERVER` / `RIFF_PARAKEET_SERVER_URL`: warm inference helper; enabled by default on `$RIFF_ROOT/parakeet-server.sock`, with an explicit URL selecting TCP compatibility mode.
 - `RIFF_WEB_SERVER` / `RIFF_WEB_SERVER_URL`: report helper; enabled by default at port 8766.
 - `RIFF_CLIPBOARD_MONITOR`: clipboard watcher; enabled by default.
-- `RIFF_LIVE_TRANSCRIBE`: silence-aware incremental transcription; disabled by default.
+- `RIFF_LIVE_TRANSCRIBE`: silence-aware incremental transcription; on by default (server mode) when the Parakeet server is enabled, `0` disables, `1` forces it on (loading an in-process model when the server is disabled).
 - `RIFF_MAX_SESSION_SEC`: auto-stop watchdog cap in seconds; defaults to 300 (5 minutes), clamped to 5-86400, `0` disables it.
 - `RIFF_EVENT_BUS`: global event bus; enabled by default, `0` disables all bus writes.
 - `RIFF_EVENT_BUS_MAX_BYTES`: bus rotation cap; defaults to 8 MiB.
@@ -206,9 +206,11 @@ Use these checks for normal Rust changes:
 
 ```bash
 cargo fmt --check
-cargo test
+nice -n 19 cargo test -- --test-threads=1
 cargo build --release
 ```
+
+Run the test suite serially. Most smoke tests spawn real process trees (riff binaries, fake recorders, watchers), so default parallelism can put dozens of concurrent processes on the machine at once — enough to crash a memory-tight laptop. Serial is also faster in practice because the parallel run loses more to contention than it gains.
 
 `tests/cli_smoke.rs` uses temporary roots and fake macOS tools for command-level tests. Keep tests isolated by setting `RIFF_ROOT`, disabling background servers and beeps, and avoiding a user's real session tree. Real latency testing is different: follow `PRACTICAL_TESTING.md` and verify that the measured run actually used `transcription.method = parakeet_server` with healthy pre/post checks.
 

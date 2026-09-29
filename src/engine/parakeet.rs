@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 
 use crate::cli::Cli;
 use crate::engine::{
-    append_transcript_text, audio_elapsed_sec, load_chunked_transcript, next_transcript_chunk_id,
-    StopCtx, TranscriptionEngine,
+    append_transcript_text, audio_elapsed_sec, committed_chunk_end_sec, load_chunked_transcript,
+    next_transcript_chunk_id, StopCtx, TranscriptionEngine,
 };
 use crate::error::{app_error, AppError};
 use crate::history::read_jsonl_values;
@@ -26,7 +26,7 @@ use crate::transcription::{
     transcribe_via_parakeet_server,
 };
 use crate::{
-    append_session_event, command_exists, now_iso, print_verbose, round3,
+    append_session_event, command_exists, now_iso, print_verbose, round3, send_signal,
     spawn_transcription_watcher, stop_transcription_watcher, wait_for_transcription_watcher,
 };
 
@@ -59,6 +59,9 @@ impl TranscriptionEngine for ParakeetEngine {
         let mut forced_stop = false;
         let mut watcher_wait_ms = 0.0;
         if let Some(pid) = state.transcription_watcher_pid {
+            // Ask for an immediate finalize instead of waiting out the
+            // watcher's poll interval: it flushes the tail and exits.
+            let _ = send_signal(pid, libc::SIGUSR2);
             print_verbose(
                 cli,
                 format!("Waiting up to 12s for transcription watcher pid={pid} to finish."),
@@ -70,7 +73,9 @@ impl TranscriptionEngine for ParakeetEngine {
                 forced_stop = true;
                 print_verbose(
                     cli,
-                    format!("Transcription watcher pid={pid} did not finish in time; forcing stop."),
+                    format!(
+                        "Transcription watcher pid={pid} did not finish in time; forcing stop."
+                    ),
                 );
                 stop_transcription_watcher(pid, cli);
             }
@@ -126,7 +131,10 @@ impl TranscriptionEngine for ParakeetEngine {
         if let Some(obj) = meta.as_object_mut() {
             obj.insert("engine".to_string(), json!("parakeet"));
             obj.insert("forced_watcher_stop".to_string(), json!(forced_stop));
-            obj.insert("watcher_wait_ms".to_string(), json!(round3(watcher_wait_ms)));
+            obj.insert(
+                "watcher_wait_ms".to_string(),
+                json!(round3(watcher_wait_ms)),
+            );
             obj.insert("stop_flush_ms".to_string(), json!(stop_flush_ms));
             obj.insert("stop_flush".to_string(), stop_flush_meta);
         }
@@ -302,7 +310,14 @@ pub(crate) fn process_manual_chunk(
 
     let events = read_jsonl_values(&events_path);
     let chunk_id = next_transcript_chunk_id(&events);
-    let start_sec = state.transcription_cursor_sec.max(0.0);
+    // The live watcher commits chunks without updating our state, so start
+    // from whichever cursor is further along. Flushing from the stale state
+    // cursor would re-transcribe audio the watcher already committed and
+    // duplicate its text in the transcript.
+    let start_sec = state
+        .transcription_cursor_sec
+        .max(committed_chunk_end_sec(&events))
+        .max(0.0);
     let effective_end_sec = forced_end_sec.unwrap_or_else(|| audio_elapsed_sec(state));
 
     if effective_end_sec <= start_sec + 0.05 {

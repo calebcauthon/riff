@@ -67,8 +67,8 @@ Also written to the session's own `events.jsonl`.
 | `screenshot_taken` | `shot` |
 | `screenshot_moved` | `stop` adopting shots from the macOS screenshot folder |
 | `clipboard_copied` | `watch-clipboard` |
-| `transcript_chunk` | `chunk` and the live transcription watcher |
-| `transcript_probe`, `transcription_worker_stopped` | live transcription watcher |
+| `transcript_chunk` | `chunk` and the live transcription watcher. Live chunks carry `method: parakeet_server` when transcribed via the warm server (the default), `parakeet_python` when the watcher loaded its own model. Only `ok`/`skipped` chunks advance the committed cursor that the stop-time flush resumes from; `error` chunks leave their region to be re-transcribed at stop. |
+| `transcript_probe`, `transcription_worker_stopped` | live transcription watcher. `transcription_worker_stopped` reasons include `session_stopping_seen`, `server_unavailable` (warm server never became healthy with the requested model), and `server_transcribe_failed` (watcher exits so stop re-transcribes from the last committed chunk). |
 | `transcription_watcher_started` / `_not_started` / `_exited_early` | `start` |
 | `mic_listening` | `watch-max-duration`, once recorded audio bytes first flow (`confirm_ms`, `audio_bytes`) |
 | `max_duration_reached` | `watch-max-duration` |

@@ -26,9 +26,7 @@ use crate::error::{app_error, AppError};
 use crate::history::read_jsonl_values;
 use crate::models::SessionState;
 use crate::transcription::{resolve_python_bin, resource_dir};
-use crate::{
-    append_session_event, now_iso, print_verbose, process_is_alive, round3, send_signal,
-};
+use crate::{append_session_event, now_iso, print_verbose, process_is_alive, round3, send_signal};
 
 /// `SIGUSR1` asks the sidecar to commit the current segment (chunk / pause).
 const SIG_COMMIT: i32 = libc::SIGUSR1;
@@ -147,7 +145,10 @@ impl TranscriptionEngine for ElevenLabsEngine {
         let end_sec = forced_end_sec.unwrap_or_else(|| crate::engine::audio_elapsed_sec(state));
         let start_sec = state.transcription_cursor_sec.max(0.0);
 
-        let Some(pid) = state.transcription_watcher_pid.filter(|p| process_is_alive(*p)) else {
+        let Some(pid) = state
+            .transcription_watcher_pid
+            .filter(|p| process_is_alive(*p))
+        else {
             return Ok(json!({
                 "status": "error",
                 "reason": "stream_sidecar_not_running",
@@ -192,8 +193,11 @@ impl TranscriptionEngine for ElevenLabsEngine {
                     // Wait for the transcript to be final, not for the process
                     // to exit. Python interpreter teardown is ~150ms of pure
                     // latency that buys nothing once the text is on disk.
-                    if wait_for_event(&events_path, "elevenlabs_stream_finished", finalize_timeout())
-                    {
+                    if wait_for_event(
+                        &events_path,
+                        "elevenlabs_stream_finished",
+                        finalize_timeout(),
+                    ) {
                         // Reap in the background so shutdown stays off the
                         // critical path.
                         let _ = send_signal(pid, libc::SIGTERM);

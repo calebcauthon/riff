@@ -149,6 +149,32 @@ pub(crate) fn audio_elapsed_sec(state: &SessionState) -> f64 {
         .unwrap_or_else(|| (crate::unix_now() - state.started_at_epoch).max(0.0))
 }
 
+/// Highest `end_sec` across committed (`ok` / `skipped`) `transcript_chunk`
+/// events. This is the authoritative "transcribed up to here" cursor: the live
+/// watcher advances only in its own process, so the state's
+/// `transcription_cursor_sec` goes stale and flushing from it would
+/// re-transcribe (and duplicate) everything the watcher already committed.
+pub(crate) fn committed_chunk_end_sec(events: &[Value]) -> f64 {
+    let mut max_end = 0.0f64;
+    for e in events {
+        if e.get("type").and_then(|v| v.as_str()) != Some("transcript_chunk") {
+            continue;
+        }
+        if !matches!(
+            e.get("status").and_then(|v| v.as_str()),
+            Some("ok") | Some("skipped")
+        ) {
+            continue;
+        }
+        if let Some(end) = e.get("end_sec").and_then(|v| v.as_f64()) {
+            if end > max_end {
+                max_end = end;
+            }
+        }
+    }
+    max_end
+}
+
 pub(crate) fn next_transcript_chunk_id(events: &[Value]) -> usize {
     let mut max_id = 0usize;
     for e in events {
@@ -281,6 +307,22 @@ mod tests {
     fn merge_manual_chunk_text_trims_outer_whitespace() {
         let merged = merge_manual_chunk_text("  first  ", "  second  ");
         assert_eq!(merged, "first\n\nsecond");
+    }
+
+    #[test]
+    fn committed_chunk_end_sec_ignores_errors_and_other_events() {
+        let events = vec![
+            serde_json::json!({"type": "transcript_chunk", "status": "ok", "end_sec": 10.5}),
+            serde_json::json!({"type": "transcript_chunk", "status": "skipped", "end_sec": 14.0}),
+            serde_json::json!({"type": "transcript_chunk", "status": "error", "end_sec": 99.0}),
+            serde_json::json!({"type": "session_stopping", "end_sec": 200.0}),
+        ];
+        assert_eq!(committed_chunk_end_sec(&events), 14.0);
+    }
+
+    #[test]
+    fn committed_chunk_end_sec_is_zero_without_chunks() {
+        assert_eq!(committed_chunk_end_sec(&[]), 0.0);
     }
 
     #[test]

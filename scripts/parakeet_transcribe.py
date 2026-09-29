@@ -15,18 +15,21 @@ Server mode (keeps model loaded for faster subsequent transcriptions):
 from __future__ import annotations
 
 import argparse
+import http.client
 import importlib.metadata
 import itertools
 import json
 import os
 import re
 import shutil
+import signal
 import socket
 import socketserver
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -103,6 +106,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--startup-trigger-session-id", help=argparse.SUPPRESS)
     p.add_argument("--startup-trigger-action", help=argparse.SUPPRESS)
     p.add_argument("--startup-perf-log", help=argparse.SUPPRESS)
+    p.add_argument(
+        "--transcribe-base-url",
+        help=(
+            "Warm Parakeet server base URL (unix:///path or http://host:port). "
+            "Watch mode then transcribes chunks via this server instead of "
+            "loading its own model."
+        ),
+    )
     p.add_argument("--events-path", help="events.jsonl path (watch mode)")
     p.add_argument("--session-id", help="session id (watch mode)")
     p.add_argument("--started-at-epoch", type=float, help="session start unix epoch sec (watch mode)")
@@ -673,6 +684,114 @@ def run_one_shot(args: argparse.Namespace) -> int:
     return 0
 
 
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """HTTP over an AF_UNIX socket, mirroring Rust's `curl --unix-socket`."""
+
+    def __init__(self, socket_path: str, timeout: float):
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self._socket_path)
+        self.sock = sock
+
+
+def server_connection(base_url: str, timeout: float) -> http.client.HTTPConnection:
+    if base_url.startswith("unix://"):
+        return _UnixHTTPConnection(base_url[len("unix://") :], timeout)
+    parsed = urllib.parse.urlsplit(base_url)
+    if parsed.scheme != "http" or not parsed.hostname:
+        raise AppError(f"Unsupported transcribe server URL: {base_url}", code=2)
+    return http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
+
+
+def server_request(
+    base_url: str,
+    method: str,
+    route: str,
+    payload: dict[str, Any] | None,
+    timeout: float,
+) -> dict[str, Any]:
+    conn = server_connection(base_url, timeout)
+    try:
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        conn.request(method, route, body=body, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read()
+        parsed = json.loads(raw.decode("utf-8", "replace") or "{}")
+        if not isinstance(parsed, dict):
+            raise AppError(f"Unexpected server response for {route}", code=21)
+        parsed["_http_status"] = resp.status
+        return parsed
+    finally:
+        conn.close()
+
+
+def wait_for_transcribe_server(
+    base_url: str,
+    args: argparse.Namespace,
+    finalize: threading.Event,
+    orphaned: "callable[[], bool] | None" = None,
+) -> dict[str, Any] | None:
+    """Poll /health until a matching warm server is ready or finalize is set.
+
+    Waiting (instead of exiting) matters because `riff start` warms the server
+    in the background: on a cold start the model may take many seconds to load
+    while the recording is already running. Audio accumulates in the WAV, so
+    starting late only means the first chunk is bigger.
+    """
+    last_log = ""
+    while not finalize.is_set():
+        if orphaned is not None and orphaned():
+            return None
+        health: dict[str, Any] | None
+        try:
+            health = server_request(base_url, "GET", "/health", None, timeout=2.0)
+        except Exception:
+            health = None
+        if health is not None and health.get("ok") and health.get("_http_status") == 200:
+            if health.get("model") == args.model and str(
+                health.get("model_revision") or ""
+            ) == str(args.model_revision or "").strip():
+                return health
+            msg = f"waiting: server model={health.get('model')!r}, want {args.model!r}"
+        else:
+            msg = f"waiting for transcribe server at {base_url}"
+        if msg != last_log:
+            print(msg, flush=True)
+            last_log = msg
+        finalize.wait(0.5)
+    return None
+
+
+def server_transcribe_chunk(
+    base_url: str, identity: dict[str, Any], chunk_audio: Path
+) -> str:
+    """Transcribe one chunk file via the warm server; raises AppError on failure."""
+    payload = {
+        "audio": str(chunk_audio),
+        "out_txt": None,
+        "protocol_version": identity.get("protocol_version"),
+        "server_instance_id": identity.get("server_instance_id"),
+        "riff_root": identity.get("riff_root"),
+        "model": identity.get("model"),
+        "model_revision": identity.get("model_revision"),
+        "requested_device": identity.get("requested_device"),
+        "device": identity.get("device"),
+    }
+    resp = server_request(base_url, "POST", "/transcribe", payload, timeout=60.0)
+    if not resp.get("ok"):
+        raise AppError(
+            f"server transcribe failed (http {resp.get('_http_status')}): "
+            f"{resp.get('error') or resp}",
+            code=21,
+        )
+    return str(resp.get("text") or "")
+
+
 def run_watch_audio(args: argparse.Namespace) -> int:
     if not args.audio or not args.out_txt or not args.events_path or not args.session_id:
         raise AppError(
@@ -700,9 +819,55 @@ def run_watch_audio(args: argparse.Namespace) -> int:
     silence_db = float(args.silence_db)
     poll_sec = max(0.2, float(args.poll_ms) / 1000.0)
 
-    model, actual_device = load_model(
-        args.model, args.device, args.model_revision, args.verbose, args.quiet
-    )
+    # Stop asks for an immediate finalize via SIGUSR2 (or SIGTERM); the event
+    # also interrupts poll sleeps so the tail flush starts right away instead
+    # of waiting out the poll interval.
+    finalize = threading.Event()
+
+    def _request_finalize(_signum: int, _frame: Any) -> None:
+        finalize.set()
+
+    signal.signal(signal.SIGTERM, _request_finalize)
+    signal.signal(signal.SIGUSR2, _request_finalize)
+
+    def orphaned() -> bool:
+        # The session directory disappearing means nobody will ever signal us
+        # (deleted test roots, cleaned-up sessions, removed RIFF_ROOT). Exit
+        # instead of polling forever as an orphan.
+        return not source_audio.parent.exists() or not events_path.parent.exists()
+
+    server_url = (args.transcribe_base_url or "").strip()
+    model: Any = None
+    server_identity: dict[str, Any] | None = None
+    if server_url:
+        # Server mode: never load a second model copy in this process.
+        server_identity = wait_for_transcribe_server(server_url, args, finalize, orphaned)
+        if server_identity is None:
+            if orphaned():
+                print("session directory removed; exiting watcher", flush=True)
+                return 0
+            append_event(
+                events_path,
+                {
+                    "ts": iso_now(),
+                    "type": "transcription_worker_stopped",
+                    "session_id": args.session_id,
+                    "reason": "server_unavailable",
+                    "chunks": 0,
+                    "processed_sec": 0.0,
+                },
+            )
+            return 0
+        actual_device = str(server_identity.get("device") or "server")
+    else:
+        model, actual_device = load_model(
+            args.model, args.device, args.model_revision, args.verbose, args.quiet
+        )
+
+    def transcribe_chunk(chunk_audio: Path) -> str:
+        if server_identity is not None:
+            return server_transcribe_chunk(server_url, server_identity, chunk_audio)
+        return transcribe_path(model, chunk_audio, args.verbose, args.quiet)
 
     chunk_id = 0
     next_start_sec = 0.0
@@ -710,6 +875,9 @@ def run_watch_audio(args: argparse.Namespace) -> int:
     last_probe_key: tuple[str, int] | None = None
 
     while True:
+        if orphaned():
+            print("session directory removed; exiting watcher", flush=True)
+            return 0
         duration = ffprobe_duration_sec(source_audio)
         available = max(0.0, duration - next_start_sec)
         cut_time, reason, trailing_silence_sec, current_db = detect_cut_time(
@@ -722,7 +890,7 @@ def run_watch_audio(args: argparse.Namespace) -> int:
             silence_db,
         )
 
-        should_stop = stopping_requested(events_path, args.session_id)
+        should_stop = finalize.is_set() or stopping_requested(events_path, args.session_id)
         if should_stop and cut_time is None and available > 0.2:
             cut_time = duration
             reason = "stop_flush"
@@ -751,7 +919,7 @@ def run_watch_audio(args: argparse.Namespace) -> int:
                 continue
 
             try:
-                chunk_text = transcribe_path(model, scratch_audio, args.verbose, args.quiet).strip()
+                chunk_text = transcribe_chunk(scratch_audio).strip()
                 status = "ok" if chunk_text else "skipped"
                 transcript_text = join_chunk_text(transcript_text, chunk_text)
                 out_txt.parent.mkdir(parents=True, exist_ok=True)
@@ -767,6 +935,7 @@ def run_watch_audio(args: argparse.Namespace) -> int:
                         "reason": reason,
                         "model": args.model,
                         "device": actual_device,
+                        "method": "parakeet_server" if server_identity is not None else "parakeet_python",
                         "start_sec": round(next_start_sec, 3),
                         "end_sec": round(cut_time, 3),
                         "chars": len(chunk_text),
@@ -787,6 +956,27 @@ def run_watch_audio(args: argparse.Namespace) -> int:
                         "end_sec": round(cut_time, 3),
                     },
                 )
+                if server_identity is not None:
+                    # Do not advance past the failed region: exiting here leaves
+                    # everything from the last committed chunk onward for the
+                    # stop-time flush, which re-transcribes it — no words lost,
+                    # none duplicated (error chunks never advance the cursor).
+                    append_event(
+                        events_path,
+                        {
+                            "ts": iso_now(),
+                            "type": "transcription_worker_stopped",
+                            "session_id": args.session_id,
+                            "reason": "server_transcribe_failed",
+                            "chunks": chunk_id,
+                            "processed_sec": round(next_start_sec, 3),
+                        },
+                    )
+                    try:
+                        scratch_audio.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    return 0
 
             next_start_sec = cut_time
             continue
@@ -831,7 +1021,7 @@ def run_watch_audio(args: argparse.Namespace) -> int:
                 pass
             return 0
 
-        time.sleep(poll_sec)
+        finalize.wait(poll_sec)
 
 
 PARAKEET_SERVER_PROTOCOL_VERSION = 1

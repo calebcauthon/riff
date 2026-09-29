@@ -16,6 +16,11 @@ fn cmd_with_root(root: &Path) -> Command {
     cmd.env("RIFF_BEEP", "0");
     cmd.env("RIFF_WEB_SERVER", "0");
     cmd.env("RIFF_PARAKEET_SERVER", "0");
+    // Live transcription is on by default when the Parakeet server is
+    // enabled. Force it off for every test so a test that enables the server
+    // can never spawn a real watcher process against a temp root; tests that
+    // want the watcher must opt in explicitly.
+    cmd.env("RIFF_LIVE_TRANSCRIBE", "0");
     cmd
 }
 
@@ -611,6 +616,9 @@ fn start_with_healthy_parakeet_reports_no_cold_start() {
     let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
         .env("RIFF_PARAKEET_SERVER", "1")
         .env("RIFF_CLIPBOARD_MONITOR", "0")
+        // This test is about server warmup: keep the (default-on) live
+        // watcher out so the only python spawn candidate is the warmup path.
+        .env("RIFF_LIVE_TRANSCRIBE", "0")
         .env("RIFF_PYTHON_BIN", fake_bin.join("python3"))
         .env("RIFF_PARAKEET_SCRIPT", &parakeet_script)
         .env(
@@ -1134,6 +1142,91 @@ fn stop_without_chunking_skips_stop_flush_chunk_event() {
     assert!(
         !events_raw.contains(r#""type":"transcript_chunk""#),
         "stop without chunking should not append transcript_chunk event:\n{events_raw}"
+    );
+}
+
+#[test]
+fn stop_flush_resumes_from_committed_chunk_cursor() {
+    // A live watcher commits chunks in its own process; the stop-time flush
+    // must resume from the committed chunk cursor instead of re-transcribing
+    // (and duplicating) everything from zero.
+    let td = tempdir().expect("tempdir");
+    let fake_bin = td.path().join("fake-bin");
+    install_fake_tools(&fake_bin);
+    let screenshot_source = td.path().join("source-shots");
+    fs::create_dir_all(&screenshot_source).expect("create screenshot source dir");
+
+    cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args([
+            "start",
+            "--screenshot-dir",
+            screenshot_source.to_str().expect("path utf8"),
+        ])
+        .assert()
+        .success();
+
+    // Simulate what a live watcher leaves behind: a committed chunk event, the
+    // accumulated transcript, and a (now dead) watcher pid in the state.
+    let state_path = td.path().join("active_session.json");
+    let mut state: Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
+            .expect("parse state");
+    let session_dir = PathBuf::from(state["session_dir"].as_str().expect("session_dir"));
+    state["transcription_watcher_pid"] = json!(99_999_899);
+    fs::write(
+        &state_path,
+        serde_json::to_string(&state).expect("serialize state"),
+    )
+    .expect("write state");
+    let chunk_event = json!({
+        "ts": "2026-01-01T00:00:00.000Z",
+        "type": "transcript_chunk",
+        "id": 1,
+        "mode": "live",
+        "status": "ok",
+        "reason": "silence",
+        "method": "parakeet_server",
+        "start_sec": 0.0,
+        "end_sec": 100_000.0,
+        "chars": 9,
+        "words": 2
+    });
+    let events_path = session_dir.join("events.jsonl");
+    let mut events_raw = fs::read_to_string(&events_path).expect("read events");
+    events_raw.push_str(&format!("{chunk_event}\n"));
+    fs::write(&events_path, events_raw).expect("append chunk event");
+    fs::write(session_dir.join("transcript.txt"), "live text\n").expect("write transcript");
+
+    let out = cmd_with_root_and_fake_path(td.path(), &fake_bin)
+        .args(["--json", "--quiet", "stop"])
+        .output()
+        .expect("run stop --json");
+    assert!(out.status.success(), "stop should succeed");
+    let payload: Value = serde_json::from_slice(&out.stdout).expect("parse stop json");
+    let transcription = payload.get("transcription").expect("transcription meta");
+
+    assert_eq!(
+        transcription.get("method").and_then(|v| v.as_str()),
+        Some("manual_chunked"),
+        "watcher session should use the chunked path: {payload}"
+    );
+    let flush = transcription.get("stop_flush").expect("stop_flush meta");
+    assert_eq!(
+        flush.get("status").and_then(|v| v.as_str()),
+        Some("skipped"),
+        "flush past the committed cursor should find no new audio: {payload}"
+    );
+    assert_eq!(
+        flush.get("start_sec").and_then(|v| v.as_f64()),
+        Some(100_000.0),
+        "flush must resume from the committed chunk end, not zero: {payload}"
+    );
+    let final_transcript =
+        fs::read_to_string(session_dir.join("transcript.txt")).expect("read final transcript");
+    assert_eq!(
+        final_transcript.trim(),
+        "live text",
+        "committed live text must survive stop without duplication"
     );
 }
 
